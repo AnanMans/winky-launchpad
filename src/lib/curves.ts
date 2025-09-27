@@ -1,19 +1,13 @@
 export type CurveType = "LINEAR" | "DEGEN" | "RANDOM";
 
+type LinearOpts = { p0: number; m: number; points?: number };
+type DegenOpts  = { p0: number; k: number; q1: number; q2: number; m1: number; m2: number; points?: number };
+type RandomOpts = { p0: number; steps: number; sMin: number; sMax: number; seed?: number; points?: number };
+
 export function priceLinear(q: number, p0: number, m: number) {
   return p0 + m * q;
 }
-
-export function priceDegen(
-  q: number,
-  p0: number,
-  k: number,
-  q1: number,
-  q2: number,
-  m1: number,
-  m2: number
-) {
-  // q in [0,1] (fraction of curve progress). q1,q2 are boundaries in [0,1].
+export function priceDegen(q: number, p0: number, k: number, q1: number, q2: number, m1: number, m2: number) {
   if (q <= q1) return p0 * Math.exp(k * q);
   const pAtQ1 = p0 * Math.exp(k * q1);
   if (q <= q2) return pAtQ1 + m1 * (q - q1);
@@ -21,7 +15,7 @@ export function priceDegen(
   return pAtQ2 + m2 * (q - q2);
 }
 
-// Tiny deterministic PRNG for Random curve (so chart is stable on refresh)
+// deterministic PRNG used by Random
 function mulberry32(a: number) {
   return function () {
     let t = (a += 0x6d2b79f5);
@@ -31,15 +25,7 @@ function mulberry32(a: number) {
   };
 }
 
-export function priceRandom(
-  q: number,
-  p0: number,
-  steps: number,
-  sMin: number,
-  sMax: number,
-  seed = 42
-) {
-  // q in [0,1]; 'steps' windows; each window has random slope in [sMin,sMax]
+export function priceRandom(q: number, p0: number, steps: number, sMin: number, sMax: number, seed = 42) {
   const rnd = mulberry32(seed);
   const w = 1 / steps;
   let price = p0;
@@ -54,30 +40,24 @@ export function priceRandom(
   return price;
 }
 
-export function priceAt(type: CurveType, q: number, o: any) {
-  if (type === "LINEAR") return priceLinear(q, o.p0, o.m);
-  if (type === "DEGEN") return priceDegen(q, o.p0, o.k, o.q1, o.q2, o.m1, o.m2);
-  return priceRandom(q, o.p0, o.steps, o.sMin, o.sMax, o.seed ?? 42);
+export function priceAt(type: CurveType, q: number, o: LinearOpts | DegenOpts | RandomOpts): number {
+  if (type === "LINEAR") {
+    const { p0, m } = o as LinearOpts;
+    return priceLinear(q, p0, m);
+  }
+  if (type === "DEGEN") {
+    const { p0, k, q1, q2, m1, m2 } = o as DegenOpts;
+    return priceDegen(q, p0, k, q1, q2, m1, m2);
+  }
+  const { p0, steps, sMin, sMax, seed } = o as RandomOpts;
+  return priceRandom(q, p0, steps, sMin, sMax, seed);
 }
 
 export function makeSeries(
   type: CurveType,
-  opts: {
-    points?: number;
-    p0: number;
-    m?: number;
-    k?: number;
-    q1?: number;
-    q2?: number;
-    m1?: number;
-    m2?: number;
-    steps?: number;
-    sMin?: number;
-    sMax?: number;
-    seed?: number;
-  }
+  opts: LinearOpts | DegenOpts | RandomOpts
 ) {
-  const N = opts.points ?? 100;
+  const N = (opts as any).points ?? 100;
   const xs = Array.from({ length: N + 1 }, (_, i) => i / N);
   return xs.map((q) => ({ q, p: priceAt(type, q, opts) }));
 }

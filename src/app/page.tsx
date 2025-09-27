@@ -1,15 +1,18 @@
+import Link from "next/link";
+import Image from "next/image";
+
 export default function Home() {
   return (
     <main className="min-h-screen p-6 md:p-10 max-w-5xl mx-auto grid gap-8">
       <header className="flex items-center justify-between">
-        <a href="/" className="flex items-center gap-2 font-semibold">
-          <img src="/logo.svg" alt="logo" width={28} height={28}/>
+        <Link href="/" className="flex items-center gap-2 font-semibold">
+          <Image src="/logo.svg" alt="logo" width={28} height={28} />
           <span>Winky Launchpad</span>
-        </a>
+        </Link>
         <nav className="flex items-center gap-3">
-          <a className="underline" href="/create">Create</a>
-          <a className="text-white/70 hover:text-white" href="https://x.com" target="_blank">X</a>
-          <a className="text-white/70 hover:text-white" href="https://t.me" target="_blank">TG</a>
+          <Link className="underline" href="/create">Create</Link>
+          <a className="text-white/70 hover:text-white" href="https://x.com" target="_blank" rel="noreferrer">X</a>
+          <a className="text-white/70 hover:text-white" href="https://t.me" target="_blank" rel="noreferrer">TG</a>
         </nav>
       </header>
 
@@ -22,7 +25,7 @@ export default function Home() {
             Fair launch controls, live curve preview, and a smooth path to Raydium. Start with defaults, tweak as you go.
           </p>
           <div className="flex gap-3">
-            <a href="/create" className="rounded-xl border px-5 py-2">Create coin</a>
+            <Link href="/create" className="rounded-xl border px-5 py-2">Create coin</Link>
             <a href="#how" className="rounded-xl border px-5 py-2">How it works</a>
           </div>
         </div>
@@ -38,3 +41,4 @@ export default function Home() {
     </main>
   );
 }
+
