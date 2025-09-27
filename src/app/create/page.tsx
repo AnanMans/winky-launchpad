@@ -6,7 +6,9 @@ import { CurveParams, useDefaultParams } from "@/components/CurveParams";
 import type { CurveType } from "@/lib/curves";
 
 export default function CreatePage() {
+  // curve params only hold curve fields
   const [params, setParams] = useState(useDefaultParams());
+  // keep token fields local (not part of Params)
   const [name, setName] = useState("WINKY");
   const [ticker, setTicker] = useState("WNKY");
 
