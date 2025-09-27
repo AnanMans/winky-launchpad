@@ -1,5 +1,7 @@
 import Link from "next/link";
 import Image from "next/image";
+import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
+
 
 export default function Home() {
   return (
@@ -10,10 +12,8 @@ export default function Home() {
           <span>Winky Launchpad</span>
         </Link>
         <nav className="flex items-center gap-3">
-          <Link className="underline" href="/create">Create</Link>
-          <a className="text-white/70 hover:text-white" href="https://x.com" target="_blank" rel="noreferrer">X</a>
-          <a className="text-white/70 hover:text-white" href="https://t.me" target="_blank" rel="noreferrer">TG</a>
-        </nav>
+  <Link className="underline" href="/create">Create</Link>
+  <WalletMultiButton /> </nav>
       </header>
 
       <section className="grid md:grid-cols-2 gap-8 items-center">
