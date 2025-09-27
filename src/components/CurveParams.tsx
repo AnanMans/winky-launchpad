@@ -24,7 +24,7 @@ export function CurveParams({
   value, onChange,
 }:{ value: Params; onChange:(p:Params)=>void }) {
   const [p, setP] = useState(value);
-  useEffect(() => { onChange(p); }, [p]);
+  useEffect(() => { onChange(p); }, [p, onChange]);
 
   return (
     <div className="grid gap-4">
