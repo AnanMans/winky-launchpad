@@ -1,6 +1,7 @@
+"use client";
 import Link from "next/link";
 import Image from "next/image";
-import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
+import WalletButton from "@/components/WalletButton";
 
 
 export default function Home() {
@@ -13,7 +14,7 @@ export default function Home() {
         </Link>
         <nav className="flex items-center gap-3">
   <Link className="underline" href="/create">Create</Link>
-  <WalletMultiButton /> </nav>
+  <WalletButton /> </nav>
       </header>
 
       <section className="grid md:grid-cols-2 gap-8 items-center">
