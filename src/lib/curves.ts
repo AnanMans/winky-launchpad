@@ -1,12 +1,14 @@
 export type CurveType = "LINEAR" | "DEGEN" | "RANDOM";
 
-type LinearOpts = { p0: number; m: number; points?: number };
-type DegenOpts  = { p0: number; k: number; q1: number; q2: number; m1: number; m2: number; points?: number };
-type RandomOpts = { p0: number; steps: number; sMin: number; sMax: number; seed?: number; points?: number };
+type CommonOpts = { points?: number };
+type LinearOpts = CommonOpts & { p0: number; m: number };
+type DegenOpts  = CommonOpts & { p0: number; k: number; q1: number; q2: number; m1: number; m2: number };
+type RandomOpts = CommonOpts & { p0: number; steps: number; sMin: number; sMax: number; seed?: number };
 
 export function priceLinear(q: number, p0: number, m: number) {
   return p0 + m * q;
 }
+
 export function priceDegen(q: number, p0: number, k: number, q1: number, q2: number, m1: number, m2: number) {
   if (q <= q1) return p0 * Math.exp(k * q);
   const pAtQ1 = p0 * Math.exp(k * q1);
@@ -40,7 +42,11 @@ export function priceRandom(q: number, p0: number, steps: number, sMin: number, 
   return price;
 }
 
-export function priceAt(type: CurveType, q: number, o: LinearOpts | DegenOpts | RandomOpts): number {
+export function priceAt(
+  type: CurveType,
+  q: number,
+  o: LinearOpts | DegenOpts | RandomOpts
+): number {
   if (type === "LINEAR") {
     const { p0, m } = o as LinearOpts;
     return priceLinear(q, p0, m);
@@ -57,7 +63,7 @@ export function makeSeries(
   type: CurveType,
   opts: LinearOpts | DegenOpts | RandomOpts
 ) {
-  const N = (opts as any).points ?? 100;
+  const N = opts.points ?? 100;
   const xs = Array.from({ length: N + 1 }, (_, i) => i / N);
   return xs.map((q) => ({ q, p: priceAt(type, q, opts) }));
 }
