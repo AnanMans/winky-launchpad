@@ -33,7 +33,20 @@ export default function CreatePage() {
 
         <div className="rounded-2xl border p-4 bg-black/30">
           <h3 className="font-medium mb-2">Curve preview</h3>
-          <CurveChart {...(params as any)} />
+          <CurveChart
+  type={params.type}
+  p0={params.p0}
+  m={params.m}
+  k={params.k}
+  q1={params.q1}
+  q2={params.q2}
+  m1={params.m1}
+  m2={params.m2}
+  steps={params.steps}
+  sMin={params.sMin}
+  sMax={params.sMax}
+  seed={params.seed}
+/>
           <p className="text-xs text-white/60 mt-2">
             X-axis: sale progress (0%→100%); Y-axis: price in SOL (scientific notation).
           </p>
