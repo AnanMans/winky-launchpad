@@ -7,6 +7,9 @@ import type { CurveType } from "@/lib/curves";
 
 export default function CreatePage() {
   const [params, setParams] = useState(useDefaultParams());
+  const [name, setName] = useState("WINKY");
+  const [ticker, setTicker] = useState("WNKY");
+
   const onChange = (p: typeof params) => setParams(p);
 
   return (
@@ -51,24 +54,21 @@ export default function CreatePage() {
             <span className="text-sm text-white/70">Token name</span>
             <input
               className="w-full min-w-0 rounded-lg border bg-black/20 p-2"
-              value={params.name}
-              onChange={(e) => setParams({ ...params, name: e.target.value })}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
             />
           </label>
           <label className="grid gap-1">
             <span className="text-sm text-white/70">Ticker</span>
             <input
               className="w-full min-w-0 rounded-lg border bg-black/20 p-2"
-              value={params.ticker}
-              onChange={(e) => setParams({ ...params, ticker: e.target.value })}
+              value={ticker}
+              onChange={(e) => setTicker(e.target.value)}
             />
           </label>
         </div>
 
-        <button
-          className="rounded-xl border px-5 py-2 opacity-60 cursor-not-allowed"
-          disabled
-        >
+        <button className="rounded-xl border px-5 py-2 opacity-60 cursor-not-allowed" disabled>
           (Disabled) Create — wiring soon
         </button>
       </section>
