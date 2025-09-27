@@ -1,26 +1,74 @@
+/* ---------------------------
+   GLOBALS (Tailwind v4 safe)
+   --------------------------- */
+
 /* Imports MUST be first */
 @import "tailwindcss";
 @import "tw-animate-css";
-@import '@solana/wallet-adapter-react-ui/styles.css';
+@import "@solana/wallet-adapter-react-ui/styles.css";
 
-/* ---- your variables / theme (minimal safe setup) ---- */
+/* Optional: dark variant helper (kept if you use it elsewhere) */
 @custom-variant dark (&:is(.dark *));
+
+/* ---------------------------
+   Theme tokens (feel free to tweak)
+   --------------------------- */
 :root {
   --background: #0b0b0e;
-  --foreground: rgba(255,255,255,0.92);
+  --foreground: rgba(255, 255, 255, 0.92);
+
+  /* Sidebar / card accents */
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
-  --sidebar-border: oklch(1 0 0 / 0.10);
+
+  /* Chart accent (used by your previews if needed) */
+  --chart-5: oklch(0.645 0.246 16.439);
 }
 
-/* Base layer */
+/* ---------------------------
+   Base layer
+   --------------------------- */
 @layer base {
-  * { @apply border-border outline-ring/50; }
-  body { @apply bg-background text-foreground; }
+  /* Tailwind cannot @apply custom tokens as utilities on Vercel.
+     Use plain CSS here to avoid “unknown utility class” errors. */
+  *, ::before, ::after {
+    border-color: var(--sidebar-border);
+    /* approximate of outline-ring/50 using CSS color-mix */
+    outline-color: color-mix(in oklch, var(--sidebar-ring) 50%, transparent);
+  }
+
+  body {
+    /* These are valid Tailwind tokens (from theme above) */
+    @apply bg-background text-foreground;
+    color-scheme: dark; /* better form controls in dark */
+  }
 }
 
-/* Optional: wallet button tweaks (no @import) */
+/* ---------------------------
+   Components / small tweaks
+   --------------------------- */
+
+/* Wallet adapter button: keep neutral until connected */
 .wallet-adapter-button {
   background-color: transparent;
-  border: none;
+  border: 1px solid var(--sidebar-border);
+}
+
+/* Optional: nicer borders on your cards/sections that use `border` */
+.border {
+  border-color: var(--sidebar-border) !important;
+}
+
+/* Optional: subtle panel background if you want it globally */
+.panel {
+  background: color-mix(in oklch, var(--background) 85%, white 15%);
+  border: 1px solid var(--sidebar-border);
+  border-radius: 0.75rem;
 }
 
