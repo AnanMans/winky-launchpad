@@ -1,8 +1,7 @@
-"use client";
 import Link from "next/link";
 import Image from "next/image";
-import WalletButton from "@/components/WalletButton";
-
+import WalletButton from "@/components/WalletButton"; // dynamic client-only wrapper (ssr:false)
+import WalletStatus from "@/components/WalletStatus"; // optional; shows address if connected
 
 export default function Home() {
   return (
@@ -13,8 +12,9 @@ export default function Home() {
           <span>Winky Launchpad</span>
         </Link>
         <nav className="flex items-center gap-3">
-  <Link className="underline" href="/create">Create</Link>
-  <WalletButton /> </nav>
+          <Link className="underline" href="/create">Create</Link>
+          <WalletButton />
+        </nav>
       </header>
 
       <section className="grid md:grid-cols-2 gap-8 items-center">
@@ -29,6 +29,7 @@ export default function Home() {
             <Link href="/create" className="rounded-xl border px-5 py-2">Create coin</Link>
             <a href="#how" className="rounded-xl border px-5 py-2">How it works</a>
           </div>
+          <WalletStatus />
         </div>
         <div className="rounded-2xl border p-6 bg-black/30 text-white/70">
           <p className="mb-3">Live curve preview is on the Create page.</p>
