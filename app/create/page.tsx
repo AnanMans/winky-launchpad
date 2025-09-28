@@ -4,6 +4,10 @@ import { useState, useMemo, useEffect } from 'react';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
 import { LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
+type CurveConfig =
+  | { type: 'linear'; p0: number; slope: number }
+  | { type: 'degen';  p0: number; k: number }
+  | { type: 'random'; p0: number; vol: 'low' | 'med' | 'high'; seed: string };
 
 type Curve = 'linear' | 'degen' | 'random';
 const STRENGTH_LABELS = ['Low','Medium','High'] as const;
@@ -26,7 +30,11 @@ export default function CreatePage() {
     socials: { x: '', website: '', telegram: '' },
   });
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<null | { marketId: string; mint: string | null; curveConfig: any }>(null);
+const [result, setResult] = useState<null | {
+  marketId: string;
+  mint: string | null;
+  curveConfig: CurveConfig;
+}>(null);
 
   const [buyLoading, setBuyLoading] = useState(false);
   const [buySig, setBuySig] = useState<string | null>(null);
@@ -102,14 +110,15 @@ async function buyFirst() {
     });
 
     await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'processed');
+setBuySig(sig);
+alert(`✅ Sent ${sol} SOL\nSignature: ${sig}\n(Devnet)`);
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  alert(`❌ Buy failed: ${msg}`);
+} finally {
+  setBuyLoading(false);
+}
 
-    setBuySig(sig);
-    alert(`✅ Sent ${sol} SOL\nSignature: ${sig}\n(Devnet)`);
-  } catch (e: any) {
-    alert(`❌ Buy failed: ${e.message || e}`);
-  } finally {
-    setBuyLoading(false);
-  }
 }
 
   return (

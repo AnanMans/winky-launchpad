@@ -5,7 +5,11 @@ const nextConfig: NextConfig = {
     // Let the build succeed even if ESLint finds issues
     ignoreDuringBuilds: true,
   },
-  // Optional: uncomment if TypeScript errors block your CI build
+  turbopack: {
+    // Silence the "inferred workspace root" warning and point to this app
+    root: __dirname,
+  },
+  // If CI type errors ever block builds, you can enable this:
   // typescript: {
   //   ignoreBuildErrors: true,
   // },
