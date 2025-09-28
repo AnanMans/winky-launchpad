@@ -13,7 +13,8 @@ import {
 } from '@solana/wallet-adapter-wallets';
 
 export default function Providers({ children }: { children: React.ReactNode }) {
-  const endpoint = process.env.NEXT_PUBLIC_SOLANA_RPC ?? 'https://api.mainnet-beta.solana.com';
+  const endpoint =
+    process.env.NEXT_PUBLIC_SOLANA_RPC ?? 'https://api.mainnet-beta.solana.com';
 
   const wallets = useMemo(
     () => [
@@ -28,7 +29,8 @@ export default function Providers({ children }: { children: React.ReactNode }) {
   return (
     <ConnectionProvider endpoint={endpoint}>
       <WalletProvider wallets={wallets} autoConnect>
-        <WalletModalProvider featuredWallets={12}>{children}</WalletModalProvider>
+        {/* NOTE: no featuredWallets prop here (not supported in your version) */}
+        <WalletModalProvider>{children}</WalletModalProvider>
       </WalletProvider>
     </ConnectionProvider>
   );

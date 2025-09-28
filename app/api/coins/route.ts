@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 
 export async function POST(req: Request) {
   const body = await req.json();
-  const { curve, startPrice, strength, name, symbol, description, logoUrl, socials } = body ?? {};
+const { curve, startPrice, strength, name, symbol } = body ?? {};
 
   if (!curve || !startPrice || !name || !symbol) {
     return NextResponse.json({ error: 'Missing fields' }, { status: 400 });
