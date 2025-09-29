@@ -1,62 +1,46 @@
-import { NextResponse } from 'next/server';
-import { addCoin, readCoins } from '../../../lib/store';
-import type { Coin, Curve } from '../../../lib/types';
+import { NextResponse, NextRequest } from 'next/server';
+import { readCoins, createCoin } from '../../../lib/store';
 
-export async function GET() {
+const TICKER_RE = /^[A-Z0-9]{2,6}$/;
+
+export async function GET(_req: NextRequest) {
   const coins = await readCoins();
   return NextResponse.json({ coins });
 }
 
-export async function POST(req: Request) {
-  const body = await req.json();
+export async function POST(req: NextRequest) {
+  const body = await req.json().catch(() => ({}));
 
-  const {
-    curve,
-    startPrice,
-    strength,
-    name,
-    symbol,
-    description,
-    logoUrl,
-    socials,
-  }: {
-    curve: Curve;
-    startPrice: number;
-    strength: 1 | 2 | 3;
-    name: string;
-    symbol: string;
-    description?: string;
-    logoUrl?: string;
-    socials?: { x?: string; website?: string; telegram?: string };
-  } = body ?? {};
+  const name = (body?.name ?? '').toString().trim();
+  const symbol = (body?.symbol ?? '').toString().trim().toUpperCase();
+  const curve = (body?.curve ?? 'degen') as 'linear'|'degen'|'random';
+  const startPrice = Number(body?.startPrice ?? 0);
+  const strength = Number(body?.strength ?? 2) as 1|2|3;
 
-  if (!name || name.trim().length < 3) return new NextResponse('Invalid name', { status: 400 });
-  if (!symbol || !/^[A-Z0-9]{2,6}$/.test(symbol)) return new NextResponse('Invalid symbol', { status: 400 });
-  if (!startPrice || Number(startPrice) < 0.0001) return new NextResponse('Invalid startPrice', { status: 400 });
-  if (!['linear','degen','random'].includes(curve)) return new NextResponse('Invalid curve', { status: 400 });
-  if (![1,2,3].includes(Number(strength))) return new NextResponse('Invalid strength', { status: 400 });
-
-  const id = `${symbol}-${Date.now()}`;
-
-  const coin: Coin = {
-    id,
-    name: name.trim(),
-    symbol,
-    description,
-    logoUrl,
-    socials,
-    curve,
-    startPrice: Number(startPrice),
-    strength: strength as 1|2|3,
-    createdAt: new Date().toISOString(),
+  const description = (body?.description ?? '').toString().trim();
+  const logoUrl = (body?.logoUrl ?? '').toString().trim();
+  const socials = {
+    x: (body?.socials?.x ?? '').toString().trim(),
+    website: (body?.socials?.website ?? '').toString().trim(),
+    telegram: (body?.socials?.telegram ?? '').toString().trim(),
   };
 
-  await addCoin(coin);
+  // Validate
+  const fieldErrors: Record<string,string> = {};
+  if (name.length < 3) fieldErrors.name = 'Name must be at least 3 characters.';
+  if (!TICKER_RE.test(symbol)) fieldErrors.symbol = 'Ticker must be 2–6 chars (A–Z or 0–9).';
+  if (!['linear','degen','random'].includes(curve)) fieldErrors.curve = 'Invalid curve.';
+  if (!(strength === 1 || strength === 2 || strength === 3)) fieldErrors.strength = 'Invalid strength.';
+  if (startPrice <= 0) fieldErrors.startPrice = 'Start price must be greater than 0.';
 
-  return NextResponse.json({
-    marketId: id,
-    mint: null,
-    curveConfig: { type: curve, p0: startPrice, strength },
-    coin,
+  if (Object.keys(fieldErrors).length) {
+    return NextResponse.json({ ok: false, fieldErrors }, { status: 400 });
+  }
+
+  const coin = await createCoin({
+    name, symbol, curve, startPrice, strength,
+    description, logoUrl, socials,
   });
+
+  return NextResponse.json({ ok: true, coin }, { status: 201 });
 }

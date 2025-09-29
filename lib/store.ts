@@ -82,3 +82,44 @@ function rowToCoin(r: any): Coin {
     createdAt: r.created_at,
   };
 }
+export async function createCoin(input: {
+  name: string;
+  symbol: string;
+  curve: 'linear' | 'degen' | 'random';
+  startPrice: number;
+  strength: 1 | 2 | 3;
+  description?: string;
+  logoUrl?: string;
+  socials?: { x?: string; website?: string; telegram?: string };
+}) {
+  const { data, error } = await supabase
+    .from('coins')
+    .insert({
+      name: input.name,
+      symbol: input.symbol,
+      curve: input.curve,
+      start_price: input.startPrice,   // if your column is snake_case
+      strength: input.strength,
+      description: input.description ?? '',
+      logo_url: input.logoUrl ?? '',
+      socials: input.socials ?? null,  // jsonb column
+    })
+    .select('*')
+    .single();
+
+  if (error) throw new Error(error.message);
+
+  // Map DB row to your Coin shape if your columns are snake_case in DB:
+  return {
+    id: data.id,
+    name: data.name,
+    symbol: data.symbol,
+    description: data.description || '',
+    logoUrl: data.logo_url || '',
+    socials: data.socials || {},
+    curve: data.curve,
+    startPrice: data.start_price,
+    strength: data.strength,
+    createdAt: data.created_at || new Date().toISOString(),
+  } as any;
+}
