@@ -40,39 +40,56 @@ export default function CreatePage() {
       return;
     }
 
-    try {
-      setSubmitting(true);
-      const res = await fetch('/api/coins', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          curve: form.curve,
-          startPrice: Number(form.startPrice),
-          strength: form.strength,
-          name: form.name.trim(),
-          symbol: form.symbol.trim().toUpperCase(),
-          description: form.description?.trim() || '',
-          logoUrl: form.logoUrl?.trim() || '',
-          socials: {
-            x: form.socials.x?.trim() || '',
-            website: form.socials.website?.trim() || '',
-            telegram: form.socials.telegram?.trim() || '',
-          },
-        }),
-      });
-      if (!res.ok) {
-        const txt = await res.text().catch(() => 'Failed to create coin');
-        throw new Error(txt);
-      }
-      const data = await res.json().catch(() => ({}));
-      const newId = data?.coin?.id ?? data?.id;
-      if (!newId) throw new Error('Missing coin id');
-      router.push(`/coin/${encodeURIComponent(newId)}`);
-    } catch (e: any) {
-      alert(e?.message || String(e));
-    } finally {
-      setSubmitting(false);
-    }
+try {
+  setSubmitting(true);
+
+  const res = await fetch('/api/coins', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      curve: form.curve,
+      startPrice: Number(form.startPrice),
+      strength: form.strength,
+      name: form.name?.trim(),
+      symbol: form.symbol?.trim().toUpperCase(),
+      description: form.description?.trim() || '',
+      logoUrl: form.logoUrl?.trim() || '',
+      socials: {
+        x: form.socials.x?.trim() || '',
+        website: form.socials.website?.trim() || '',
+        telegram: form.socials.telegram?.trim() || '',
+      },
+    }),
+  });
+
+  // Read response body (text first) so we can show detailed errors
+  const text = await res.text();
+  let payload: any = null;
+  try { payload = JSON.parse(text); } catch {}
+
+  if (!res.ok) {
+    const msg = payload?.error || payload?.message || text || 'Create failed';
+    alert(`Error: ${msg}`);
+    setSubmitting(false);
+    return;
+  }
+
+  const newId = payload?.coin?.id ?? payload?.id;
+  if (!newId) {
+    alert('Error: invalid response from server.');
+    setSubmitting(false);
+    return;
+  }
+
+  // Success → go to the coin page
+  router.push(`/coin/${encodeURIComponent(newId)}`);
+} catch (e: any) {
+  alert(`Error: ${e?.message || String(e)}`);
+} finally {
+  setSubmitting(false);
+}
+
+
   }
 
   return (
