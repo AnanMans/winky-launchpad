@@ -1,5 +1,5 @@
 import { supabase } from './db';
-import type { Coin } from './types';
+import type { Coin, Trade } from './types';
 
 export async function readCoins(): Promise<Coin[]> {
   const { data, error } = await supabase

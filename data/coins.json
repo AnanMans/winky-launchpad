@@ -1,0 +1,114 @@
+[
+  {
+    "id": "ANAN11-1759129920832",
+    "name": "Anan2m",
+    "symbol": "ANAN11",
+    "description": "Test the numbers and ch",
+    "logoUrl": "https://haieng.com/wp-content/uploads/2017/10/test-image-500x500.jpg",
+    "socials": {
+      "x": "https://x.com/PumpitosNFT",
+      "website": "https://x.com/PumpitosNFT",
+      "telegram": "https://x.com/PumpitosNFT"
+    },
+    "curve": "degen",
+    "startPrice": 0.001,
+    "strength": 3,
+    "createdAt": "2025-09-29T07:12:00.832Z"
+  },
+  {
+    "id": "UPDAT1-1759129374364",
+    "name": "A2b",
+    "symbol": "UPDAT1",
+    "description": "update",
+    "logoUrl": "https://haieng.com/wp-content/uploads/2017/10/test-image-500x500.jpg",
+    "socials": {
+      "x": "https://x.com/PumpitosNFT",
+      "website": "https://x.com/PumpitosNFT",
+      "telegram": "https://x.com/PumpitosNFT"
+    },
+    "curve": "linear",
+    "startPrice": 0.001,
+    "strength": 3,
+    "createdAt": "2025-09-29T07:02:54.364Z"
+  },
+  {
+    "id": "SOCIAL-1759126949145",
+    "name": "test socials",
+    "symbol": "SOCIAL",
+    "description": "socials",
+    "logoUrl": "https://haieng.com/wp-content/uploads/2017/10/test-image-500x500.jpg",
+    "socials": {
+      "x": "https://x.com/PumpitosNFT",
+      "website": "https://x.com/PumpitosNFT",
+      "telegram": "https://x.com/PumpitosNFT"
+    },
+    "curve": "random",
+    "startPrice": 0.004,
+    "strength": 3,
+    "createdAt": "2025-09-29T06:22:29.145Z"
+  },
+  {
+    "id": "WHAT-1759125222035",
+    "name": "what",
+    "symbol": "WHAT",
+    "description": "",
+    "logoUrl": "",
+    "socials": {
+      "x": "",
+      "website": "",
+      "telegram": ""
+    },
+    "curve": "degen",
+    "startPrice": 0.003,
+    "strength": 3,
+    "createdAt": "2025-09-29T05:53:42.036Z"
+  },
+  {
+    "id": "WWW-1759125182693",
+    "name": "www",
+    "symbol": "WWW",
+    "description": "1111",
+    "logoUrl": "",
+    "socials": {
+      "x": "",
+      "website": "",
+      "telegram": ""
+    },
+    "curve": "degen",
+    "startPrice": 0.003,
+    "strength": 2,
+    "createdAt": "2025-09-29T05:53:02.693Z"
+  },
+  {
+    "id": "COIN-1759125045002",
+    "name": "Test Coin",
+    "symbol": "COIN",
+    "description": "Testing the coin show",
+    "logoUrl": "https://www.southseabeachcafe.co.uk/wp-content/uploads/2014/08/500x500-500x400.gif",
+    "socials": {
+      "x": "https://x.com/PumpitosNFT",
+      "website": "https://x.com/PumpitosNFT",
+      "telegram": ""
+    },
+    "curve": "random",
+    "startPrice": 0.002,
+    "strength": 3,
+    "createdAt": "2025-09-29T05:50:45.002Z"
+  },
+  {
+    "id": "ANA-1759089590064",
+    "name": "Anan",
+    "symbol": "ANA",
+    "description": "testing",
+    "logoUrl": "",
+    "socials": {
+      "x": "",
+      "website": "",
+      "telegram": ""
+    },
+    "curve": "degen",
+    "startPrice": 0.001,
+    "strength": 1,
+    "createdAt": "2025-09-28T19:59:50.064Z"
+  }
+]
