@@ -12,3 +12,11 @@ export type Coin = {
   strength: 1 | 2 | 3;
   createdAt: string;
 };
+export type Trade = {
+  id: string;               // unique
+  coinId: string;           // coin.id
+  side: 'buy' | 'sell';
+  amountSol: number;        // SOL
+  ts: string;               // ISO timestamp
+};
+
