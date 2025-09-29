@@ -1,17 +1,34 @@
 import './globals.css';
 import Providers from './providers';
-import { DM_Sans } from 'next/font/google';
+import Link from 'next/link';
+import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
 
-export const metadata = { title: 'Curve Launchpad', description: 'Create coins with curves' };
-
-const dmSans = DM_Sans({ subsets: ['latin'], weight: ['400','500','700'], display: 'swap' });
+export const metadata = {
+  title: 'Curve Launchpad',
+  description: 'Create coins with curves',
+};
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className={dmSans.className}>
-        <Providers>{children}</Providers>
+      <body>
+        <Providers>
+          <header className="border-b">
+            <div className="max-w-5xl mx-auto px-4 py-3 flex items-center gap-4">
+              <Link href="/" className="font-semibold">WINKY Launchpad</Link>
+              <nav className="ml-auto flex items-center gap-3">
+                <Link href="/coins" className="rounded-lg border px-3 py-1.5">Coins</Link>
+                <Link href="/create" className="rounded-lg border px-3 py-1.5">Create</Link>
+                <WalletMultiButton />
+              </nav>
+            </div>
+          </header>
+          <div className="max-w-5xl mx-auto px-4">
+            {children}
+          </div>
+        </Providers>
       </body>
     </html>
   );
 }
+
