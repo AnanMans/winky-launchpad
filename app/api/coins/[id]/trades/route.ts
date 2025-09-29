@@ -1,19 +1,21 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, NextRequest } from 'next/server';
 import { tradesForCoin, addTrade } from '../../../../../lib/store';
-import type { Trade } from '../../../../../lib/store';
+import type { Trade } from '../../../../../lib/types';
 
 export async function GET(
-  _req: Request,
-  { params }: { params: { id: string } }
+  _req: NextRequest,
+  context: { params: Promise<{ id: string }> }
 ) {
-  const items = await tradesForCoin(params.id);
+  const { id } = await context.params;
+  const items = await tradesForCoin(id);
   return NextResponse.json({ trades: items });
 }
 
 export async function POST(
-  req: Request,
-  { params }: { params: { id: string } }
+  req: NextRequest,
+  context: { params: Promise<{ id: string }> }
 ) {
+  const { id } = await context.params;
   const body = await req.json().catch(() => ({}));
   const amountSol = Number(body?.amountSol);
   const side = (body?.side === 'sell' ? 'sell' : 'buy') as Trade['side'];
@@ -23,8 +25,8 @@ export async function POST(
   }
 
   const t: Trade = {
-    id: `${params.id}-${Date.now()}`,
-    coinId: params.id,
+    id: `${id}-${Date.now()}`,
+    coinId: id,
     side,
     amountSol,
     ts: new Date().toISOString(),
@@ -33,3 +35,4 @@ export async function POST(
   await addTrade(t);
   return NextResponse.json({ trade: t });
 }
+
