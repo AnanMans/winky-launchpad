@@ -7,7 +7,7 @@ import { useRouter } from 'next/navigation';
 
 type Curve = 'linear' | 'degen' | 'random';
 
-export default function CreatePage(): JSX.Element {
+export default function CreatePage() {
   const router = useRouter();
   const { connected } = useWallet();
 
@@ -28,8 +28,12 @@ export default function CreatePage(): JSX.Element {
 
   async function handleCreate() {
     const nextErrors: typeof errors = {};
-    if (!form.name || form.name.trim().length < 3) nextErrors.name = 'Name must be at least 3 characters.';
-    if (!TICKER_RE.test(form.symbol)) nextErrors.symbol = 'Ticker must be 2–6 chars using A–Z or 0–9.';
+    if (!form.name || form.name.trim().length < 3) {
+      nextErrors.name = 'Name must be at least 3 characters.';
+    }
+    if (!TICKER_RE.test(form.symbol)) {
+      nextErrors.symbol = 'Ticker must be 2–6 chars using A–Z or 0–9.';
+    }
     if (Object.keys(nextErrors).length) {
       setErrors(nextErrors);
       setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), 0);
@@ -56,7 +60,10 @@ export default function CreatePage(): JSX.Element {
           },
         }),
       });
-      if (!res.ok) throw new Error(await res.text().catch(() => 'Failed to create coin'));
+      if (!res.ok) {
+        const txt = await res.text().catch(() => 'Failed to create coin');
+        throw new Error(txt);
+      }
       const data = await res.json().catch(() => ({}));
       const newId = data?.coin?.id ?? data?.id;
       if (!newId) throw new Error('Missing coin id');
@@ -211,15 +218,7 @@ export default function CreatePage(): JSX.Element {
         >
           {submitting ? 'Creating…' : 'Create coin'}
         </button>
-        {!connected && (
-          <span className="ml-3 text-sm opacity-70">Connect wallet to enable</span>
-        )}
-      </div>
-    </main>
-  );
-}
-          <span className="ml-3 text-sm opacity-70">Connect wallet to enable</span>
-        )}
+        {!connected && <span className="ml-3 text-sm opacity-70">Connect wallet to enable</span>}
       </div>
     </main>
   );

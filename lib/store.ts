@@ -38,13 +38,6 @@ export async function findCoin(id: string): Promise<Coin | null> {
 }
 
 // --- trades ---
-export type Trade = {
-  id: string;
-  coinId: string;
-  side: 'buy'|'sell';
-  amountSol: number;
-  ts: string;
-};
 
 export async function addTrade(t: Trade): Promise<Trade> {
   const { error } = await supabase.from('trades').insert([{
