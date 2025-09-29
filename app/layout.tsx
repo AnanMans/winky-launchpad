@@ -1,7 +1,7 @@
 import './globals.css';
 import Providers from './providers';
 import Link from 'next/link';
-import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
+import ConnectWallet from '@/components/ConnectWallet';
 
 export const metadata = {
   title: 'Curve Launchpad',
@@ -19,7 +19,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <nav className="ml-auto flex items-center gap-3">
                 <Link href="/coins" className="rounded-lg border px-3 py-1.5">Coins</Link>
                 <Link href="/create" className="rounded-lg border px-3 py-1.5">Create</Link>
-                <WalletMultiButton />
+                {/* Client-only button rendered via client wrapper */}
+                <ConnectWallet />
               </nav>
             </div>
           </header>
@@ -31,4 +32,3 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     </html>
   );
 }
-
