@@ -1,265 +1,243 @@
 'use client';
 
-import { useState, useMemo, useEffect } from 'react';
-import { useWallet, useConnection } from '@solana/wallet-adapter-react';
+import React, { useState } from 'react';
+import { useWallet } from '@solana/wallet-adapter-react';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
-import { LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
-type CurveConfig =
-  | { type: 'linear'; p0: number; slope: number }
-  | { type: 'degen';  p0: number; k: number }
-  | { type: 'random'; p0: number; vol: 'low' | 'med' | 'high'; seed: string };
+import { useRouter } from 'next/navigation';
 
+// keep types local to avoid path/type glitches
 type Curve = 'linear' | 'degen' | 'random';
-const STRENGTH_LABELS = ['Low','Medium','High'] as const;
 
-export default function CreatePage() {
-  const { connection } = useConnection();
-  const { connected, publicKey, sendTransaction } = useWallet();
-
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+export default function CreatePage(): JSX.Element {
+  const router = useRouter();
+  const { connected } = useWallet();
 
   const [form, setForm] = useState({
     curve: 'degen' as Curve,
     startPrice: 0.003,
-    strength: 2,
+    strength: 2 as 1 | 2 | 3,
     name: '',
     symbol: '',
     description: '',
     logoUrl: '',
     socials: { x: '', website: '', telegram: '' },
   });
-  const [loading, setLoading] = useState(false);
-const [result, setResult] = useState<null | {
-  marketId: string;
-  mint: string | null;
-  curveConfig: CurveConfig;
-}>(null);
 
-  const [buyLoading, setBuyLoading] = useState(false);
-  const [buySig, setBuySig] = useState<string | null>(null);
+  // ---- validation state
+  const TICKER_RE = /^[A-Z0-9]{2,6}$/; // allow A–Z and 0–9, 2–6 chars
+  const [errors, setErrors] = useState<{ name?: string; symbol?: string }>({});
+  const [submitting, setSubmitting] = useState(false);
 
-  const valid = useMemo(() =>
-    form.name.trim().length >= 3 &&
-    /^[A-Z]{2,6}$/.test(form.symbol) &&
-    form.startPrice >= 0.0001 &&
-    connected
-  , [form, connected]);
+  async function handleCreate() {
+    // --- client-side validation ---
+    const nextErrors: typeof errors = {};
+    if (!form.name || form.name.trim().length < 3) {
+      nextErrors.name = 'Name must be at least 3 characters.';
+    }
+    if (!TICKER_RE.test(form.symbol)) {
+      nextErrors.symbol = 'Ticker must be 2–6 chars using A–Z or 0–9.';
+    }
+    if (Object.keys(nextErrors).length) {
+      setErrors(nextErrors);
+      // make sure user sees the error
+      setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), 0);
+      return;
+    }
 
-  async function onCreate() {
-    setLoading(true);
     try {
+      setSubmitting(true);
+
       const res = await fetch('/api/coins', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           curve: form.curve,
-          startPrice: form.startPrice,
+          startPrice: Number(form.startPrice),
           strength: form.strength,
-          name: form.name,
-          symbol: form.symbol,
-          description: form.description,
-          logoUrl: form.logoUrl,
-          socials: form.socials
-        })
+          name: form.name.trim(),
+          symbol: form.symbol.trim().toUpperCase(),
+          description: form.description?.trim() || '',
+          logoUrl: form.logoUrl?.trim() || '',
+          socials: {
+            x: form.socials.x?.trim() || '',
+            website: form.socials.website?.trim() || '',
+            telegram: form.socials.telegram?.trim() || '',
+          },
+        }),
       });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      setResult(data);
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(txt || 'Failed to create coin');
+      }
+
+      const data = await res.json().catch(() => ({}));
+      const newId = data?.coin?.id ?? data?.id;
+      if (!newId) throw new Error('Missing coin id');
+
+      // success → go straight to the coin page
+      router.push(`/coin/${encodeURIComponent(newId)}`);
     } catch (e: any) {
-      alert(e.message || 'Create failed');
+      alert(e?.message || String(e));
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
   }
-
-async function buyFirst() {
-  try {
-    if (!connected || !publicKey) { alert('Connect wallet first'); return; }
-    const raw = (document.getElementById('amount') as HTMLInputElement)?.value || '0';
-    const sol = Math.max(0, Number(raw));
-    if (!sol) { alert('Enter amount'); return; }
-
-    const treasuryStr = process.env.NEXT_PUBLIC_TREASURY!;
-    if (!treasuryStr) { alert('Treasury missing in .env.local'); return; }
-    const treasury = new PublicKey(treasuryStr);
-
-    setBuyLoading(true);
-    setBuySig(null);
-
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('processed');
-
-    const tx = new Transaction({
-      feePayer: publicKey,
-      recentBlockhash: blockhash,
-    }).add(
-      SystemProgram.transfer({
-        fromPubkey: publicKey,
-        toPubkey: treasury,
-        lamports: Math.floor(sol * LAMPORTS_PER_SOL),
-      })
-    );
-
-    // dev flag: skip preflight on devnet to avoid Phantom warning
-    const skip = process.env.NEXT_PUBLIC_SKIP_PREFLIGHT === '1';
-
-    const sig = await sendTransaction(tx, connection, {
-      preflightCommitment: 'processed',
-      skipPreflight: skip,
-      minContextSlot: await connection.getSlot('processed'),
-    });
-
-    await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'processed');
-setBuySig(sig);
-alert(`✅ Sent ${sol} SOL\nSignature: ${sig}\n(Devnet)`);
-} catch (e) {
-  const msg = e instanceof Error ? e.message : String(e);
-  alert(`❌ Buy failed: ${msg}`);
-} finally {
-  setBuyLoading(false);
-}
-
-}
 
   return (
     <main className="max-w-2xl mx-auto p-6 space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">Create new coin</h1>
-        {mounted ? <WalletMultiButton /> : null}
+        <WalletMultiButton />
       </div>
 
-      {/* Curve block */}
+      {/* Curve / Start / Strength */}
       <div className="rounded-2xl border p-4 space-y-3">
-        <div className="font-medium">Curve</div>
+        <label className="block text-sm mb-1">Curve</label>
         <select
-          className="w-full rounded-lg border p-2 bg-black/10"
+          className="w-full rounded-xl border px-3 py-2 bg-transparent"
           value={form.curve}
-          onChange={e=>setForm({...form, curve: e.target.value as Curve})}
+          onChange={(e) => setForm((f) => ({ ...f, curve: e.target.value as Curve }))}
         >
-          <option value="linear">Linear — steady climb</option>
+          <option value="linear">Linear — steady rise</option>
           <option value="degen">Degen — accelerates</option>
           <option value="random">Random — seeded wiggles</option>
         </select>
 
-        <div className="grid grid-cols-2 gap-3">
-          <label className="block">Start price (SOL)
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm mb-1">Start price (SOL)</label>
             <input
-              type="number" step="0.0001" min={0.0001}
-              className="w-full rounded-lg border p-2 bg-black/10"
+              type="number"
+              step="0.0001"
+              min="0"
+              className="w-full rounded-xl border px-3 py-2 bg-transparent"
               value={form.startPrice}
-              onChange={e=>setForm({...form, startPrice: Number(e.target.value)})}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, startPrice: Number(e.target.value) || 0 }))
+              }
             />
-          </label>
-
-          <label className="block">Strength
-            <div className="flex gap-2" role="radiogroup" aria-label="Strength">
-              {STRENGTH_LABELS.map((s, i)=> {
-                const selected = form.strength === i+1;
-                return (
-                  <button
-                    key={s}
-                    type="button"
-                    onClick={()=>setForm({...form, strength: i+1})}
-                    aria-pressed={selected}
-                    className={`px-3 py-2 rounded-lg border transition
-                      ${selected ? 'bg-white/10 border-white/50 shadow-inner' : 'hover:bg-white/5 border-white/20'}
-                      focus:outline-none focus:ring-2 focus:ring-white/40 active:scale-[0.98]`}
-                  >
-                    {s}
-                  </button>
-                );
-              })}
+            <div className="text-xs opacity-70 mt-1">
+              Start price = first token price.
             </div>
-            <p className="mt-1 text-xs opacity-70">
-              Start price = first token price. Strength = how fast price climbs.
-            </p>
-          </label>
+          </div>
+
+          <div>
+            <label className="block text-sm mb-1">Strength</label>
+            <div className="flex gap-2">
+              {([1, 2, 3] as const).map((lvl) => (
+                <button
+                  key={lvl}
+                  type="button"
+                  onClick={() => setForm((f) => ({ ...f, strength: lvl }))}
+                  className={`rounded-xl border px-3 py-2 ${
+                    form.strength === lvl ? 'bg-white/10' : ''
+                  }`}
+                >
+                  {lvl === 1 ? 'Low' : lvl === 2 ? 'Medium' : 'High'}
+                </button>
+              ))}
+            </div>
+            <div className="text-xs opacity-70 mt-1">
+              Strength = how fast price climbs.
+            </div>
+          </div>
         </div>
       </div>
 
       {/* Details */}
-      <div className="rounded-2xl border p-4 space-y-3">
-<label className="block">Coin name
-  <input
-    className="w-full rounded-lg border p-2 bg-black/10"
-    placeholder="At least 3 characters"
-    value={form.name}
-    onChange={e=>setForm({...form, name:e.target.value})}
-  />
-  <div className="text-xs opacity-70 mt-1">Min 3 characters.</div>
-</label>
+      <div className="rounded-2xl border p-4 space-y-4">
+        {/* Coin name */}
+        <label className="block text-sm mb-1">Coin name</label>
+        <input
+          value={form.name}
+          onChange={(e) => {
+            setErrors((x) => ({ ...x, name: undefined }));
+            setForm((f) => ({ ...f, name: e.target.value }));
+          }}
+          placeholder="At least 3 characters"
+          className={`w-full rounded-xl border px-3 py-2 outline-none
+            ${errors.name ? 'border-red-500 focus:ring-1 focus:ring-red-500' : 'border-white/20 focus:ring-1 focus:ring-white/30'}`}
+        />
+        <div className={`text-xs mt-1 ${errors.name ? 'text-red-400' : 'opacity-70'}`}>
+          Min 3 characters.
+        </div>
+        {errors.name && <div className="text-sm text-red-400 mt-1">{errors.name}</div>}
 
-<label className="block">Ticker
-  <input
-    className="w-full rounded-lg border p-2 bg-black/10"
-    placeholder="2–6 UPPERCASE letters (e.g. WNKY)"
-    value={form.symbol}
-    onChange={e=>setForm({...form, symbol:e.target.value.toUpperCase()})}
-  />
-  <div className="text-xs opacity-70 mt-1">Allowed: A–Z only, length 2–6.</div>
-</label>
+        {/* Ticker */}
+        <div className="mt-4" />
+        <label className="block text-sm mb-1">Ticker</label>
+        <input
+          value={form.symbol}
+          onChange={(e) => {
+            setErrors((x) => ({ ...x, symbol: undefined }));
+            setForm((f) => ({ ...f, symbol: e.target.value.toUpperCase() }));
+          }}
+          placeholder="2–6 letters or numbers (e.g., WNKY)"
+          className={`w-full rounded-xl border px-3 py-2 outline-none
+            ${errors.symbol ? 'border-red-500 focus:ring-1 focus:ring-red-500' : 'border-white/20 focus:ring-1 focus:ring-white/30'}`}
+        />
+        <div className={`text-xs mt-1 ${errors.symbol ? 'text-red-400' : 'opacity-70'}`}>
+          Allowed: A–Z and 0–9, length 2–6.
+        </div>
+        {errors.symbol && <div className="text-sm text-red-400 mt-1">{errors.symbol}</div>}
 
-        <label className="block">Description (optional)
-          <textarea className="w-full rounded-lg border p-2 bg-black/10"
-            value={form.description} onChange={e=>setForm({...form, description:e.target.value})}/>
-        </label>
+        {/* Description */}
+        <div className="mt-4" />
+        <label className="block text-sm mb-1">Description (optional)</label>
+        <textarea
+          rows={4}
+          className="w-full rounded-xl border px-3 py-2 bg-transparent"
+          placeholder="Write a short description"
+          value={form.description}
+          onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+        />
 
-        <div className="grid gap-2">
-          <label className="block">Logo URL (temp)
-            <input className="w-full rounded-lg border p-2 bg-black/10"
-              value={form.logoUrl} onChange={e=>setForm({...form, logoUrl:e.target.value})}/>
-          </label>
-          <div className="grid grid-cols-3 gap-2">
-            <input placeholder="X link" className="rounded-lg border p-2 bg-black/10"
-              value={form.socials.x} onChange={e=>setForm({...form, socials:{...form.socials, x:e.target.value}})}/>
-            <input placeholder="Website" className="rounded-lg border p-2 bg-black/10"
-              value={form.socials.website} onChange={e=>setForm({...form, socials:{...form.socials, website:e.target.value}})}/>
-            <input placeholder="Telegram" className="rounded-lg border p-2 bg-black/10"
-              value={form.socials.telegram} onChange={e=>setForm({...form, socials:{...form.socials, telegram:e.target.value}})}/>
-          </div>
+        {/* Logo + Socials */}
+        <div className="mt-2" />
+        <label className="block text-sm mb-1">Logo URL (temp)</label>
+        <input
+          className="w-full rounded-xl border px-3 py-2 bg-transparent"
+          placeholder="https://…"
+          value={form.logoUrl}
+          onChange={(e) => setForm((f) => ({ ...f, logoUrl: e.target.value }))}
+        />
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3">
+          <input
+            className="w-full rounded-xl border px-3 py-2 bg-transparent"
+            placeholder="X link"
+            value={form.socials.x}
+            onChange={(e) => setForm((f) => ({ ...f, socials: { ...f.socials, x: e.target.value } }))}
+          />
+          <input
+            className="w-full rounded-xl border px-3 py-2 bg-transparent"
+            placeholder="Website"
+            value={form.socials.website}
+            onChange={(e) =>
+              setForm((f) => ({ ...f, socials: { ...f.socials, website: e.target.value } }))
+            }
+          />
+          <input
+            className="w-full rounded-xl border px-3 py-2 bg-transparent"
+            placeholder="Telegram"
+            value={form.socials.telegram}
+            onChange={(e) =>
+              setForm((f) => ({ ...f, socials: { ...f.socials, telegram: e.target.value } }))
+            }
+          />
         </div>
       </div>
 
-      <div className="flex gap-3">
+      <div>
         <button
-          disabled={!valid || loading}
-          onClick={onCreate}
-          className="px-4 py-2 rounded-xl border disabled:opacity-50"
+          type="button"
+          onClick={handleCreate}
+          disabled={!connected || submitting}
+          className="rounded-xl border px-4 py-2 disabled:opacity-50"
+          title={!connected ? 'Connect wallet to enable' : ''}
         >
-          {loading ? 'Creating…' : 'Create coin'}
+          {submitting ? 'Creating…' : 'Create coin'}
         </button>
-        {!connected && <span className="text-sm opacity-70">Connect wallet to enable</span>}
-      </div>
+        {!connected && (
 
-      {result && (
-        <div className="rounded-2xl border p-4 space-y-2">
-          <div className="font-semibold">Created!</div>
-          <div>Market ID: <code>{result.marketId}</code></div>
-          <div>Curve: <code>{JSON.stringify(result.curveConfig)}</code></div>
-
-          <div className="flex gap-2 mt-2">
-            <input id="amount" className="rounded-lg border p-2 bg-black/10" placeholder="0.2" defaultValue={0.2}/>
-            <button
-              type="button"
-              disabled={buyLoading}
-              onClick={buyFirst}
-              className={`px-3 py-2 rounded-lg border transition
-                ${buyLoading ? 'opacity-60 cursor-not-allowed' : 'hover:bg-white/5 active:scale-[0.98]'}`}
-            >
-              {buyLoading ? 'Sending…' : (buySig ? 'Buy again' : 'Buy first')}
-            </button>
-            {buySig && (
-              <a
-                href={`https://explorer.solana.com/tx/${buySig}?cluster=devnet`}
-                target="_blank" rel="noreferrer"
-                className="px-3 py-2 rounded-lg border hover:bg-white/5"
-              >
-                View tx
-              </a>
-            )}
-          </div>
-        </div>
-      )}
-    </main>
-  );
-}
