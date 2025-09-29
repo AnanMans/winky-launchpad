@@ -1,6 +1,5 @@
 import { NextResponse, NextRequest } from 'next/server';
 import { tradesForCoin, addTrade } from '../../../../../lib/store';
-import type { Trade } from '../../../../../lib/types';
 
 export async function GET(
   _req: NextRequest,
@@ -18,13 +17,13 @@ export async function POST(
   const { id } = await context.params;
   const body = await req.json().catch(() => ({}));
   const amountSol = Number(body?.amountSol);
-  const side = (body?.side === 'sell' ? 'sell' : 'buy') as Trade['side'];
+  const side: 'buy' | 'sell' = body?.side === 'sell' ? 'sell' : 'buy';
 
   if (!amountSol || amountSol <= 0) {
     return new NextResponse('Invalid amount', { status: 400 });
   }
 
-  const t: Trade = {
+  const t = {
     id: `${id}-${Date.now()}`,
     coinId: id,
     side,
@@ -32,7 +31,6 @@ export async function POST(
     ts: new Date().toISOString(),
   };
 
-  await addTrade(t);
+  await addTrade(t as any);
   return NextResponse.json({ trade: t });
 }
-
