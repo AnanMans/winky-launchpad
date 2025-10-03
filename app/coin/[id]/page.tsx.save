@@ -1,5 +1,5 @@
 'use client';
-import { quoteTokensUi } from '../../../lib/curve';
+
 import React, { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
@@ -29,17 +29,6 @@ const { connected, publicKey, sendTransaction, signTransaction } = useWallet() a
   const [buyBusy, setBuyBusy] = useState(false);
   const [sellBusy, setSellBusy] = useState(false);
   const [lastSig, setLastSig] = useState<string | null>(null);
-const tokensPreview = React.useCallback((amt: number) => {
-  if (!coin) return 0;
-  return Math.floor(
-    quoteTokensUi(amt, {
-      curve: (coin.curve as any) ?? 'linear',
-      strength: (coin.strength as 1 | 2 | 3) ?? 2,
-      startPrice: coin.startPrice ?? null,
-      coinId: coin.id,
-    })
-  );
-}, [coin]);
 
   // --- Load coin ---
   useEffect(() => {
@@ -170,29 +159,22 @@ async function sell(amount: number) {
       tx = VersionedTransaction.deserialize(bytes);
     }
 
-    // 4) Try to simulate (BEST-EFFORT). If RPC says "Invalid arguments", log it and continue.
-    try {
-      // @ts-ignore – accepts both classes
-      const sim = await connection.simulateTransaction(tx, { sigVerify: false });
-      if (sim.value.err) {
-        const logs = (sim.value.logs || []).join('\n');
-        console.warn('Sell simulation failed (continuing):', sim.value.err, '\n', logs);
-        // Don't throw — let the real send surface the wallet/RPC error
-      }
-    } catch (simErr: any) {
-      console.warn('Sell simulateTransaction error (continuing):', simErr?.message || simErr);
-      // Do NOT throw here — proceed to signing/sending
+    // 4) Simulate FIRST to get real logs if anything else is wrong
+    // @ts-ignore web3 accepts both Transaction and VersionedTransaction
+    const sim = await connection.simulateTransaction(tx, { sigVerify: false });
+    if (sim.value.err) {
+      const logs = (sim.value.logs || []).join('\n');
+      throw new Error(`Simulation failed: ${JSON.stringify(sim.value.err)}\n${logs}`);
     }
 
-    // 5) Prefer provider.signAndSendTransaction (best compatibility for mixed signatures)
+    // 5) Try provider.signAndSendTransaction (Phantom, etc.)
     const provider: any = (globalThis as any).solana;
-    let sig: string | null = null;
-
     try {
       if (provider?.signAndSendTransaction) {
-        const r = await provider.signAndSendTransaction(tx as any);
-        sig = typeof r === 'string' ? r : r?.signature || null;
+        const res = await provider.signAndSendTransaction(tx as any);
+        const sig = typeof res === 'string' ? res : res?.signature;
         if (!sig) throw new Error('Provider returned no signature');
+        setLastSig(sig);
       } else {
         throw new Error('Provider signAndSendTransaction not available');
       }
@@ -203,24 +185,26 @@ async function sell(amount: number) {
       if (typeof signTransaction === 'function') {
         const signed = await signTransaction(tx as any);
         const raw = (signed as any).serialize();
-        sig = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 3 });
+        const sig2 = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 3 });
+        setLastSig(sig2);
       } else if (provider?.signTransaction) {
         const signed = await provider.signTransaction(tx as any);
         const raw = (signed as any).serialize();
-        sig = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 3 });
+        const sig2 = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 3 });
+        setLastSig(sig2);
       } else {
-        // 7) Last resort: adapter sendTransaction
-        sig = await sendTransaction(tx as any, connection, {
+        // 7) Last resort: adapter's sendTransaction
+        const sig3 = await sendTransaction(tx as any, connection, {
           preflightCommitment: 'processed',
           maxRetries: 3,
           skipPreflight: false,
         });
+        setLastSig(sig3);
       }
     }
 
-    setLastSig(sig!);
-
-    // 8) Fire-and-forget: record trade
+    // 8) Record trade (best-effort)
+    const sig = lastSig;
     fetch(`/api/coins/${encodeURIComponent(coin.id)}/trades`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -232,7 +216,7 @@ async function sell(amount: number) {
       }),
     }).catch(() => {});
 
-    alert(`✅ Sold ${amount} SOL\nSignature: ${sig}`);
+    alert(`✅ Sold ${amount} SOL\nSignature: ${sig ?? '(pending)'}`);
   } catch (e: any) {
     console.error('Sell error:', e);
     alert(`❌ Sell failed: ${e?.message || String(e)}`);
@@ -333,11 +317,7 @@ async function sell(amount: number) {
                   ? 'hover:bg-white/10 active:scale-[0.99] cursor-pointer'
                   : 'opacity-50 cursor-not-allowed'
               }`}
-title={
-  connected
-    ? `Buy ${amt} SOL ≈ ${tokensPreview(amt).toLocaleString()} tokens`
-    : 'Connect wallet to enable'
-}
+              title={connected ? `Buy ${amt} SOL worth` : 'Connect wallet to enable'}
             >
               {amt.toFixed(2)} SOL
             </button>
@@ -368,11 +348,7 @@ title={
                   ? 'hover:bg-white/10 active:scale-[0.99] cursor-pointer'
                   : 'opacity-50 cursor-not-allowed'
               }`}
-title={
-  connected
-    ? `Sell ${amt} SOL ≈ ${tokensPreview(amt).toLocaleString()} tokens`
-    : 'Connect wallet to enable'
-}
+              title={connected ? `Sell ${amt} SOL worth` : 'Connect wallet to enable'}
             >
               {amt.toFixed(2)} SOL
             </button>
