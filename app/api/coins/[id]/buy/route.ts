@@ -22,11 +22,13 @@ function bad(msg: string, code = 400) {
 }
 
 // Convert UI amount (e.g., 123.45 tokens) to base units for a given decimals
-function uiToAmount(ui: number, decimals: number): bigint {
+function uiToAmount(ui: string | number, decimals: number): bigint {
   const s = String(ui);
   const [i, f = ''] = s.split('.');
   const frac = (f + '0'.repeat(decimals)).slice(0, decimals);
-  return BigInt(i || '0') * (10n ** BigInt(decimals)) + BigInt(frac || '0');
+  const ten = BigInt(10);
+  const pow = ten ** BigInt(decimals);
+  return BigInt(i || '0') * pow + BigInt(frac || '0');
 }
 
 export async function POST(
