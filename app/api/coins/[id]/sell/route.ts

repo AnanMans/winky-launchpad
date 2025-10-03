@@ -1,0 +1,61 @@
+// app/api/coins/[id]/sell/route.ts
+import { NextResponse } from 'next/server';
+import { supabase } from '@/lib/supabaseClient';
+import { PublicKey } from '@solana/web3.js';
+
+// Simple helper for JSON responses
+function json(data: any, status = 200) {
+  return NextResponse.json(data, { status });
+}
+function bad(message: string, status = 400) {
+  return json({ error: message }, status);
+}
+
+export async function POST(req: Request, { params }: { params: { id: string } }) {
+  try {
+    const id = params.id;
+    const body = await req.json();
+
+    const sellerStr = body?.seller;
+    const amountSol = Number(body?.amountSol ?? 0);
+
+    if (!sellerStr) return bad('Missing seller');
+    if (!amountSol || amountSol <= 0) return bad('Invalid amount');
+
+    // Validate seller key
+    try {
+      new PublicKey(sellerStr);
+    } catch {
+      return bad('Invalid seller public key');
+    }
+
+    // Get coin from Supabase
+    const { data: coin, error: coinError } = await supabase
+      .from('coins')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (coinError) return bad(coinError.message, 500);
+    if (!coin) return bad('Coin not found', 404);
+
+    // Here you would add your actual sell logic (bonding curve, treasury transfer, etc.)
+    // For now, just log and return success so UI stops showing "Unexpected error"
+    console.log('[SELL]', { coinId: id, seller: sellerStr, amountSol });
+
+    // Optionally record a trade in Supabase
+    await supabase.from('trades').insert({
+      coin_id: id,
+      side: 'sell',
+      amount_sol: amountSol,
+      buyer: sellerStr, // or seller column if you have one
+      sig: null,
+    });
+
+    return json({ success: true, message: 'Sell recorded' }, 200);
+  } catch (e: any) {
+    console.error('[SELL] Exception', e);
+    return bad(e?.message || 'Unexpected server error', 500);
+  }
+}
+

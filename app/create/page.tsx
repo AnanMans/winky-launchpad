@@ -1,5 +1,5 @@
 'use client';
-
+import ConnectWallet from '@/components/ConnectWallet';
 import React, { useState } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
@@ -13,7 +13,6 @@ export default function CreatePage() {
 
   const [form, setForm] = useState({
     curve: 'degen' as Curve,
-    startPrice: 0.003,
     strength: 2 as 1 | 2 | 3,
     name: '',
     symbol: '',
@@ -31,7 +30,7 @@ export default function CreatePage() {
     if (!form.name || form.name.trim().length < 3) {
       nextErrors.name = 'Name must be at least 3 characters.';
     }
-    if (!TICKER_RE.test(form.symbol)) {
+    if (!TICKER_RE.test(form.symbol.trim().toUpperCase())) {
       nextErrors.symbol = 'Ticker must be 2–6 chars using A–Z or 0–9.';
     }
     if (Object.keys(nextErrors).length) {
@@ -40,66 +39,64 @@ export default function CreatePage() {
       return;
     }
 
-try {
-  setSubmitting(true);
+    try {
+      setSubmitting(true);
 
-  const res = await fetch('/api/coins', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      curve: form.curve,
-      startPrice: Number(form.startPrice),
-      strength: form.strength,
-      name: form.name?.trim(),
-      symbol: form.symbol?.trim().toUpperCase(),
-      description: form.description?.trim() || '',
-      logoUrl: form.logoUrl?.trim() || '',
-      socials: {
-        x: form.socials.x?.trim() || '',
-        website: form.socials.website?.trim() || '',
-        telegram: form.socials.telegram?.trim() || '',
-      },
-    }),
-  });
+      const res = await fetch('/api/coins', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // NOTE: no startPrice here — server sets p0 by policy
+        body: JSON.stringify({
+          curve: form.curve,
+          strength: form.strength,
+          name: form.name.trim(),
+          symbol: form.symbol.trim().toUpperCase(),
+          description: form.description?.trim() || '',
+          logoUrl: form.logoUrl?.trim() || '',
+          socials: {
+            x: form.socials.x?.trim() || '',
+            website: form.socials.website?.trim() || '',
+            telegram: form.socials.telegram?.trim() || '',
+          },
+        }),
+      });
 
-  // Read response body (text first) so we can show detailed errors
-  const text = await res.text();
-  let payload: any = null;
-  try { payload = JSON.parse(text); } catch {}
+      const text = await res.text();
+      let payload: any = null;
+      try { payload = JSON.parse(text); } catch {}
 
-  if (!res.ok) {
-    const msg = payload?.error || payload?.message || text || 'Create failed';
-    alert(`Error: ${msg}`);
-    setSubmitting(false);
-    return;
-  }
+      if (!res.ok) {
+        const msg = payload?.error || payload?.message || text || 'Create failed';
+        alert(`Error: ${msg}`);
+        setSubmitting(false);
+        return;
+      }
 
-  const newId = payload?.coin?.id ?? payload?.id;
-  if (!newId) {
-    alert('Error: invalid response from server.');
-    setSubmitting(false);
-    return;
-  }
+      const newId = payload?.coin?.id ?? payload?.id;
+      if (!newId) {
+        alert('Error: invalid response from server.');
+        setSubmitting(false);
+        return;
+      }
 
-  // Success → go to the coin page
-  router.push(`/coin/${encodeURIComponent(newId)}`);
-} catch (e: any) {
-  alert(`Error: ${e?.message || String(e)}`);
-} finally {
-  setSubmitting(false);
-}
-
-
+      // Success → go to the coin page
+      router.push(`/coin/${encodeURIComponent(newId)}`);
+    } catch (e: any) {
+      alert(`Error: ${e?.message || String(e)}`);
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
     <main className="max-w-2xl mx-auto p-6 space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">Create new coin</h1>
-        <WalletMultiButton />
+<ConnectWallet />
+
       </div>
 
-      {/* Curve / Start / Strength */}
+      {/* Curve / Strength */}
       <div className="rounded-2xl border p-4 space-y-3">
         <label className="block text-sm mb-1">Curve</label>
         <select
@@ -112,36 +109,21 @@ try {
           <option value="random">Random — seeded wiggles</option>
         </select>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm mb-1">Start price (SOL)</label>
-            <input
-              type="number"
-              step="0.0001"
-              min="0"
-              className="w-full rounded-xl border px-3 py-2 bg-transparent"
-              value={form.startPrice}
-              onChange={(e) => setForm((f) => ({ ...f, startPrice: Number(e.target.value) || 0 }))}
-            />
-            <div className="text-xs opacity-70 mt-1">Start price = first token price.</div>
+        <div className="mt-3">
+          <label className="block text-sm mb-1">Strength</label>
+          <div className="flex gap-2">
+            {([1, 2, 3] as const).map((lvl) => (
+              <button
+                key={lvl}
+                type="button"
+                onClick={() => setForm((f) => ({ ...f, strength: lvl }))}
+                className={`rounded-xl border px-3 py-2 ${form.strength === lvl ? 'bg-white/10' : ''}`}
+              >
+                {lvl === 1 ? 'Low' : lvl === 2 ? 'Medium' : 'High'}
+              </button>
+            ))}
           </div>
-
-          <div>
-            <label className="block text-sm mb-1">Strength</label>
-            <div className="flex gap-2">
-              {([1, 2, 3] as const).map((lvl) => (
-                <button
-                  key={lvl}
-                  type="button"
-                  onClick={() => setForm((f) => ({ ...f, strength: lvl }))}
-                  className={`rounded-xl border px-3 py-2 ${form.strength === lvl ? 'bg-white/10' : ''}`}
-                >
-                  {lvl === 1 ? 'Low' : lvl === 2 ? 'Medium' : 'High'}
-                </button>
-              ))}
-            </div>
-            <div className="text-xs opacity-70 mt-1">Strength = how fast price climbs.</div>
-          </div>
+          <div className="text-xs opacity-70 mt-1">Strength = how fast price climbs.</div>
         </div>
       </div>
 
@@ -240,3 +222,4 @@ try {
     </main>
   );
 }
+
