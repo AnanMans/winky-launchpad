@@ -1,5 +1,6 @@
+// src/lib/store.ts
 import { supabase, supabaseAdmin } from '@/lib/db';
-import type { Trade } from '@/lib/types';
+import type { Trade, DbTrade } from '@/lib/types';
 
 // --- trades --------------------------------------------------------------
 export async function tradesForCoin(coinId: string): Promise<Trade[]> {
@@ -12,15 +13,16 @@ export async function tradesForCoin(coinId: string): Promise<Trade[]> {
 
   if (error) throw new Error(error.message);
 
-  return (data ?? []).map((t: any) => ({
+  const rows = (data ?? []) as DbTrade[];
+  return rows.map((t) => ({
     id: t.id,
     coinId: t.coin_id,
-    ts: t.ts ?? t.created_at,
+    ts: t.ts ?? t.created_at ?? new Date().toISOString(),
     amountSol: Number(t.amount_sol ?? 0),
     side: t.side,
     buyer: t.buyer ?? null,
     sig: t.sig ?? null,
-  })) as Trade[];
+  }));
 }
 
 export async function addTrade(t: {
@@ -32,8 +34,9 @@ export async function addTrade(t: {
   buyer?: string | null;
   sig?: string | null;
 }): Promise<void> {
-  const row = {
-    id: t.id, // nullable -> DB default/UUID can fill if you set it
+  const payload = {
+    // if your DB has DEFAULT gen_random_uuid(), you can omit id when undefined
+    ...(t.id ? { id: t.id } : {}),
     coin_id: t.coinId,
     ts: t.ts ?? new Date().toISOString(),
     amount_sol: t.amountSol,
@@ -42,7 +45,7 @@ export async function addTrade(t: {
     sig: t.sig ?? null,
   };
 
-  const { error } = await supabaseAdmin.from('trades').insert(row);
+  const { error } = await supabaseAdmin.from('trades').insert(payload);
   if (error) throw new Error(error.message);
 }
 
