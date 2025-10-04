@@ -1,3 +1,4 @@
+export const runtime = 'nodejs';
 import { NextResponse } from 'next/server';
 import {
   Connection, PublicKey, SystemProgram, Transaction, Keypair,

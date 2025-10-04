@@ -1,4 +1,5 @@
 // src/app/api/coins/route.ts
+export const runtime = 'nodejs';
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/db';
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
