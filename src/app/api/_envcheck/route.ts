@@ -1,4 +1,4 @@
-kexport const runtime = 'nodejs';
+export const runtime = 'nodejs';
 
 import { NextResponse } from 'next/server';
 import { Keypair } from '@solana/web3.js';
