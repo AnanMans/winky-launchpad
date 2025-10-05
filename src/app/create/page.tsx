@@ -4,11 +4,8 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
-
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
-import { PublicKey, SystemProgram, Transaction, LAMPORTS_PER_SOL } from '@solana/web3.js';
-
-import WalletButton from '@/components/WalletButton';
+import { LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
 
 function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(' ');
@@ -17,10 +14,117 @@ function clampTicker(x: string) {
   return x.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
 }
 
+/** One-button uploader: pick → auto-upload → preview */
+function SimpleUploader({
+  onUploaded,
+  disabled,
+}: {
+  onUploaded: (url: string) => void;
+  disabled?: boolean;
+}) {
+  const [uploading, setUploading] = useState(false);
+  const [fileName, setFileName] = useState<string | null>(null);
+  const [preview, setPreview] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function handlePick(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setErr(null);
+    setFileName(f.name);
+
+    const isImage = /^image\/(png|jpeg|gif)$/.test(f.type);
+    const isVideo = f.type === 'video/mp4';
+    if (!isImage && !isVideo) {
+      setErr('Allowed types: .jpg .png .gif .mp4');
+      return;
+    }
+    if (isImage && f.size > 15 * 1024 * 1024) {
+      setErr('Max image size is 15MB.');
+      return;
+    }
+    if (isVideo && f.size > 30 * 1024 * 1024) {
+      setErr('Max video size is 30MB.');
+      return;
+    }
+
+    if (isImage) setPreview(URL.createObjectURL(f));
+    else setPreview(null);
+
+    try {
+      setUploading(true);
+      const fd = new FormData();
+      fd.append('file', f);
+      fd.append('prefix', 'coins/');
+
+      const res = await fetch('/api/upload', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error((await res.text()) || 'Upload failed');
+      const j = await res.json();
+      if (!j?.url) throw new Error('Upload failed (no URL returned)');
+      onUploaded(j.url);
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    } finally {
+      setUploading(false);
+      e.currentTarget.value = '';
+    }
+  }
+
+  return (
+    <div className="grid gap-2 rounded-xl border border-white/10 p-4">
+      <label className="text-sm font-medium">Select image or video to upload</label>
+
+      <div className="flex items-center gap-3">
+        {/* Hidden input + styled label as button */}
+        <label
+          className={cx(
+            'px-4 py-1.5 rounded-lg text-sm cursor-pointer',
+            disabled ? 'bg-white/15 text-white/40 cursor-not-allowed' : 'bg-white text-black'
+          )}
+          title={disabled ? 'Connect your wallet first' : 'Choose a file'}
+        >
+          {uploading ? 'Uploading…' : 'Select file'}
+          <input
+            type="file"
+            accept=".jpg,.jpeg,.png,.gif,.mp4"
+            onChange={handlePick}
+            disabled={disabled || uploading}
+            className="hidden"
+          />
+        </label>
+
+        {fileName && (
+          <span className="text-xs text-white/70 truncate max-w-[260px]" title={fileName}>
+            {fileName}
+          </span>
+        )}
+      </div>
+
+      <p className="text-xs text-white/50">
+        Image: max 15MB (.jpg .gif .png). Video: max 30MB (.mp4).
+      </p>
+
+      {preview && (
+        <div className="mt-2">
+          <Image
+            src={preview}
+            alt="preview"
+            width={160}
+            height={160}
+            className="rounded-md border border-white/10 object-cover"
+          />
+        </div>
+      )}
+
+      {err && <p className="text-xs text-red-400 break-all">{err}</p>}
+    </div>
+  );
+}
+
 export default function CreatePage() {
   const router = useRouter();
-  const { publicKey, sendTransaction, connected } = useWallet();
   const { connection } = useConnection();
+  const { publicKey, sendTransaction, connected } = useWallet();
 
   // form
   const [name, setName] = useState('');
@@ -30,57 +134,15 @@ export default function CreatePage() {
   const [xUrl, setXUrl] = useState('');
   const [tg, setTg] = useState('');
   const [curve, setCurve] = useState<'linear' | 'degen' | 'random'>('linear');
-  const [strength, setStrength] = useState<number>(2);
+  const [strength, setStrength] = useState(2);
+  const [logoUrl, setLogoUrl] = useState<string | null>(null);
 
-  // upload
-  const [file, setFile] = useState<File | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [uploadedUrl, setUploadedUrl] = useState<string | null>(null);
-  const [uploadErr, setUploadErr] = useState<string | null>(null);
-
-  // first-buy modal
+  // modal (first buy)
   const [createdId, setCreatedId] = useState<string | null>(null);
   const [firstBuySol, setFirstBuySol] = useState<string>('0.05');
   const [showBuy, setShowBuy] = useState(false);
 
-  const logoMissing = !uploadedUrl;
-  const canSubmit = Boolean(name && symbol && !logoMissing);
-
-  async function uploadFileToSupabase(f: File): Promise<string> {
-    const form = new FormData();
-    // If your /api/upload supports a folder prefix, uncomment:
-    // form.append('prefix', 'coins/');
-    form.append('file', f);
-
-    const res = await fetch('/api/upload', { method: 'POST', body: form });
-    if (!res.ok) {
-      const j = await res.json().catch(() => ({}));
-      throw new Error(j?.error || 'Upload failed');
-    }
-    const j = await res.json();
-    return j.url as string;
-  }
-
-  async function handleUploadClick() {
-    if (!file) {
-      setUploadErr('Pick an image or video first.');
-      return;
-    }
-    if (file.size > 30 * 1024 * 1024) {
-      setUploadErr('Max size is 30MB.');
-      return;
-    }
-    setUploading(true);
-    setUploadErr(null);
-    try {
-      const url = await uploadFileToSupabase(file);
-      setUploadedUrl(url);
-    } catch (e: unknown) {
-      setUploadErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setUploading(false);
-    }
-  }
+  const canSubmit = name.trim().length > 0 && symbol.trim().length > 0 && !!logoUrl;
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -96,43 +158,39 @@ export default function CreatePage() {
           name,
           symbol,
           description: desc,
-          logoUrl: uploadedUrl, // use the URL we already uploaded
+          logoUrl,
           socials: { website, x: xUrl, telegram: tg },
           curve,
           strength,
         }),
       });
-      const j = await res.json();
+      const j = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(j?.error || 'Create failed');
 
       setCreatedId(j.coin.id);
       setShowBuy(true);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error('Create failed:', msg);
-      alert(`Create failed: ${msg}`);
+    } catch (e: any) {
+      console.error('Create failed', e);
+      alert(`Create failed: ${e?.message || String(e)}`);
     }
   }
 
   async function confirmFirstBuy() {
     if (!createdId) return;
-
     const amt = Number(firstBuySol);
-    // If creator skips or enters <= 0, just go to coin page
+
     if (!Number.isFinite(amt) || amt <= 0) {
       router.push(`/coin/${createdId}`);
       return;
     }
     if (!publicKey) {
-      alert('Connect your wallet first.');
+      alert('Connect wallet first');
       return;
     }
 
     try {
-      // 1) pay treasury (server verifies payment)
-      const treasuryStr = process.env.NEXT_PUBLIC_TREASURY!;
-      const treasury = new PublicKey(treasuryStr);
-
+      // 1) pay treasury
+      const treasury = new PublicKey(process.env.NEXT_PUBLIC_TREASURY!);
       const tx = new Transaction().add(
         SystemProgram.transfer({
           fromPubkey: publicKey,
@@ -143,10 +201,9 @@ export default function CreatePage() {
       tx.feePayer = publicKey;
       const { blockhash } = await connection.getLatestBlockhash('processed');
       tx.recentBlockhash = blockhash;
-
       const sig = await sendTransaction(tx, connection, { skipPreflight: true });
 
-      // 2) server mints tokens to creator based on curve
+      // 2) tell server to mint to creator
       const res = await fetch(`/api/coins/${createdId}/buy`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -156,15 +213,13 @@ export default function CreatePage() {
           sig,
         }),
       });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error(j?.error || 'Server buy failed');
-      }
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || 'Server buy failed');
+
       router.push(`/coin/${createdId}`);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error('first-buy error:', msg);
-      alert(`Buy failed: ${msg}`);
+    } catch (e: any) {
+      console.error('first-buy error', e);
+      alert(`Buy failed: ${e?.message || String(e)}`);
       router.push(`/coin/${createdId}`);
     }
   }
@@ -172,13 +227,12 @@ export default function CreatePage() {
   return (
     <main className="min-h-screen p-6 md:p-10 max-w-3xl mx-auto grid gap-8">
       <header className="flex items-center justify-between">
-        <Link href="/" className="flex items-center gap-2 font-semibold">
+        <Link href="/" className="flex items-center gap-2 font-semibold cursor-pointer">
           <Image src="/logo.svg" alt="logo" width={28} height={28} />
           <span>Winky Launchpad</span>
         </Link>
         <nav className="flex items-center gap-3">
-          <Link className="underline" href="/coins">Coins</Link>
-          <WalletButton />
+          <Link className="underline cursor-pointer" href="/coins">Coins</Link>
         </nav>
       </header>
 
@@ -191,41 +245,30 @@ export default function CreatePage() {
         </div>
 
         <form onSubmit={onSubmit} className="grid gap-5">
-          {/* Name */}
           <div className="grid gap-2">
             <label className="text-sm text-white/70">Coin name</label>
             <input
               maxLength={20}
-              className={cx(
-                'px-3 py-2 rounded-lg bg-black/30 border',
-                !name && 'border-red-500/60'
-              )}
+              className="px-3 py-2 rounded-lg bg-black/30 border"
               placeholder="Name your coin"
               value={name}
               onChange={(e) => setName(e.target.value.slice(0, 20))}
               required
             />
-            <p className="text-xs text-white/50">{name.length}/20</p>
           </div>
 
-          {/* Ticker */}
           <div className="grid gap-2">
             <label className="text-sm text-white/70">Ticker</label>
             <input
               maxLength={8}
-              className={cx(
-                'px-3 py-2 rounded-lg bg-black/30 border',
-                !symbol && 'border-red-500/60'
-              )}
+              className="px-3 py-2 rounded-lg bg-black/30 border"
               placeholder="Add a coin ticker (e.g. PEPE)"
               value={symbol}
               onChange={(e) => setSymbol(clampTicker(e.target.value))}
               required
             />
-            <p className="text-xs text-white/50">{symbol.length}/8</p>
           </div>
 
-          {/* Description */}
           <div className="grid gap-2">
             <label className="text-sm text-white/70">Description (optional)</label>
             <textarea
@@ -237,7 +280,6 @@ export default function CreatePage() {
             />
           </div>
 
-          {/* Socials */}
           <div className="grid gap-2">
             <label className="text-sm text-white/70">Add social links (optional)</label>
             <div className="grid md:grid-cols-3 gap-3">
@@ -262,62 +304,16 @@ export default function CreatePage() {
             </div>
           </div>
 
-          {/* Upload with explicit button */}
-          <div className="grid gap-2">
-            <label className="text-sm text-white/70">
-              Select image or video to upload{' '}
-              {!connected && <span className="text-red-400">(connect wallet)</span>}
-            </label>
-            <div className="flex items-center gap-3">
-              <input
-                type="file"
-                accept=".jpg,.jpeg,.png,.gif,.mp4"
-                onChange={(e) => {
-                  setFile(e.target.files?.[0] ?? null);
-                  setUploadedUrl(null);
-                  setUploadErr(null);
-                }}
-              />
-              <button
-                type="button"
-                onClick={handleUploadClick}
-                disabled={!file || uploading}
-                className={cx(
-                  'px-4 py-1.5 rounded-lg text-sm',
-                  !file || uploading ? 'bg-white/15 text-white/40 cursor-not-allowed' : 'bg-white text-black'
-                )}
-              >
-                {uploading ? 'Uploading…' : 'Upload'}
-              </button>
-            </div>
+          {/* simple one-button uploader */}
+          <SimpleUploader onUploaded={setLogoUrl} disabled={!connected} />
 
-            <p className="text-xs text-white/50">
-              Image: max 15MB (.jpg .gif .png). Video: max 30MB (.mp4).
-            </p>
-
-            {file && !uploadedUrl && (
-              <p className="text-xs text-white/60 break-all">
-                Selected: {file.name} ({Math.ceil(file.size / 1024)} KB)
-              </p>
-            )}
-            {uploadedUrl && (
-              <p className="text-xs text-green-500 break-all">Uploaded ✔ {uploadedUrl}</p>
-            )}
-            {uploadErr && <p className="text-xs text-red-400 break-all">{uploadErr}</p>}
-
-            {!uploadedUrl && (
-              <p className="text-sm text-red-400">Please click “Upload” before creating.</p>
-            )}
-          </div>
-
-          {/* Curve + strength */}
           <div className="grid md:grid-cols-2 gap-3">
             <div className="grid gap-2">
               <label className="text-sm text-white/70">Curve</label>
               <select
-                className="px-3 py-2 rounded-lg bg-black/30 border"
+                className="px-3 py-2 rounded-lg bg-black/30 border cursor-pointer"
                 value={curve}
-                onChange={(e) => setCurve(e.target.value as 'linear' | 'degen' | 'random')}
+                onChange={(e) => setCurve(e.target.value as any)}
               >
                 <option value="linear">Linear</option>
                 <option value="degen">Degen</option>
@@ -327,7 +323,7 @@ export default function CreatePage() {
             <div className="grid gap-2">
               <label className="text-sm text-white/70">Strength</label>
               <select
-                className="px-3 py-2 rounded-lg bg-black/30 border"
+                className="px-3 py-2 rounded-lg bg-black/30 border cursor-pointer"
                 value={strength}
                 onChange={(e) => setStrength(Number(e.target.value))}
               >
@@ -338,16 +334,16 @@ export default function CreatePage() {
             </div>
           </div>
 
-          {/* Submit */}
           <div className="pt-2">
             <button
               type="submit"
               className={cx(
                 'px-5 py-2 rounded-lg font-medium',
-                canSubmit ? 'bg-white text-black' : 'bg-white/20 text-white/40 cursor-not-allowed'
+                canSubmit
+                  ? 'bg-white text-black cursor-pointer'
+                  : 'bg-white/20 text-white/40 cursor-not-allowed'
               )}
               disabled={!canSubmit}
-              onClick={onSubmit}
             >
               Create coin
             </button>
@@ -361,7 +357,8 @@ export default function CreatePage() {
           <div className="bg-zinc-900 border rounded-2xl p-6 w-[520px] max-w-[95vw] grid gap-4">
             <h3 className="text-xl font-semibold">First buy (optional)</h3>
             <p className="text-white/70 text-sm">
-              Choose how many SOL to spend on your own coin. Buying a small amount helps protect your coin from snipers.
+              Choose how many SOL to spend on your own coin. Buying a small amount can
+              help protect your coin from snipers.
             </p>
             <div className="flex items-center gap-3">
               <input
@@ -373,7 +370,7 @@ export default function CreatePage() {
               />
               <button
                 onClick={confirmFirstBuy}
-                className="px-4 py-2 rounded-lg bg-white text-black font-medium"
+                className="px-4 py-2 rounded-lg bg-white text-black font-medium cursor-pointer"
               >
                 Confirm
               </button>
@@ -381,7 +378,7 @@ export default function CreatePage() {
                 onClick={() => {
                   if (createdId) router.push(`/coin/${createdId}`);
                 }}
-                className="px-4 py-2 rounded-lg border"
+                className="px-4 py-2 rounded-lg border cursor-pointer"
               >
                 Skip
               </button>
