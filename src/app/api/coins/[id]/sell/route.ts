@@ -124,13 +124,13 @@ export async function POST(
       TOKEN_PID
     );
 
-    // 6) Quote how many tokens to pull from seller (UI units)
-    const tokensUi = quoteSellTokensUi(
-      amountSol,
-      ((coin.curve || 'linear') as CurveName),
-      Number(coin.strength ?? 2),
-      Number(coin.start_price ?? 0)
-    );
+// 6) Quote how many tokens to pull from seller (UI units)
+const tokensUi = quoteSellTokensUi(
+  (coin.curve || 'linear') as CurveName,
+  Number(coin.strength ?? 2),
+  Number(coin.start_price ?? 0),
+  amountSol
+);
 
     // 7) Build the token transfer (seller -> vault)
     const amountTokensBase = uiToAmount(tokensUi, decimals);
