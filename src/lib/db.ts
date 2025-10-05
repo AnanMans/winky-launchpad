@@ -1,30 +1,23 @@
+// src/lib/db.ts
 import { createClient } from '@supabase/supabase-js';
 
-const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+const service = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
+// Never throw at import time — only warn.
+// (Throwing here is what broke Vercel builds.)
 if (!url || !anon) {
-  throw new Error(
-    'Supabase env missing: NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY'
-  );
+  console.warn('[supabase] Missing NEXT_PUBLIC_SUPABASE_URL / ANON key');
+}
+if (!service) {
+  console.warn('[supabase] SUPABASE_SERVICE_ROLE_KEY missing — admin writes may fail');
 }
 
-/** Public (browser-safe) client */
+// Public client (safe for reads)
 export const supabase = createClient(url, anon);
 
-/** Admin (server-only) client — requires SERVICE_ROLE key and Node runtime */
-export const supabaseAdmin =
-  typeof window === 'undefined'
-    ? (() => {
-        const service = process.env.SUPABASE_SERVICE_ROLE_KEY;
-        if (!service) {
-          throw new Error(
-            'SUPABASE_SERVICE_ROLE_KEY is required on the server. Set it in Vercel Project → Settings → Environment Variables.'
-          );
-        }
-        return createClient(url, service, {
-          auth: { persistSession: false },
-        });
-      })()
-    : (null as any);
+// Admin client — falls back to anon so import never crashes.
+// If service key is missing, writes may get rejected by RLS (but builds won’t fail).
+export const supabaseAdmin = createClient(url, service || anon);
 
