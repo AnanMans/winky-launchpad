@@ -1,128 +1,125 @@
-// src/app/coins/page.tsx
 export const dynamic = 'force-dynamic';
 
-import Link from 'next/link';
+import Link from "next/link";
+import Image from "next/image";
 
-// --- types just for this page ---
-type CoinRow = {
+type CoinCamel = {
   id: string;
   name: string;
   symbol: string;
-  logo_url?: string | null;
+  description?: string;
+  logoUrl?: string | null;
   socials?: Record<string, string> | null;
-  curve: string;
-  strength: number;
+  curve?: "linear" | "degen" | "random";
+  startPrice?: number | null;
+  strength?: number | null;
+  createdAt?: string | null;
   mint?: string | null;
-  created_at?: string | null;
 };
 
-function isEmpty(v: unknown) {
-  return v == null || String(v).trim() === '';
-}
-
-function isValidUrl(u?: string | null) {
-  if (!u || isEmpty(u)) return false;
+// Fetch relative to the same origin so it works on Vercel too.
+async function getCoins(): Promise<CoinCamel[]> {
   try {
-    new URL(u);
-    return true;
+    const res = await fetch('/api/coins', { cache: 'no-store' });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const arr = Array.isArray(data?.coins) ? data.coins : [];
+
+    // Normalize snake_case → camelCase defensively (in case API returns either)
+    return arr.map((c: any) => ({
+      id: c.id,
+      name: c.name,
+      symbol: c.symbol,
+      description: c.description ?? "",
+      logoUrl: c.logoUrl ?? c.logo_url ?? "",
+      socials: c.socials ?? {},
+      curve: (c.curve ?? "linear") as CoinCamel["curve"],
+      startPrice: Number(c.startPrice ?? c.start_price ?? 0),
+      strength: Number(c.strength ?? 2),
+      createdAt: c.createdAt ?? c.created_at ?? null,
+      mint: c.mint ?? null,
+    })) as CoinCamel[];
   } catch {
-    return false;
+    return [];
   }
 }
 
-async function fetchCoins(): Promise<CoinRow[]> {
-  // If you didn’t set NEXT_PUBLIC_BASE_URL on Vercel, the empty string falls back to same-origin.
-  const base = process.env.NEXT_PUBLIC_BASE_URL ?? '';
-  const res = await fetch(`${base}/api/coins`, { cache: 'no-store' }).catch(() => null);
-  if (!res || !res.ok) return [];
-  const json = await res.json().catch(() => ({}));
-  return Array.isArray(json?.coins) ? (json.coins as CoinRow[]) : [];
-}
-
 export default async function CoinsPage() {
-  const coins = await fetchCoins();
+  const coins = await getCoins();
 
   return (
-    <main className="max-w-5xl mx-auto p-6 space-y-6">
+    <main className="min-h-screen p-6 md:p-10 max-w-6xl mx-auto grid gap-6">
       <header className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Coins</h1>
-        <nav className="flex items-center gap-4">
-          <Link href="/" className="underline">Home</Link>
-          <Link href="/create" className="underline">Create</Link>
-        </nav>
+        <h1 className="text-2xl font-bold">Coins</h1>
+        <Link href="/create" className="rounded-xl border px-4 py-2">
+          Create
+        </Link>
       </header>
 
-      <p className="text-sm opacity-70">
-        <span className="font-medium">Legend:</span>{' '}
-        <span className="text-red-600">red highlight</span> = missing recommended fields (e.g., logo URL, socials).
+      <p className="text-sm text-white/60">
+        <span className="font-medium">Legend:</span> <span className="text-red-400">red highlight</span> = missing recommended fields (e.g., logo URL, socials).
       </p>
 
-      {coins.length === 0 ? (
-        <div className="opacity-70">No coins yet.</div>
+      {!coins.length ? (
+        <div className="text-white/70">No coins yet.</div>
       ) : (
-        <ul className="grid gap-3">
+        <section className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
           {coins.map((c) => {
-            const hasValidLogo = isValidUrl(c.logo_url);
-            const missingLogo = !hasValidLogo;
-            const hasAnySocial = !!c.socials && Object.values(c.socials).some((v) => !isEmpty(v));
-            const missingSocials = !hasAnySocial;
-            const warn = missingLogo || missingSocials;
+            const hasLogo = !!c.logoUrl;
+            const hasSocial =
+              !!(c.socials && (c.socials.x || c.socials.website || c.socials.telegram));
+            const needsAttention = !hasLogo || !hasSocial;
 
             return (
-              <li
+              <Link
                 key={c.id}
+                href={`/coin/${c.id}`}
                 className={[
-                  'rounded-xl border p-3 flex items-center gap-3',
-                  warn ? 'border-red-500 bg-red-500/5' : '',
-                ].join(' ')}
+                  "rounded-2xl border p-4 bg-black/30 hover:bg-black/40 transition-colors",
+                  needsAttention ? "ring-1 ring-red-500/60" : "",
+                ].join(" ")}
               >
-                {hasValidLogo ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={c.logo_url as string}
-                    alt={c.name}
-                    className="w-10 h-10 rounded-lg object-cover border"
-                  />
-                ) : (
-                  <div className="w-10 h-10 rounded-lg border bg-red-500/20 text-red-700 text-[10px] grid place-items-center leading-tight">
-                    No<br />img
+                <div className="flex items-center gap-3">
+                  <div className="size-12 shrink-0 rounded-xl overflow-hidden border bg-black/20 flex items-center justify-center">
+                    {hasLogo ? (
+                      <Image
+                        alt={c.symbol}
+                        src={c.logoUrl!}
+                        width={48}
+                        height={48}
+                        className="object-cover"
+                      />
+                    ) : (
+                      <span className="text-xs text-white/50">No logo</span>
+                    )}
                   </div>
-                )}
-
-                <div className="flex-1 min-w-0">
-                  <div className="font-medium truncate">
-                    {c.name} <span className="opacity-70">({c.symbol})</span>
-                  </div>
-                  <div className="text-xs flex flex-wrap gap-2 mt-1">
-                    <span className="opacity-70">
-                      Curve: {c.curve} • Strength: {c.strength}
-                    </span>
-
-                    {missingLogo && (
-                      <span className="px-1.5 py-0.5 border rounded text-red-700 border-red-500/50 bg-red-500/10">
-                        missing logo
-                      </span>
-                    )}
-                    {missingSocials && (
-                      <span className="px-1.5 py-0.5 border rounded text-red-700 border-red-500/50 bg-red-500/10">
-                        no socials
-                      </span>
-                    )}
-                    {!c.mint && (
-                      <span className="px-1.5 py-0.5 border rounded text-amber-700 border-amber-500/50 bg-amber-500/10">
-                        mint pending
-                      </span>
-                    )}
+                  <div className="min-w-0">
+                    <div className="font-semibold truncate">
+                      {c.name} <span className="text-white/50">· {c.symbol}</span>
+                    </div>
+                    <div className="text-xs text-white/50">
+                      {c.curve} / strength {c.strength ?? 2}
+                    </div>
                   </div>
                 </div>
-
-                <Link className="underline shrink-0" href={`/coin/${c.id}`}>
-                  Open
-                </Link>
-              </li>
+                <div className="mt-3 text-sm line-clamp-2 text-white/70">
+                  {c.description || "—"}
+                </div>
+                <div className="mt-3 flex gap-2 text-xs text-white/50">
+                  {hasSocial ? (
+                    <>
+                      {c.socials?.x && <span>𝕏</span>}
+                      {c.socials?.website && <span>Website</span>}
+                      {c.socials?.telegram && <span>Telegram</span>}
+                    </>
+                  ) : (
+                    <span className="text-red-400">Add socials</span>
+                  )}
+                </div>
+              </Link>
             );
           })}
-        </ul>
+        </section>
       )}
     </main>
   );
