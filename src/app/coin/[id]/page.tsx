@@ -11,11 +11,14 @@ import {
   SystemProgram,
   Transaction,
   LAMPORTS_PER_SOL,
+  VersionedTransaction,
 } from '@solana/web3.js';
 import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 
 import WalletButton from '@/components/WalletButton';
 import { quoteTokensUi, quoteSellTokensUi } from '@/lib/curve';
+
+type CurveName = 'linear' | 'degen' | 'random';
 
 type Coin = {
   id: string;
@@ -24,7 +27,7 @@ type Coin = {
   description?: string;
   logoUrl?: string | null;
   socials?: Record<string, string> | null;
-  curve: 'linear' | 'degen' | 'random';
+  curve: CurveName;
   startPrice: number;
   strength: number;
   mint: string | null;
@@ -36,8 +39,8 @@ function cx(...xs: Array<string | false | null | undefined>) {
 
 export default function CoinPage() {
   const params = useParams<{ id: string }>();
-  const id = params.id;
   const searchParams = useSearchParams();
+  const id = params.id;
 
   const { connection } = useConnection();
   const { publicKey, sendTransaction, connected } = useWallet();
@@ -54,20 +57,21 @@ export default function CoinPage() {
   const [buySol, setBuySol] = useState<string>('0.05');
   const [sellSol, setSellSol] = useState<string>('0.01');
 
-  // fetch coin
+  // ---------- load coin ----------
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
+        setLoading(true);
+        setErr(null);
         const res = await fetch(`/api/coins/${id}`, { cache: 'no-store' });
-        if (!res.ok) throw new Error(await res.text());
         const j = await res.json();
-        if (!alive) return;
-        setCoin(j.coin as Coin);
-      } catch (e: unknown) {
-        setErr(e instanceof Error ? e.message : String(e));
+        if (!res.ok) throw new Error(j?.error || 'Failed to load coin');
+        if (alive) setCoin(j.coin as Coin);
+      } catch (e: any) {
+        if (alive) setErr(e?.message || String(e));
       } finally {
-        setLoading(false);
+        if (alive) setLoading(false);
       }
     })();
     return () => {
@@ -75,48 +79,42 @@ export default function CoinPage() {
     };
   }, [id]);
 
-  // prefill buy from ?buy=
-  useEffect(() => {
-    const b = searchParams.get('buy');
-    if (b && Number(b) > 0) {
-      setBuySol(String(b));
-    }
-  }, [searchParams]);
-
-  // load balances (SOL + tokens)
+  // ---------- balances ----------
   async function refreshBalances() {
-    if (!publicKey) {
-      setSolBal(0);
-      setTokBal(0);
-      return;
-    }
-    // SOL
     try {
-      const sol = await connection.getBalance(publicKey, { commitment: 'confirmed' });
-      setSolBal(sol / LAMPORTS_PER_SOL);
-    } catch {
-      setSolBal(0);
-    }
-    // Token
-    try {
-      if (!coin?.mint) {
+      if (!publicKey) {
+        setSolBal(0);
         setTokBal(0);
         return;
       }
-      // works for SPL and Token-2022 (parsed program)
-      const list = await connection.getParsedTokenAccountsByOwner(publicKey, {
-        mint: new PublicKey(coin.mint),
-      });
-      const total =
-        list.value.reduce((sum, it) => {
-          const ui =
-            it.account.data?.parsed?.info?.tokenAmount?.uiAmount as number | undefined;
-          return sum + (ui || 0);
-        }, 0) || 0;
+      const lam = await connection.getBalance(publicKey, { commitment: 'confirmed' });
+      setSolBal(lam / LAMPORTS_PER_SOL);
 
-      setTokBal(total);
+      if (coin?.mint) {
+        const mintPk = new PublicKey(coin.mint);
+        // Try direct ATA first
+        let ui = 0;
+        try {
+          const ata = getAssociatedTokenAddressSync(mintPk, publicKey, true);
+          const info = await connection.getTokenAccountBalance(ata, 'confirmed').catch(() => null);
+          if (info?.value?.uiAmount != null) ui = info.value.uiAmount;
+        } catch {
+          // fallback: parsed accounts
+          const p = await connection.getParsedTokenAccountsByOwner(publicKey, { mint: mintPk }, 'confirmed');
+          for (const acc of p.value) {
+            const amt = (acc.account.data as any).parsed?.info?.tokenAmount?.uiAmount as number | undefined;
+            if (typeof amt === 'number') {
+              ui = amt;
+              break;
+            }
+          }
+        }
+        setTokBal(ui);
+      } else {
+        setTokBal(0);
+      }
     } catch {
-      setTokBal(0);
+      // ignore
     }
   }
 
@@ -125,30 +123,46 @@ export default function CoinPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publicKey, connection, coin?.mint]);
 
-  // quotes
-  const buyTokensUi = useMemo(() => {
+  // Prefill buy from ?buy= in URL (used after "first buy" prompt)
+  useEffect(() => {
+    const b = searchParams.get('buy');
+    if (b && Number(b) > 0) setBuySol(String(b));
+  }, [searchParams]);
+
+  // ---------- quotes ----------
+  const buyTokens = useMemo(() => {
     const a = Number(buySol);
     if (!coin || !Number.isFinite(a) || a <= 0) return 0;
     return quoteTokensUi(a, coin.curve, coin.strength, coin.startPrice);
   }, [buySol, coin]);
 
-  const sellTokensUi = useMemo(() => {
+  const sellTokens = useMemo(() => {
     const a = Number(sellSol);
     if (!coin || !Number.isFinite(a) || a <= 0) return 0;
-    return quoteSellTokensUi(coin.curve, coin.strength, coin.startPrice, a);
+    // quoteSellTokensUi(amountSol, curve, strength, startPrice)
+return quoteSellTokensUi(coin.curve, coin.strength, coin.startPrice, a);
   }, [sellSol, coin]);
 
+  // ---------- actions ----------
   async function doBuy() {
-    if (!coin) return;
-    const amt = Number(buySol);
-    if (!Number.isFinite(amt) || amt <= 0) return;
     if (!publicKey) {
-      alert('Connect wallet first.');
+      alert('Connect your wallet first.');
       return;
     }
+    if (!coin) {
+      alert('Coin not loaded yet.');
+      return;
+    }
+    const amt = Number(buySol);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      alert('Enter a valid SOL amount to buy.');
+      return;
+    }
+
     try {
-      // pay treasury
-      const treasury = new PublicKey(process.env.NEXT_PUBLIC_TREASURY!);
+      // 1) Pay treasury
+      const treasuryStr = process.env.NEXT_PUBLIC_TREASURY!;
+      const treasury = new PublicKey(treasuryStr);
       const tx = new Transaction().add(
         SystemProgram.transfer({
           fromPubkey: publicKey,
@@ -159,11 +173,10 @@ export default function CoinPage() {
       tx.feePayer = publicKey;
       const { blockhash } = await connection.getLatestBlockhash('processed');
       tx.recentBlockhash = blockhash;
-
       const sig = await sendTransaction(tx, connection, { skipPreflight: true });
 
-      // server mints to buyer
-      const res = await fetch(`/api/coins/${coin.id}/buy`, {
+      // 2) Tell server to mint tokens
+      const res = await fetch(`/api/coins/${id}/buy`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -172,33 +185,35 @@ export default function CoinPage() {
           sig,
         }),
       });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error(j?.error || 'Server buy failed');
-      }
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || 'Server buy failed');
 
-      await refreshBalances();
-      alert('Buy successful!');
-    } catch (e: unknown) {
-      alert(`Buy failed: ${e instanceof Error ? e.message : String(e)}`);
+      alert(`Buy submitted: ${j.mintSig || 'ok'}`);
+      setTimeout(() => refreshBalances(), 1500);
+    } catch (e: any) {
+      console.error('buy error:', e);
+      alert(`Buy failed: ${e?.message || String(e)}`);
     }
   }
 
   async function doSell() {
-    if (!coin) return;
-    const amt = Number(sellSol);
-    if (!Number.isFinite(amt) || amt <= 0) return;
     if (!publicKey) {
-      alert('Connect wallet first.');
+      alert('Connect your wallet first.');
       return;
     }
-    if (!coin.mint) {
-      alert('Mint not ready for this coin.');
+    if (!coin) {
+      alert('Coin not loaded yet.');
       return;
     }
+    const amt = Number(sellSol);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      alert('Enter a valid SOL amount to sell.');
+      return;
+    }
+
     try {
-      // ask server for a prebuilt tx (seller fee-payer)
-      const res = await fetch(`/api/coins/${coin.id}/sell`, {
+      // Ask server for a pre-built tx (seller is fee-payer)
+      const res = await fetch(`/api/coins/${id}/sell`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -206,36 +221,41 @@ export default function CoinPage() {
           amountSol: amt,
         }),
       });
-      const j = await res.json();
-      if (!res.ok) {
-        throw new Error(j?.error || 'Sell server failed');
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || 'Server sell failed');
+
+      const b64 = j.tx as string;
+      const raw = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+
+      let tx: Transaction | VersionedTransaction;
+      try {
+        tx = VersionedTransaction.deserialize(raw);
+      } catch {
+        tx = Transaction.from(raw);
       }
 
-      // base64 -> Transaction and send
-      const raw = Buffer.from(j.tx, 'base64');
-      const tx = Transaction.from(raw);
-
       const sig = await sendTransaction(tx, connection, { skipPreflight: true });
-      console.log('sell sig:', sig);
-      await refreshBalances();
-      alert('Sell submitted!');
-    } catch (e: unknown) {
-      alert(`Sell failed: ${e instanceof Error ? e.message : String(e)}`);
+      alert(`Sell submitted: ${sig}`);
+      setTimeout(() => refreshBalances(), 1500);
+    } catch (e: any) {
+      console.error('sell error:', e);
+      alert(`Sell failed: ${e?.message || String(e)}`);
     }
   }
 
+  // ---------- render ----------
   if (loading) {
     return (
-      <main className="min-h-screen p-6 md:p-10 max-w-3xl mx-auto">
+      <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto">
         <p>Loading…</p>
       </main>
     );
   }
   if (err || !coin) {
     return (
-      <main className="min-h-screen p-6 md:p-10 max-w-3xl mx-auto">
+      <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto">
         <p className="text-red-400">Error: {err || 'Not found'}</p>
-        <Link href="/coins" className="underline">Back</Link>
+        <Link className="underline" href="/coins">Back to coins</Link>
       </main>
     );
   }
@@ -253,49 +273,59 @@ export default function CoinPage() {
         </nav>
       </header>
 
-      <section className="grid md:grid-cols-[120px_1fr] gap-4 items-center">
-        <div className="w-28 h-28 rounded-xl overflow-hidden bg-black/30 border">
+      <section className="grid gap-4 rounded-2xl border p-6 bg-black/20">
+        <div className="flex items-center gap-4">
           {coin.logoUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={coin.logoUrl} alt={coin.name} className="object-cover w-full h-full" />
+            <Image
+              src={coin.logoUrl}
+              alt={coin.name}
+              width={64}
+              height={64}
+              className="rounded-xl w-16 h-16 object-cover"
+            />
           ) : (
-            <div className="w-full h-full grid place-items-center text-white/40">No image</div>
+            <div className="w-16 h-16 rounded-xl bg-white/10" />
           )}
-        </div>
-        <div className="grid gap-1">
-          <h1 className="text-2xl font-bold">
-            {coin.name} <span className="text-white/50">({coin.symbol})</span>
-          </h1>
-          <p className="text-white/70">{coin.description || '—'}</p>
-          {coin.socials && (
-            <div className="flex flex-wrap gap-3 text-sm">
-              {coin.socials.website && <a className="underline" href={coin.socials.website} target="_blank">Website</a>}
-              {coin.socials.x && <a className="underline" href={coin.socials.x} target="_blank">X</a>}
-              {coin.socials.telegram && <a className="underline" href={coin.socials.telegram} target="_blank">Telegram</a>}
-            </div>
-          )}
-          <div className="text-sm text-white/60">
-            Curve: {coin.curve} • Strength: {coin.strength} {coin.mint ? `• Mint: ${coin.mint}` : '• Mint: pending'}
+          <div>
+            <h1 className="text-2xl font-bold">
+              {coin.name} <span className="text-white/60">({coin.symbol})</span>
+            </h1>
+            <p className="text-white/60 text-sm">
+              Curve: {coin.curve} · Strength: {coin.strength}
+            </p>
           </div>
         </div>
+
+        {coin.description && (
+          <p className="text-white/80">{coin.description}</p>
+        )}
+
+        {coin.socials && (
+          <div className="flex flex-wrap gap-3 text-sm">
+            {coin.socials.website && (
+              <a className="underline" href={coin.socials.website} target="_blank" rel="noreferrer">Website</a>
+            )}
+            {coin.socials.x && (
+              <a className="underline" href={coin.socials.x} target="_blank" rel="noreferrer">X</a>
+            )}
+            {coin.socials.telegram && (
+              <a className="underline" href={coin.socials.telegram} target="_blank" rel="noreferrer">Telegram</a>
+            )}
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-6 text-sm text-white/70">
+          <div>Wallet SOL: <span className="font-mono">{solBal.toFixed(4)}</span></div>
+          <div>Wallet {coin.symbol}: <span className="font-mono">{tokBal.toLocaleString()}</span></div>
+          <div>Mint: <span className="font-mono">{coin.mint ?? '—'}</span></div>
+        </div>
       </section>
 
-      {/* balances */}
-      <section className="rounded-2xl border p-4 bg-black/20 grid gap-2">
-        <div className="text-sm text-white/70">
-          Wallet SOL: <span className="text-white">{solBal.toFixed(4)}</span>
-        </div>
-        <div className="text-sm text-white/70">
-          Wallet {coin.symbol}: <span className="text-white">{tokBal.toLocaleString()}</span>
-        </div>
-      </section>
-
-      {/* trade box */}
-      <section className="rounded-2xl border p-6 grid md:grid-cols-2 gap-6 bg-black/20">
+      <section className="grid md:grid-cols-2 gap-6">
         {/* BUY */}
-        <div className="grid gap-3">
-          <h3 className="font-semibold">Buy</h3>
-          <div className="flex items-center gap-3">
+        <div className="rounded-2xl border p-6 bg-black/20 grid gap-4">
+          <h3 className="font-semibold text-lg">Buy</h3>
+          <div className="flex items-center gap-2">
             <input
               className="px-3 py-2 rounded-lg bg-black/30 border w-40"
               value={buySol}
@@ -303,19 +333,25 @@ export default function CoinPage() {
               inputMode="decimal"
               placeholder="0.05"
             />
-            <button onClick={doBuy} className="px-4 py-2 rounded-lg bg-white text-black font-medium">
-              Buy
-            </button>
+            <span className="text-white/60">SOL</span>
           </div>
-          <div className="text-sm text-white/60">
-            You’ll receive ~ <span className="text-white">{buyTokensUi.toLocaleString()}</span> {coin.symbol}
-          </div>
+          <p className="text-white/70 text-sm">
+            You’ll get ~ <span className="font-mono">{buyTokens.toLocaleString()}</span> {coin.symbol}
+          </p>
+          <button
+            className="px-4 py-2 rounded-lg bg-white text-black font-medium cursor-pointer"
+            onClick={doBuy}
+            disabled={!connected}
+            title={connected ? 'Buy' : 'Connect wallet first'}
+          >
+            Buy
+          </button>
         </div>
 
         {/* SELL */}
-        <div className="grid gap-3">
-          <h3 className="font-semibold">Sell</h3>
-          <div className="flex items-center gap-3">
+        <div className="rounded-2xl border p-6 bg-black/20 grid gap-4">
+          <h3 className="font-semibold text-lg">Sell</h3>
+          <div className="flex items-center gap-2">
             <input
               className="px-3 py-2 rounded-lg bg-black/30 border w-40"
               value={sellSol}
@@ -323,13 +359,19 @@ export default function CoinPage() {
               inputMode="decimal"
               placeholder="0.01"
             />
-            <button onClick={doSell} className="px-4 py-2 rounded-lg border">
-              Sell
-            </button>
+            <span className="text-white/60">SOL</span>
           </div>
-          <div className="text-sm text-white/60">
-            You’ll send ~ <span className="text-white">{sellTokensUi.toLocaleString()}</span> {coin.symbol}
-          </div>
+          <p className="text-white/70 text-sm">
+            Will send ~ <span className="font-mono">{sellTokens.toLocaleString()}</span> {coin.symbol}
+          </p>
+          <button
+            className="px-4 py-2 rounded-lg bg-white text-black font-medium cursor-pointer"
+            onClick={doSell}
+            disabled={!connected}
+            title={connected ? 'Sell' : 'Connect wallet first'}
+          >
+            Sell
+          </button>
         </div>
       </section>
     </main>
