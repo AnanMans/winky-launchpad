@@ -2,6 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import Link from "next/link";
 import Image from "next/image";
+import { headers } from "next/headers";
 
 type CoinCamel = {
   id: string;
@@ -17,15 +18,36 @@ type CoinCamel = {
   mint?: string | null;
 };
 
-// Fetch relative to the same origin so it works on Vercel too.
+// Build an absolute URL so it works on Vercel/server too
+async function getBaseUrl() {
+  const h = await headers(); // 👈 await fixes TS “Promise<ReadonlyHeaders>”
+  const xfHost = h.get("x-forwarded-host");
+  const host =
+    xfHost ??
+    h.get("host") ??
+    process.env.VERCEL_URL ??
+    process.env.NEXT_PUBLIC_SITE_URL;
+
+  const proto =
+    h.get("x-forwarded-proto") ??
+    (typeof process.env.NEXT_PUBLIC_SITE_URL === "string" &&
+    process.env.NEXT_PUBLIC_SITE_URL.startsWith("http:")
+      ? "http"
+      : "https");
+
+  if (!host) return "http://localhost:3000";
+  return host.startsWith("http") ? host : `${proto}://${host}`;
+}
+
 async function getCoins(): Promise<CoinCamel[]> {
   try {
-    const res = await fetch('/api/coins', { cache: 'no-store' });
+    const base = await getBaseUrl(); // 👈 await here too
+    const res = await fetch(`${base}/api/coins`, { cache: "no-store" });
     if (!res.ok) return [];
     const data = await res.json();
     const arr = Array.isArray(data?.coins) ? data.coins : [];
 
-    // Normalize snake_case → camelCase defensively (in case API returns either)
+    // Normalize snake_case → camelCase
     return arr.map((c: any) => ({
       id: c.id,
       name: c.name,
@@ -57,7 +79,8 @@ export default async function CoinsPage() {
       </header>
 
       <p className="text-sm text-white/60">
-        <span className="font-medium">Legend:</span> <span className="text-red-400">red highlight</span> = missing recommended fields (e.g., logo URL, socials).
+        <span className="font-medium">Legend:</span>{" "}
+        <span className="text-red-400">red highlight</span> = missing recommended fields (e.g., logo URL, socials).
       </p>
 
       {!coins.length ? (
