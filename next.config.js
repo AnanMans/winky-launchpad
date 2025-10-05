@@ -1,23 +1,28 @@
 /** @type {import('next').NextConfig} */
+const SUPABASE_HOST = process.env.NEXT_PUBLIC_SUPABASE_URL
+  ? new URL(process.env.NEXT_PUBLIC_SUPABASE_URL).hostname
+  : undefined;
+
 const nextConfig = {
   images: {
     remotePatterns: [
-      { protocol: 'https', hostname: '**.supabase.co' },
+      // Your Supabase project (derived from env)
+      ...(SUPABASE_HOST ? [{ protocol: 'https', hostname: SUPABASE_HOST }] : []),
+
+      // Other sources you use
       { protocol: 'https', hostname: 'raw.githubusercontent.com' },
       { protocol: 'https', hostname: 'haieng.com' },
-      { protocol: 'https', hostname: '**.ipfs.nftstorage.link' },
+
+      // IPFS via nft.storage (one * only)
+      { protocol: 'https', hostname: '*.ipfs.nftstorage.link' },
     ],
   },
 
-  // ✅ Don’t fail the build on ESLint errors
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
+  // Don’t fail build on lint (you already had this)
+  eslint: { ignoreDuringBuilds: true },
 
-  // ✅ Silence the “workspace root” warning you saw
-  turbopack: {
-    root: __dirname,
-  },
+  // Silence the workspace-root warning
+  turbopack: { root: __dirname },
 };
 
 module.exports = nextConfig;
