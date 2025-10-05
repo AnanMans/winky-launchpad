@@ -1,345 +1,249 @@
 'use client';
 
-import { useState, useRef, useMemo, useEffect } from 'react';
-import Link from 'next/link';
+import { useState, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import { useWallet } from '@solana/wallet-adapter-react';
+import { useWallet, useConnection } from '@solana/wallet-adapter-react';
+import {
+  LAMPORTS_PER_SOL,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+} from '@solana/web3.js';
+import Image from 'next/image';
+import Link from 'next/link';
+function cx(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(' ');
+}
 
-type Socials = { x?: string; website?: string; telegram?: string };
+function clampTicker(x: string) {
+  return x.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+}
 
-export default function CreateCoinPage() {
+export default function CreatePage() {
   const router = useRouter();
-  const { connected } = useWallet();
+  const { publicKey, sendTransaction } = useWallet();
+  const { connection } = useConnection();
 
-  // form state
+  // form
   const [name, setName] = useState('');
   const [symbol, setSymbol] = useState('');
-  const [description, setDescription] = useState('');
-  const [socials, setSocials] = useState<Socials>({ website: '', x: '', telegram: '' });
+  const [desc, setDesc] = useState('');
+  const [website, setWebsite] = useState('');
+  const [xUrl, setXUrl] = useState('');
+  const [tg, setTg] = useState('');
   const [curve, setCurve] = useState<'linear' | 'degen' | 'random'>('linear');
-  const [strength, setStrength] = useState<1 | 2 | 3>(2);
-
-  // file upload state
+  const [strength, setStrength] = useState(2);
   const [file, setFile] = useState<File | null>(null);
-  const [fileName, setFileName] = useState<string>('');
-  const [preview, setPreview] = useState<string | null>(null);
-  const [imageUrl, setImageUrl] = useState<string | null>(null); // returned by /api/upload
-  const [uploading, setUploading] = useState(false);
 
-  // UX / errors
-  const [submitting, setSubmitting] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [touched, setTouched] = useState<Record<string, boolean>>({});
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // post-create modal
-  const [createdCoin, setCreatedCoin] = useState<{ id: string; name: string } | null>(null);
+  // modal (first buy)
+  const [createdId, setCreatedId] = useState<string | null>(null);
+  const [firstBuySol, setFirstBuySol] = useState<string>('0.05');
   const [showBuy, setShowBuy] = useState(false);
-  const [buySol, setBuySol] = useState<string>('0.05');
 
-  const MAX_NAME = 20;
-  const MAX_TICKER = 8;
-  const MAX_IMG_MB = 15;
-  const MAX_VID_MB = 30;
+  const logoMissing = !file;
+  const canSubmit = name && symbol && !logoMissing;
 
-  function markTouched(key: string) {
-    setTouched((t) => ({ ...t, [key]: true }));
-  }
-
-  const nameLeft = useMemo(() => `${name.length}/${MAX_NAME}`, [name]);
-  const symbolLeft = useMemo(() => `${symbol.length}/${MAX_TICKER}`, [symbol]);
-
-  function onNameChange(v: string) {
-    setName(v.slice(0, MAX_NAME));
-  }
-  function onSymbolChange(v: string) {
-    const clean = v.replace(/[^a-z0-9]/gi, '').toUpperCase().slice(0, MAX_TICKER);
-    setSymbol(clean);
-  }
-
-  function fileOk(f: File) {
-    const isImage = f.type.startsWith('image/');
-    const isVideo = f.type === 'video/mp4';
-    if (!isImage && !isVideo) return 'Only images (.jpg, .gif, .png) or .mp4 video are allowed.';
-    if (isImage && f.size > MAX_IMG_MB * 1024 * 1024) return `Image too large. Max ${MAX_IMG_MB}MB.`;
-    if (isVideo && f.size > MAX_VID_MB * 1024 * 1024) return `Video too large. Max ${MAX_VID_MB}MB.`;
-    return null;
-  }
-
-  function setPickedFile(f: File | null) {
-    setFile(f);
-    setImageUrl(null); // fresh upload overrides previous
-    setPreview(null);
-    setFileName(f ? f.name : '');
-    if (f && f.type.startsWith('image/')) {
-      const fr = new FileReader();
-      fr.onload = () => setPreview(String(fr.result));
-      fr.readAsDataURL(f);
+  async function uploadFileToSupabase(f: File): Promise<string> {
+    const form = new FormData();
+    form.append('file', f);
+    const res = await fetch('/api/upload', { method: 'POST', body: form });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j?.error || 'Upload failed');
     }
-  }
-
-  function onDrop(e: React.DragEvent) {
-    e.preventDefault();
-    if (!connected) {
-      setErr('Please connect your wallet to upload.');
-      return;
-    }
-    const f = e.dataTransfer.files?.[0];
-    if (!f) return;
-    const why = fileOk(f);
-    if (why) {
-      setErr(why);
-      return;
-    }
-    setPickedFile(f);
-  }
-
-  function onBrowsePick(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0] ?? null;
-    if (!f) return;
-    const why = fileOk(f);
-    if (why) {
-      setErr(why);
-      return;
-    }
-    setPickedFile(f);
-  }
-
-  function validate() {
-    const errors: Record<string, string> = {};
-    if (!name.trim()) errors.name = 'required';
-    if (!symbol.trim()) errors.symbol = 'required';
-    if (!file && !imageUrl) errors.image = 'required';
-    return errors;
-  }
-
-  async function uploadSelectedFile(): Promise<string> {
-    if (!file) throw new Error('No file selected.');
-    setUploading(true);
-    try {
-      const fd = new FormData();
-      fd.append('file', file);
-      fd.append('folder', 'coins'); // stored as media/coins/...
-      const res = await fetch('/api/upload', { method: 'POST', body: fd });
-      if (!res.ok) {
-        const txt = await res.text().catch(() => '');
-        throw new Error(txt || `Upload failed (${res.status})`);
-      }
-      const json = await res.json();
-      if (!json?.url) throw new Error('Upload response missing url');
-      setImageUrl(json.url);
-      return json.url as string;
-    } finally {
-      setUploading(false);
-    }
+    const j = await res.json();
+    return j.url as string;
   }
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setErr(null);
-    markTouched('name'); markTouched('symbol'); markTouched('image');
-
-    const invalid = validate();
-    if (Object.keys(invalid).length) return;
-
-    setSubmitting(true);
+    if (!canSubmit) {
+      alert('Please fill required fields and select an image/video.');
+      return;
+    }
     try {
-      const finalUrl = imageUrl ?? (await uploadSelectedFile());
-
-      const payload = {
-        name: name.trim(),
-        symbol: symbol.trim().toUpperCase(),
-        description: description.trim(),
-        socials: {
-          website: socials.website?.trim() || '',
-          x: socials.x?.trim() || '',
-          telegram: socials.telegram?.trim() || '',
-        },
-        curve,
-        strength,
-        // IMPORTANT: server expects `logoUrl` and will store as `logo_url`
-        logoUrl: finalUrl,
-      };
+      const logoUrl = await uploadFileToSupabase(file!);
 
       const res = await fetch('/api/coins', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          name,
+          symbol,
+          description: desc,
+          logoUrl,
+          socials: { website, x: xUrl, telegram: tg },
+          curve,
+          strength,
+        }),
       });
-      if (!res.ok) {
-        const txt = await res.text().catch(() => '');
-        throw new Error(txt || `Create failed (${res.status})`);
-      }
-      const json = await res.json();
-      const id = json?.coin?.id as string;
-      const coinName = json?.coin?.name as string;
-      if (!id) throw new Error('Server did not return coin.id');
+      const j = await res.json();
+      if (!res.ok) throw new Error(j?.error || 'Create failed');
 
-      setCreatedCoin({ id, name: coinName });
+      // open "first buy" modal
+      setCreatedId(j.coin.id);
       setShowBuy(true);
     } catch (e: any) {
-      setErr(e?.message || String(e));
-    } finally {
-      setSubmitting(false);
+      console.error('Create failed', e);
+      alert(`Create failed: ${e?.message || String(e)}`);
     }
   }
 
-  function browseClick() {
-    if (!connected) {
-      setErr('Please connect your wallet to upload.');
+  async function confirmFirstBuy() {
+    if (!createdId) return;
+    const amt = Number(firstBuySol);
+
+    // If user entered nothing or <=0, just go to the coin page
+    if (!Number.isFinite(amt) || amt <= 0) {
+      router.push(`/coin/${createdId}`);
       return;
     }
-    fileInputRef.current?.click();
-  }
 
-  function proceedBuy() {
-    if (!createdCoin) return;
-    const amt = Number(buySol) > 0 ? `?buy=${encodeURIComponent(buySol)}` : '';
-    // go to coin page; it will auto-open buy UI with this amount
-    router.push(`/coin/${createdCoin.id}${amt}`);
-  }
+    if (!publicKey) {
+      alert('Connect wallet first');
+      return;
+    }
 
-  // clear “must be connected” error once the user connects
-  useEffect(() => {
-    if (connected && err?.includes('connect your wallet')) setErr(null);
-  }, [connected, err]);
+    try {
+      // 1) transfer SOL to treasury so server can verify
+      const treasury = new PublicKey(process.env.NEXT_PUBLIC_TREASURY!);
+      const tx = new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: publicKey,
+          toPubkey: treasury,
+          lamports: Math.floor(amt * LAMPORTS_PER_SOL),
+        })
+      );
+      tx.feePayer = publicKey;
+      const { blockhash } = await connection.getLatestBlockhash('processed');
+      tx.recentBlockhash = blockhash;
+      const sig = await sendTransaction(tx, connection, { skipPreflight: true });
+
+      // 2) tell server to mint tokens to creator
+      const res = await fetch(`/api/coins/${createdId}/buy`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          buyer: publicKey.toBase58(),
+          amountSol: amt,
+          sig,
+        }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j?.error || 'Server buy failed');
+      }
+
+      router.push(`/coin/${createdId}`);
+    } catch (e: any) {
+      console.error('first-buy error', e);
+      alert(`Buy failed: ${e?.message || String(e)}`);
+      router.push(`/coin/${createdId}`);
+    }
+  }
 
   return (
-    <main className="min-h-screen max-w-3xl mx-auto p-6 md:p-10">
-      <header className="flex items-center justify-between mb-8">
-        <h1 className="text-3xl font-bold">Create new coin</h1>
-        <nav className="flex gap-3">
-          <Link className="underline" href="/coins">All coins</Link>
+    <main className="min-h-screen p-6 md:p-10 max-w-3xl mx-auto grid gap-8">
+      <header className="flex items-center justify-between">
+        <Link href="/" className="flex items-center gap-2 font-semibold">
+          <Image src="/logo.svg" alt="logo" width={28} height={28} />
+          <span>Winky Launchpad</span>
+        </Link>
+        <nav className="flex items-center gap-3">
+          <Link className="underline" href="/coins">Coins</Link>
         </nav>
       </header>
 
-      <form onSubmit={onSubmit} className="grid gap-6">
-        {/* Coin details */}
-        <section className="grid gap-4 rounded-2xl border p-5 bg-black/20">
-          <h2 className="text-xl font-semibold">Coin details</h2>
-          <p className="text-white/70">Choose carefully, these can&apos;t be changed once the coin is created</p>
+      <section className="rounded-2xl border p-6 grid gap-6 bg-black/20">
+        <div>
+          <h1 className="text-2xl md:text-3xl font-bold">Create new coin</h1>
+          <p className="text-white/60">Choose carefully, these can’t be changed once created.</p>
+        </div>
 
-          {/* Name */}
+        <form onSubmit={onSubmit} className="grid gap-5">
           <div className="grid gap-2">
-            <label className="text-sm">Coin name</label>
+            <label className="text-sm text-white/70">Coin name</label>
             <input
-              value={name}
-              onChange={(e) => onNameChange(e.target.value)}
-              onBlur={() => markTouched('name')}
+              maxLength={20}
+              className="px-3 py-2 rounded-lg bg-black/30 border"
               placeholder="Name your coin"
-              className={`rounded-xl bg-black/40 px-4 py-2 outline-none border ${touched.name && !name ? 'border-red-500' : 'border-white/20'}`}
+              value={name}
+              onChange={(e) => setName(e.target.value.slice(0, 20))}
+              required
             />
-            <div className="text-xs text-white/50">{nameLeft}</div>
           </div>
 
-          {/* Ticker */}
           <div className="grid gap-2">
-            <label className="text-sm">Ticker</label>
+            <label className="text-sm text-white/70">Ticker</label>
             <input
+              maxLength={8}
+              className="px-3 py-2 rounded-lg bg-black/30 border"
+              placeholder="Add a coin ticker (e.g. PEPE)"
               value={symbol}
-              onChange={(e) => onSymbolChange(e.target.value)}
-              onBlur={() => markTouched('symbol')}
-              placeholder="Add a coin ticker (e.g PEPE)"
-              className={`rounded-xl bg-black/40 px-4 py-2 outline-none uppercase tracking-wide border ${touched.symbol && !symbol ? 'border-red-500' : 'border-white/20'}`}
+              onChange={(e) => setSymbol(clampTicker(e.target.value))}
+              required
             />
-            <div className="text-xs text-white/50">{symbolLeft}</div>
           </div>
 
-          {/* Description */}
           <div className="grid gap-2">
-            <label className="text-sm">Description (Optional)</label>
+            <label className="text-sm text-white/70">Description (optional)</label>
             <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              className="px-3 py-2 rounded-lg bg-black/30 border"
               placeholder="Write a short description"
               rows={3}
-              className="rounded-xl border border-white/20 bg-black/40 px-4 py-2 outline-none"
+              value={desc}
+              onChange={(e) => setDesc(e.target.value)}
             />
           </div>
 
-          {/* Social links */}
           <div className="grid gap-2">
-            <label className="text-sm">Add social links (Optionals)</label>
-            <div className="grid md:grid-cols-3 gap-2">
+            <label className="text-sm text-white/70">Add social links (optional)</label>
+            <div className="grid md:grid-cols-3 gap-3">
               <input
-                value={socials.website}
-                onChange={(e) => setSocials((s) => ({ ...s, website: e.target.value }))}
-                placeholder="Add URL"
-                className="rounded-xl border border-white/20 bg-black/40 px-4 py-2 outline-none"
+                className="px-3 py-2 rounded-lg bg-black/30 border"
+                placeholder="Website URL"
+                value={website}
+                onChange={(e) => setWebsite(e.target.value)}
               />
               <input
-                value={socials.x}
-                onChange={(e) => setSocials((s) => ({ ...s, x: e.target.value }))}
-                placeholder="Add URL"
-                className="rounded-xl border border-white/20 bg-black/40 px-4 py-2 outline-none"
+                className="px-3 py-2 rounded-lg bg-black/30 border"
+                placeholder="X (Twitter) URL"
+                value={xUrl}
+                onChange={(e) => setXUrl(e.target.value)}
               />
               <input
-                value={socials.telegram}
-                onChange={(e) => setSocials((s) => ({ ...s, telegram: e.target.value }))}
-                placeholder="Add URL"
-                className="rounded-xl border border-white/20 bg-black/40 px-4 py-2 outline-none"
+                className="px-3 py-2 rounded-lg bg-black/30 border"
+                placeholder="Telegram URL"
+                value={tg}
+                onChange={(e) => setTg(e.target.value)}
               />
             </div>
           </div>
 
-          {/* Upload (button + drag&drop) */}
           <div className="grid gap-2">
-            <label className="text-sm">
-              Select video or image to upload or drag and drop it here (must be connected)
+            <label className="text-sm text-white/70">
+              Select image or video to upload (must be connected)
             </label>
-
-            <div
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={onDrop}
-              className={`rounded-xl border ${touched.image && !file && !imageUrl ? 'border-red-500' : 'border-white/20'} bg-black/40 p-4`}
-            >
-              <div className="flex items-center gap-3">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/*,video/mp4"
-                  hidden
-                  onChange={onBrowsePick}
-                />
-                <button
-                  type="button"
-                  onClick={browseClick}
-                  className="rounded-xl border border-white/20 px-4 py-2 hover:bg-white/10 disabled:opacity-60"
-                >
-                  Upload file
-                </button>
-                <span className="text-sm text-white/70">
-                  {fileName ? fileName : 'No file chosen'}
-                </span>
-                {!connected && (
-                  <span className="text-xs text-red-400 ml-auto">Connect wallet to enable upload</span>
-                )}
-              </div>
-
-              {preview && (
-                <div className="mt-3">
-                  <div className="text-xs mb-1 text-white/70">Preview:</div>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={preview} alt="preview" className="max-h-48 rounded-lg border border-white/10" />
-                </div>
-              )}
-
-              <div className="text-xs text-white/60 mt-3 space-y-1">
-                <p>File size and type</p>
-                <p>Image - max 15mb. '.jpg', '.gif' or '.png' recommended</p>
-                <p>Video - max 30mb. '.mp4' recommended</p>
-              </div>
-            </div>
+            <input
+              type="file"
+              accept=".jpg,.jpeg,.png,.gif,.mp4"
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            />
+            <p className="text-xs text-white/50">
+              Image: max 15MB (.jpg .gif .png). Video: max 30MB (.mp4).
+            </p>
+            {logoMissing && (
+              <p className="text-sm text-red-400">Please upload an image or video.</p>
+            )}
           </div>
 
-          {/* Curve & Strength */}
-          <div className="grid md:grid-cols-2 gap-3 pt-2">
+          <div className="grid md:grid-cols-2 gap-3">
             <div className="grid gap-2">
-              <label className="text-sm">Curve</label>
+              <label className="text-sm text-white/70">Curve</label>
               <select
+                className="px-3 py-2 rounded-lg bg-black/30 border"
                 value={curve}
-                onChange={(e) => setCurve(e.target.value as 'linear' | 'degen' | 'random')}
-                className="rounded-xl border border-white/20 bg-black/40 px-4 py-2 outline-none"
+                onChange={(e) => setCurve(e.target.value as any)}
               >
                 <option value="linear">Linear</option>
                 <option value="degen">Degen</option>
@@ -347,67 +251,64 @@ export default function CreateCoinPage() {
               </select>
             </div>
             <div className="grid gap-2">
-              <label className="text-sm">Strength</label>
+              <label className="text-sm text-white/70">Strength</label>
               <select
-                value={String(strength)}
-                onChange={(e) => setStrength(Number(e.target.value) as 1 | 2 | 3)}
-                className="rounded-xl border border-white/20 bg-black/40 px-4 py-2 outline-none"
+                className="px-3 py-2 rounded-lg bg-black/30 border"
+                value={strength}
+                onChange={(e) => setStrength(Number(e.target.value))}
               >
-                <option value="1">Low</option>
-                <option value="2">Medium</option>
-                <option value="3">High</option>
+                <option value={1}>Low</option>
+                <option value={2}>Medium</option>
+                <option value={3}>High</option>
               </select>
             </div>
           </div>
-        </section>
 
-        {/* Errors & Submit */}
-        {err && <div className="text-red-400">{err}</div>}
+          <div className="pt-2">
+            <button
+              type="submit"
+              className={cx(
+                'px-5 py-2 rounded-lg font-medium',
+                canSubmit ? 'bg-white text-black' : 'bg-white/20 text-white/40 cursor-not-allowed'
+              )}
+              disabled={!canSubmit}
+            >
+              Create coin
+            </button>
+          </div>
+        </form>
+      </section>
 
-        <div className="flex gap-3">
-          <button
-            type="submit"
-            disabled={submitting || uploading || !connected}
-            onBlur={() => markTouched('image')}
-            className="rounded-xl border border-white/20 px-5 py-2 hover:bg白/10 disabled:opacity-60"
-          >
-            {submitting ? 'Creating…' : uploading ? 'Uploading…' : 'Create coin'}
-          </button>
-          <Link href="/coins" className="rounded-xl border border-white/20 px-5 py-2 hover:bg-white/10">
-            Cancel
-          </Link>
-        </div>
-      </form>
-
-      {/* Post-create BUY modal */}
-      {showBuy && createdCoin && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="w-full max-w-md rounded-2xl border bg-black p-6 space-y-4">
-            <h3 className="text-xl font-semibold">
-              Choose how many <span className="opacity-80">{createdCoin.name}</span> you want to buy (optional)
-            </h3>
+      {/* First-buy modal */}
+      {showBuy && (
+        <div className="fixed inset-0 bg-black/70 grid place-items-center z-50">
+          <div className="bg-zinc-900 border rounded-2xl p-6 w-[520px] max-w-[95vw] grid gap-4">
+            <h3 className="text-xl font-semibold">First buy (optional)</h3>
             <p className="text-white/70 text-sm">
-              Tip: its optional but buying a small amount of coins helps protect your coin from snipers
+              Choose how many SOL to spend on your own coin. Buying a small amount can
+              help protect your coin from snipers.
             </p>
-            <label className="text-sm">Amount in SOL</label>
-            <input
-              value={buySol}
-              onChange={(e) => setBuySol(e.target.value)}
-              placeholder="0.05"
-              className="w-full rounded-xl border border-white/20 bg-black/40 px-4 py-2 outline-none"
-            />
-            <div className="flex gap-3 pt-2">
+            <div className="flex items-center gap-3">
+              <input
+                className="px-3 py-2 rounded-lg bg-black/30 border w-40"
+                value={firstBuySol}
+                onChange={(e) => setFirstBuySol(e.target.value)}
+                placeholder="0.05"
+                inputMode="decimal"
+              />
               <button
-                onClick={() => router.push(`/coin/${createdCoin.id}`)}
-                className="rounded-xl border border-white/20 px-5 py-2 hover:bg-white/10"
+                onClick={confirmFirstBuy}
+                className="px-4 py-2 rounded-lg bg-white text-black font-medium"
               >
-                Skip for now
+                Confirm
               </button>
               <button
-                onClick={proceedBuy}
-                className="rounded-xl border border-white/20 px-5 py-2 hover:bg-white/10"
+                onClick={() => {
+                  if (createdId) router.push(`/coin/${createdId}`);
+                }}
+                className="px-4 py-2 rounded-lg border"
               >
-                Buy now
+                Skip
               </button>
             </div>
           </div>
