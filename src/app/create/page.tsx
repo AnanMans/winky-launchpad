@@ -1,308 +1,210 @@
-"use client";
+'use client';
+import { useState } from 'react';
+import Link from 'next/link';
+import Image from 'next/image';
+import { useRouter } from 'next/navigation';
 
-import { useMemo, useState } from "react";
-import Link from "next/link";
-import Image from "next/image";
-import { useRouter } from "next/navigation";
-import WalletButton from "@/components/WalletButton";
-import WalletStatus from "@/components/WalletStatus";
-import { useWallet } from "@solana/wallet-adapter-react";
-import { uploadToMedia } from "@/lib/upload";
-
-type Socials = {
-  website?: string;
-  x?: string;
-  telegram?: string;
-};
-
-const NAME_MAX = 20;
-const TICKER_MAX = 8;
+type Socials = { x?: string; website?: string; telegram?: string };
 
 export default function CreatePage() {
   const router = useRouter();
-  const { connected } = useWallet();
-
-  // form state
-  const [name, setName] = useState("");
-  const [symbol, setSymbol] = useState("");
-  const [description, setDescription] = useState("");
-  const [socials, setSocials] = useState<Socials>({ website: "", x: "", telegram: "" });
-
-  const [logoUrl, setLogoUrl] = useState("");
+  const [name, setName] = useState('');
+  const [symbol, setSymbol] = useState('');
+  const [description, setDescription] = useState('');
+  const [website, setWebsite] = useState('');
+  const [x, setX] = useState('');
+  const [telegram, setTelegram] = useState('');
+  const [curve, setCurve] = useState<'linear' | 'degen' | 'random'>('linear');
+  const [strength, setStrength] = useState(2);
   const [file, setFile] = useState<File | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
-  const [curve, setCurve] = useState<"linear" | "degen" | "random">("linear");
-  const [strength, setStrength] = useState<1 | 2 | 3>(2);
-
-  const [errors, setErrors] = useState<Record<string, string>>({});
-  const [isUploading, setIsUploading] = useState(false);
-  const [isCreating, setIsCreating] = useState(false);
-
-  // live helpers
-  const nameLeft = NAME_MAX - name.length;
-  const symbolClean = symbol.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, TICKER_MAX);
-  const symbolLeft = TICKER_MAX - symbolClean.length;
-
-  const previewSrc = useMemo(() => {
-    if (logoUrl.trim()) return logoUrl.trim();
-    if (file) return URL.createObjectURL(file);
-    return "";
-  }, [logoUrl, file]);
-
-  function setSymbolSafe(v: string) {
-    setSymbol(v.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, TICKER_MAX));
-  }
-
-  function validateForm(): boolean {
-    const e: Record<string, string> = {};
-
-    if (!name.trim()) e.name = "Name is required.";
-    if (name.trim().length > NAME_MAX) e.name = `Max ${NAME_MAX} characters.`;
-    if (!symbolClean) e.symbol = "Ticker is required.";
-    if (!/^[A-Z0-9]{1,8}$/.test(symbolClean)) e.symbol = "Ticker: 1–8 chars A–Z/0–9.";
-
-    if (!logoUrl.trim() && !file) {
-      e.logoUrl = "Add an image/video file or paste a URL.";
+  async function uploadIfNeeded(): Promise<string | null> {
+    if (!file) return null;
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch('/api/upload', { method: 'POST', body: fd });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j?.error || 'Upload failed');
     }
-
-    setErrors(e);
-    return Object.keys(e).length === 0;
+    const j = await res.json();
+    return j.url as string;
   }
 
-  async function onCreate() {
-    if (!validateForm()) return;
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setErr(null);
 
-    const payload = {
-      name: name.trim(),
-      symbol: symbolClean,
-      description: description.trim(),
-      logoUrl: logoUrl.trim(),
-      socials: {
-        website: (socials.website || "").trim(),
-        x: (socials.x || "").trim(),
-        telegram: (socials.telegram || "").trim(),
-      },
-      curve,
-      strength,
-    };
+    // simple client validation
+    if (!name.trim()) return setErr('Name is required');
+    if (!symbol.trim()) return setErr('Ticker is required');
+    if (symbol.length > 8) return setErr('Ticker must be ≤ 8 characters');
+    if (!file) return setErr('Logo (image/video) is required');
 
     try {
-      setIsCreating(true);
+      setSubmitting(true);
 
-      // upload if no URL but file chosen
-      if (!payload.logoUrl && file) {
-        setIsUploading(true);
-        payload.logoUrl = await uploadToMedia(file);
-      }
+      // 1) Upload media (server will return a public URL)
+      const logoUrl = await uploadIfNeeded();
+      if (!logoUrl) throw new Error('Upload failed');
 
-      const res = await fetch("/api/coins", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
+      // 2) Create the coin
+      const body = {
+        name: name.trim(),
+        symbol: symbol.trim().toUpperCase(),
+        description: description.trim(),
+        logoUrl,
+        socials: {
+          website: website.trim(),
+          x: x.trim(),
+          telegram: telegram.trim(),
+        } as Socials,
+        curve,
+        strength,
+      };
+
+      const r = await fetch('/api/coins', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
       });
-
-      if (!res.ok) {
-        let msg = "Create failed";
-        try {
-          const j = await res.json();
-          msg = j?.error || msg;
-        } catch {}
-        throw new Error(msg);
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j?.error || 'Create failed');
       }
-
-      const { coin } = await res.json();
+      const { coin } = await r.json();
+      // go to coin page
       router.push(`/coin/${coin.id}`);
     } catch (e: any) {
-      alert(e?.message || "Create failed");
+      setErr(e?.message || 'Something went wrong');
     } finally {
-      setIsUploading(false);
-      setIsCreating(false);
+      setSubmitting(false);
     }
   }
 
   return (
-    <main className="min-h-screen p-6 md:p-10 max-w-5xl mx-auto grid gap-8">
-      {/* Header */}
+    <main className="min-h-screen max-w-3xl mx-auto p-6 md:p-10 space-y-8">
       <header className="flex items-center justify-between">
-        <Link href="/" className="flex items-center gap-2 font-semibold">
-          <Image src="/logo.svg" alt="logo" width={28} height={28} />
-          <span>Winky Launchpad</span>
-        </Link>
-        <nav className="flex items-center gap-3">
-          <Link className="underline" href="/coins">Coins</Link>
-          <WalletButton />
-        </nav>
+        <Link href="/" className="underline">← Home</Link>
+        <Link href="/coins" className="underline">All coins</Link>
       </header>
 
-      {/* Title */}
-      <section className="grid gap-2">
-        <h1 className="text-2xl md:text-3xl font-bold">Create new coin</h1>
-        <p className="text-white/70">
-          Choose carefully, these can’t be changed once the coin is created.
-        </p>
-        <WalletStatus />
-      </section>
+      <h1 className="text-3xl md:text-4xl font-bold">Create new coin</h1>
+      <p className="text-white/70">Choose carefully — these can’t be changed after creation.</p>
 
-      {/* Form */}
-      <section className="grid gap-8 md:grid-cols-2">
-        {/* Left column */}
-        <div className="grid gap-6">
-          {/* Coin name */}
-          <div>
-            <label className="block text-sm mb-1">Coin name</label>
+      <form onSubmit={onSubmit} className="space-y-6">
+        <div className="grid gap-4">
+          <label className="grid gap-2">
+            <span>Coin name</span>
             <input
-              value={name}
-              onChange={(e) => setName(e.target.value.slice(0, NAME_MAX))}
-              maxLength={NAME_MAX}
+              className="rounded-xl border bg-transparent px-3 py-2"
               placeholder="Name your coin"
-              className={`w-full rounded-lg border p-2 ${errors.name ? "border-red-500" : ""}`}
+              maxLength={20}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
             />
-            <div className="flex justify-between mt-1 text-xs">
-              <span className="text-white/60">Limit {NAME_MAX} characters</span>
-              <span className="text-white/50">{nameLeft} left</span>
-            </div>
-            {errors.name && <p className="text-red-500 text-sm mt-1">{errors.name}</p>}
-          </div>
+          </label>
 
-          {/* Ticker */}
-          <div>
-            <label className="block text-sm mb-1">Ticker</label>
+          <label className="grid gap-2">
+            <span>Ticker</span>
             <input
-              value={symbolClean}
-              onChange={(e) => setSymbolSafe(e.target.value)}
+              className="rounded-xl border bg-transparent px-3 py-2"
               placeholder="Add a coin ticker (e.g. PEPE)"
-              className={`w-full rounded-lg border p-2 ${errors.symbol ? "border-red-500" : ""}`}
+              maxLength={8}
+              value={symbol}
+              onChange={(e) => setSymbol(e.target.value)}
+              required
             />
-            <div className="flex justify-between mt-1 text-xs">
-              <span className="text-white/60">A–Z / 0–9, max {TICKER_MAX}</span>
-              <span className="text-white/50">{symbolLeft} left</span>
-            </div>
-            {errors.symbol && <p className="text-red-500 text-sm mt-1">{errors.symbol}</p>}
-          </div>
+          </label>
 
-          {/* Description */}
-          <div>
-            <label className="block text-sm mb-1">Description (optional)</label>
+          <label className="grid gap-2">
+            <span>Description (optional)</span>
             <textarea
+              className="rounded-xl border bg-transparent px-3 py-2"
+              placeholder="Write a short description"
+              rows={3}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="Write a short description"
-              rows={4}
-              className="w-full rounded-lg border p-2"
             />
-          </div>
+          </label>
 
-          {/* Socials */}
-          <div>
-            <label className="block text-sm mb-2">Add social links (optional)</label>
-            <div className="grid gap-3">
-              <input
-                value={socials.website}
-                onChange={(e) => setSocials((s) => ({ ...s, website: e.target.value }))}
-                placeholder="Website URL"
-                className="w-full rounded-lg border p-2"
-              />
-              <input
-                value={socials.x}
-                onChange={(e) => setSocials((s) => ({ ...s, x: e.target.value }))}
-                placeholder="X (Twitter) URL"
-                className="w-full rounded-lg border p-2"
-              />
-              <input
-                value={socials.telegram}
-                onChange={(e) => setSocials((s) => ({ ...s, telegram: e.target.value }))}
-                placeholder="Telegram URL"
-                className="w-full rounded-lg border p-2"
-              />
-            </div>
-          </div>
-        </div>
+          <fieldset className="grid gap-3">
+            <legend className="font-medium">Add social links (optional)</legend>
+            <input
+              className="rounded-xl border bg-transparent px-3 py-2"
+              placeholder="Website URL"
+              value={website}
+              onChange={(e) => setWebsite(e.target.value)}
+            />
+            <input
+              className="rounded-xl border bg-transparent px-3 py-2"
+              placeholder="X (Twitter) URL"
+              value={x}
+              onChange={(e) => setX(e.target.value)}
+            />
+            <input
+              className="rounded-xl border bg-transparent px-3 py-2"
+              placeholder="Telegram URL"
+              value={telegram}
+              onChange={(e) => setTelegram(e.target.value)}
+            />
+          </fieldset>
 
-        {/* Right column */}
-        <div className="grid gap-6">
-          {/* Media */}
-          <div className={`rounded-2xl border p-4 ${errors.logoUrl ? "border-red-500" : ""}`}>
-            <h3 className="font-medium mb-3">Image / Video</h3>
+          <label className="grid gap-2">
+            <span>Logo / Video (required)</span>
+            <input
+              type="file"
+              accept=".jpg,.jpeg,.png,.gif,.mp4"
+              onChange={(e) => setFile(e.target.files?.[0] || null)}
+              required
+            />
+            <p className="text-sm text-white/60">
+              Image: max 15MB (jpg, png, gif). Video: max 30MB (mp4).
+            </p>
+          </label>
 
-            <div className="grid gap-2 mb-3">
-              <input
-                value={logoUrl}
-                onChange={(e) => setLogoUrl(e.target.value)}
-                placeholder="Paste an image/video URL (jpg, png, gif, mp4)"
-                className="w-full rounded-lg border p-2"
-              />
-              <div className="text-center text-sm text-white/60">— or —</div>
-              <input
-                type="file"
-                accept="image/jpeg,image/png,image/gif,video/mp4"
-                disabled={!connected /* optional gating by wallet */}
-                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-                className="block w-full rounded-lg border p-2 disabled:opacity-50"
-              />
-              <p className="text-xs text-white/60">
-                Max 30MB. jpg/png/gif or mp4. {connected ? "" : "Connect wallet to enable upload."}
-              </p>
-              {errors.logoUrl && <p className="text-red-500 text-sm">{errors.logoUrl}</p>}
-            </div>
-
-            {previewSrc ? (
-              <div className="rounded-xl overflow-hidden border bg-black/20">
-                {previewSrc.match(/\.mp4($|\?)/i) ? (
-                  <video src={previewSrc} controls className="w-full h-auto" />
-                ) : (
-                  <img src={previewSrc} alt="preview" className="w-full h-auto" />
-                )}
-              </div>
-            ) : (
-              <div className="text-sm text-white/50">No preview yet.</div>
-            )}
-          </div>
-
-          {/* Curve + Strength */}
-          <div className="rounded-2xl border p-4">
-            <h3 className="font-medium mb-3">Launch parameters</h3>
-            <div className="grid gap-3">
-              <label className="text-sm">Curve</label>
+          <div className="grid md:grid-cols-2 gap-4">
+            <label className="grid gap-2">
+              <span>Curve</span>
               <select
+                className="rounded-xl border bg-black px-3 py-2"
                 value={curve}
                 onChange={(e) => setCurve(e.target.value as any)}
-                className="rounded-lg border p-2 bg-black/20"
               >
-                <option value="linear">Linear — predictable slope</option>
-                <option value="degen">Degen — early exponential</option>
-                <option value="random">Random — monotonic steps</option>
+                <option value="linear">Linear</option>
+                <option value="degen">Degen</option>
+                <option value="random">Random</option>
               </select>
+            </label>
 
-              <label className="text-sm mt-2">Strength</label>
+            <label className="grid gap-2">
+              <span>Strength</span>
               <select
+                className="rounded-xl border bg-black px-3 py-2"
                 value={strength}
-                onChange={(e) => setStrength(Number(e.target.value) as 1 | 2 | 3)}
-                className="rounded-lg border p-2 bg-black/20"
+                onChange={(e) => setStrength(Number(e.target.value))}
               >
                 <option value={1}>Low</option>
                 <option value={2}>Medium</option>
                 <option value={3}>High</option>
               </select>
-            </div>
+            </label>
           </div>
-
-          {/* Submit */}
-          <div className="flex gap-3">
-            <button
-              onClick={onCreate}
-              disabled={isCreating || isUploading}
-              className="rounded-xl border px-5 py-2 disabled:opacity-50"
-            >
-              {isCreating ? "Creating..." : isUploading ? "Uploading..." : "Create coin"}
-            </button>
-            <Link href="/coins" className="rounded-xl border px-5 py-2">Cancel</Link>
-          </div>
-
-          <p className="text-xs text-white/50">
-            Tip: After creating, you can optionally buy a small amount to seed the pool.
-          </p>
         </div>
-      </section>
+
+        {err && <p className="text-red-400">{err}</p>}
+
+        <button
+          type="submit"
+          disabled={submitting}
+          className="rounded-xl border px-5 py-2"
+        >
+          {submitting ? 'Creating…' : 'Create coin'}
+        </button>
+      </form>
     </main>
   );
 }
