@@ -21,8 +21,9 @@ export default function CreateCoinPage() {
 
   // file upload state
   const [file, setFile] = useState<File | null>(null);
+  const [fileName, setFileName] = useState<string>('');
   const [preview, setPreview] = useState<string | null>(null);
-  const [imageUrl, setImageUrl] = useState<string | null>(null); // set by /api/upload
+  const [imageUrl, setImageUrl] = useState<string | null>(null); // returned by /api/upload
   const [uploading, setUploading] = useState(false);
 
   // UX / errors
@@ -69,6 +70,7 @@ export default function CreateCoinPage() {
     setFile(f);
     setImageUrl(null); // fresh upload overrides previous
     setPreview(null);
+    setFileName(f ? f.name : '');
     if (f && f.type.startsWith('image/')) {
       const fr = new FileReader();
       fr.onload = () => setPreview(String(fr.result));
@@ -117,7 +119,7 @@ export default function CreateCoinPage() {
     try {
       const fd = new FormData();
       fd.append('file', file);
-      fd.append('folder', 'coins'); // will be saved under media/coins/
+      fd.append('folder', 'coins'); // stored as media/coins/...
       const res = await fetch('/api/upload', { method: 'POST', body: fd });
       if (!res.ok) {
         const txt = await res.text().catch(() => '');
@@ -135,8 +137,8 @@ export default function CreateCoinPage() {
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
-    // mark as touched to show red borders if missing
     markTouched('name'); markTouched('symbol'); markTouched('image');
+
     const invalid = validate();
     if (Object.keys(invalid).length) return;
 
@@ -155,7 +157,8 @@ export default function CreateCoinPage() {
         },
         curve,
         strength,
-        imageUrl: finalUrl,
+        // IMPORTANT: server expects `logoUrl` and will store as `logo_url`
+        logoUrl: finalUrl,
       };
 
       const res = await fetch('/api/coins', {
@@ -181,13 +184,22 @@ export default function CreateCoinPage() {
     }
   }
 
+  function browseClick() {
+    if (!connected) {
+      setErr('Please connect your wallet to upload.');
+      return;
+    }
+    fileInputRef.current?.click();
+  }
+
   function proceedBuy() {
     if (!createdCoin) return;
     const amt = Number(buySol) > 0 ? `?buy=${encodeURIComponent(buySol)}` : '';
+    // go to coin page; it will auto-open buy UI with this amount
     router.push(`/coin/${createdCoin.id}${amt}`);
   }
 
-  // if user connects after landing, clear “must be connected” error
+  // clear “must be connected” error once the user connects
   useEffect(() => {
     if (connected && err?.includes('connect your wallet')) setErr(null);
   }, [connected, err]);
@@ -205,9 +217,7 @@ export default function CreateCoinPage() {
         {/* Coin details */}
         <section className="grid gap-4 rounded-2xl border p-5 bg-black/20">
           <h2 className="text-xl font-semibold">Coin details</h2>
-          <p className="text-white/70">
-            Choose carefully, these can&apos;t be changed once the coin is created
-          </p>
+          <p className="text-white/70">Choose carefully, these can&apos;t be changed once the coin is created</p>
 
           {/* Name */}
           <div className="grid gap-2">
@@ -272,7 +282,7 @@ export default function CreateCoinPage() {
             </div>
           </div>
 
-          {/* Upload (must be connected) */}
+          {/* Upload (button + drag&drop) */}
           <div className="grid gap-2">
             <label className="text-sm">
               Select video or image to upload or drag and drop it here (must be connected)
@@ -288,21 +298,22 @@ export default function CreateCoinPage() {
                   ref={fileInputRef}
                   type="file"
                   accept="image/*,video/mp4"
-                  disabled={!connected}
+                  hidden
                   onChange={onBrowsePick}
-                  className="block"
                 />
+                <button
+                  type="button"
+                  onClick={browseClick}
+                  className="rounded-xl border border-white/20 px-4 py-2 hover:bg-white/10 disabled:opacity-60"
+                >
+                  Upload file
+                </button>
+                <span className="text-sm text-white/70">
+                  {fileName ? fileName : 'No file chosen'}
+                </span>
                 {!connected && (
-                  <span className="text-xs text-red-400">
-                    Connect wallet to enable upload
-                  </span>
+                  <span className="text-xs text-red-400 ml-auto">Connect wallet to enable upload</span>
                 )}
-              </div>
-
-              <div className="text-xs text-white/60 mt-2 space-y-1">
-                <p>File size and type</p>
-                <p>Image - max 15mb. '.jpg', '.gif' or '.png' recommended</p>
-                <p>Video - max 30mb. '.mp4' recommended</p>
               </div>
 
               {preview && (
@@ -312,6 +323,12 @@ export default function CreateCoinPage() {
                   <img src={preview} alt="preview" className="max-h-48 rounded-lg border border-white/10" />
                 </div>
               )}
+
+              <div className="text-xs text-white/60 mt-3 space-y-1">
+                <p>File size and type</p>
+                <p>Image - max 15mb. '.jpg', '.gif' or '.png' recommended</p>
+                <p>Video - max 30mb. '.mp4' recommended</p>
+              </div>
             </div>
           </div>
 
@@ -352,7 +369,7 @@ export default function CreateCoinPage() {
             type="submit"
             disabled={submitting || uploading || !connected}
             onBlur={() => markTouched('image')}
-            className="rounded-xl border border-white/20 px-5 py-2 hover:bg-white/10 disabled:opacity-60"
+            className="rounded-xl border border-white/20 px-5 py-2 hover:bg白/10 disabled:opacity-60"
           >
             {submitting ? 'Creating…' : uploading ? 'Uploading…' : 'Create coin'}
           </button>

@@ -1,5 +1,6 @@
 'use client';
 
+import { useSearchParams } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
@@ -43,6 +44,26 @@ export default function CoinPage() {
   // inputs
   const [buySol, setBuySol] = useState<string>('0.05');
   const [sellSol, setSellSol] = useState<string>('0.01');
+
+// auto-prefill from URL: ?buy=0.1 or ?sell=0.05
+const searchParams = useSearchParams();
+
+useEffect(() => {
+  const b = searchParams.get('buy');
+  if (b && Number(b) > 0) {
+    setBuySol(b);
+    // if you have a buy modal/panel toggle, also open it here:
+    // setBuyOpen(true);
+    // (optional) scroll into view
+    document.getElementById('buy-box')?.scrollIntoView({ behavior: 'smooth' });
+  }
+
+  const s = searchParams.get('sell');
+  if (s && Number(s) > 0) {
+    setSellSol(s);
+    document.getElementById('sell-box')?.scrollIntoView({ behavior: 'smooth' });
+  }
+}, [searchParams]);
 
   // fetch coin
   useEffect(() => {
