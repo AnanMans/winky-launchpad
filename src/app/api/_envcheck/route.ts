@@ -1,12 +1,12 @@
-export const runtime = 'nodejs';
+kexport const runtime = 'nodejs';
 
 import { NextResponse } from 'next/server';
 import { Keypair } from '@solana/web3.js';
 
 export async function GET() {
-  const raw = process.env.MINT_AUTHORITY_KEYPAIR ?? '';
-  let pubkey = '';
+  const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
   let parsedOk = false;
+  let pubkey = '';
 
   try {
     if (raw) {
@@ -15,7 +15,9 @@ export async function GET() {
       pubkey = kp.publicKey.toBase58();
       parsedOk = true;
     }
-  } catch {}
+  } catch {
+    parsedOk = false;
+  }
 
   return NextResponse.json({
     hasVar: !!raw,
