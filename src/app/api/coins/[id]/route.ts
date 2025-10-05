@@ -2,7 +2,6 @@ export const runtime = 'nodejs';
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/db';
 
-export const runtime = 'nodejs';
 
 // GET /api/coins/[id]
 export async function GET(
