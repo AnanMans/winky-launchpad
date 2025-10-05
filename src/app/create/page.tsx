@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import {
@@ -11,6 +11,9 @@ import {
 } from '@solana/web3.js';
 import Image from 'next/image';
 import Link from 'next/link';
+
+// -----------------------------------------------------
+// small utils
 function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(' ');
 }
@@ -19,51 +22,132 @@ function clampTicker(x: string) {
   return x.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
 }
 
+// -----------------------------------------------------
+// Uploader with explicit "Upload" button
+type UploaderProps = {
+  connected: boolean;
+  onUploaded: (url: string) => void;
+};
+
+function Uploader({ connected, onUploaded }: UploaderProps) {
+  const [file, setFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [url, setUrl] = useState<string | null>(null);
+
+  function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0] || null;
+    setError(null);
+    setUrl(null);
+    setFile(f);
+  }
+
+  async function doUpload() {
+    if (!file) return setError('Pick an image or video first.');
+    if (!connected) return setError('Connect your wallet to upload.');
+    if (file.size > 30 * 1024 * 1024) return setError('Max size is 30MB.');
+
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('prefix', 'coins/'); // saved under storage bucket path coins/
+
+    setUploading(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/upload', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json(); // { url: 'https://.../public/path.ext' }
+      setUrl(data.url);
+      onUploaded(data.url);
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  return (
+    <div className="grid gap-2 rounded-xl border border-white/10 p-4">
+      <label className="text-sm font-medium">
+        Select image or video to upload{' '}
+        <span className="text-white/50">(must be connected)</span>
+      </label>
+
+      <div className="flex items-center gap-3">
+        <input
+          type="file"
+          accept=".jpg,.jpeg,.png,.gif,.mp4"
+          onChange={onFileChange}
+          className="text-sm"
+        />
+        <button
+          type="button"
+          onClick={doUpload}
+          disabled={!file || !connected || uploading}
+          className={cx(
+            'px-4 py-1.5 rounded-lg text-sm',
+            !file || !connected || uploading
+              ? 'bg-white/15 text-white/40 cursor-not-allowed'
+              : 'bg-white text-black'
+          )}
+        >
+          {uploading ? 'Uploading…' : 'Upload'}
+        </button>
+      </div>
+
+      {file && (
+        <p className="text-xs text-white/70 break-all">
+          Selected: {file.name} ({Math.ceil(file.size / 1024)} KB)
+        </p>
+      )}
+
+      <p className="text-xs text-white/50">
+        Image: max 15MB (.jpg .gif .png). Video: max 30MB (.mp4).
+      </p>
+
+      {url && (
+        <p className="text-xs text-green-500 break-all">Uploaded ✔ {url}</p>
+      )}
+      {error && (
+        <p className="text-xs text-red-400 break-all">{error}</p>
+      )}
+    </div>
+  );
+}
+
+// -----------------------------------------------------
+// Page
 export default function CreatePage() {
   const router = useRouter();
-  const { publicKey, sendTransaction } = useWallet();
+  const { publicKey, sendTransaction, connected } = useWallet();
   const { connection } = useConnection();
 
-  // form
+  // form state
   const [name, setName] = useState('');
-  const [symbol, setSymbol] = useState('');
+  const [symbol, setSymbol] = useState(''); // uppercased via clampTicker
   const [desc, setDesc] = useState('');
   const [website, setWebsite] = useState('');
   const [xUrl, setXUrl] = useState('');
   const [tg, setTg] = useState('');
   const [curve, setCurve] = useState<'linear' | 'degen' | 'random'>('linear');
   const [strength, setStrength] = useState(2);
-  const [file, setFile] = useState<File | null>(null);
+  const [logoUrl, setLogoUrl] = useState<string | null>(null); // URL from uploader
 
-  // modal (first buy)
+  // first buy modal state
   const [createdId, setCreatedId] = useState<string | null>(null);
   const [firstBuySol, setFirstBuySol] = useState<string>('0.05');
   const [showBuy, setShowBuy] = useState(false);
 
-  const logoMissing = !file;
-  const canSubmit = name && symbol && !logoMissing;
-
-  async function uploadFileToSupabase(f: File): Promise<string> {
-    const form = new FormData();
-    form.append('file', f);
-    const res = await fetch('/api/upload', { method: 'POST', body: form });
-    if (!res.ok) {
-      const j = await res.json().catch(() => ({}));
-      throw new Error(j?.error || 'Upload failed');
-    }
-    const j = await res.json();
-    return j.url as string;
-  }
+  const logoMissing = !logoUrl;
+  const canSubmit = Boolean(name && symbol && logoUrl);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!canSubmit) {
-      alert('Please fill required fields and select an image/video.');
+      alert('Please fill required fields and upload media first.');
       return;
     }
     try {
-      const logoUrl = await uploadFileToSupabase(file!);
-
       const res = await fetch('/api/coins', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -93,7 +177,7 @@ export default function CreatePage() {
     if (!createdId) return;
     const amt = Number(firstBuySol);
 
-    // If user entered nothing or <=0, just go to the coin page
+    // if creator skips or enters invalid amount, just go to coin page
     if (!Number.isFinite(amt) || amt <= 0) {
       router.push(`/coin/${createdId}`);
       return;
@@ -106,7 +190,8 @@ export default function CreatePage() {
 
     try {
       // 1) transfer SOL to treasury so server can verify
-      const treasury = new PublicKey(process.env.NEXT_PUBLIC_TREASURY!);
+      const treasuryStr = process.env.NEXT_PUBLIC_TREASURY!;
+      const treasury = new PublicKey(treasuryStr);
       const tx = new Transaction().add(
         SystemProgram.transfer({
           fromPubkey: publicKey,
@@ -157,7 +242,9 @@ export default function CreatePage() {
       <section className="rounded-2xl border p-6 grid gap-6 bg-black/20">
         <div>
           <h1 className="text-2xl md:text-3xl font-bold">Create new coin</h1>
-          <p className="text-white/60">Choose carefully, these can’t be changed once created.</p>
+          <p className="text-white/60">
+            Choose carefully, these can’t be changed once the coin is created.
+          </p>
         </div>
 
         <form onSubmit={onSubmit} className="grid gap-5">
@@ -220,20 +307,13 @@ export default function CreatePage() {
             </div>
           </div>
 
+          {/* Upload section (uses explicit Upload button) */}
           <div className="grid gap-2">
-            <label className="text-sm text-white/70">
-              Select image or video to upload (must be connected)
-            </label>
-            <input
-              type="file"
-              accept=".jpg,.jpeg,.png,.gif,.mp4"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            />
-            <p className="text-xs text-white/50">
-              Image: max 15MB (.jpg .gif .png). Video: max 30MB (.mp4).
-            </p>
-            {logoMissing && (
-              <p className="text-sm text-red-400">Please upload an image or video.</p>
+            <Uploader connected={connected} onUploaded={setLogoUrl} />
+            {!logoUrl && (
+              <p className="text-sm text-red-400">
+                Please upload an image or video before creating.
+              </p>
             )}
           </div>
 
@@ -285,8 +365,7 @@ export default function CreatePage() {
           <div className="bg-zinc-900 border rounded-2xl p-6 w-[520px] max-w-[95vw] grid gap-4">
             <h3 className="text-xl font-semibold">First buy (optional)</h3>
             <p className="text-white/70 text-sm">
-              Choose how many SOL to spend on your own coin. Buying a small amount can
-              help protect your coin from snipers.
+              Choose how many SOL to spend on your own coin. Buying a small amount helps protect your coin from snipers.
             </p>
             <div className="flex items-center gap-3">
               <input
