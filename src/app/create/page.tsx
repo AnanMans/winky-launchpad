@@ -2,18 +2,14 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useWallet, useConnection } from '@solana/wallet-adapter-react';
-import {
-  LAMPORTS_PER_SOL,
-  PublicKey,
-  SystemProgram,
-  Transaction,
-} from '@solana/web3.js';
-import Image from 'next/image';
 import Link from 'next/link';
+import Image from 'next/image';
 
-// -----------------------------------------------------
-// small utils
+import { useWallet, useConnection } from '@solana/wallet-adapter-react';
+import { PublicKey, SystemProgram, Transaction, LAMPORTS_PER_SOL } from '@solana/web3.js';
+
+import WalletButton from '@/components/WalletButton';
+
 function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(' ');
 }
@@ -22,132 +18,58 @@ function clampTicker(x: string) {
   return x.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
 }
 
-// -----------------------------------------------------
-// Uploader with explicit "Upload" button
-type UploaderProps = {
-  connected: boolean;
-  onUploaded: (url: string) => void;
-};
-
-function Uploader({ connected, onUploaded }: UploaderProps) {
-  const [file, setFile] = useState<File | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [url, setUrl] = useState<string | null>(null);
-
-  function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0] || null;
-    setError(null);
-    setUrl(null);
-    setFile(f);
-  }
-
-  async function doUpload() {
-    if (!file) return setError('Pick an image or video first.');
-    if (!connected) return setError('Connect your wallet to upload.');
-    if (file.size > 30 * 1024 * 1024) return setError('Max size is 30MB.');
-
-    const fd = new FormData();
-    fd.append('file', file);
-    fd.append('prefix', 'coins/'); // saved under storage bucket path coins/
-
-    setUploading(true);
-    setError(null);
-    try {
-      const res = await fetch('/api/upload', { method: 'POST', body: fd });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json(); // { url: 'https://.../public/path.ext' }
-      setUrl(data.url);
-      onUploaded(data.url);
-    } catch (e: any) {
-      setError(e?.message || String(e));
-    } finally {
-      setUploading(false);
-    }
-  }
-
-  return (
-    <div className="grid gap-2 rounded-xl border border-white/10 p-4">
-      <label className="text-sm font-medium">
-        Select image or video to upload{' '}
-        <span className="text-white/50">(must be connected)</span>
-      </label>
-
-      <div className="flex items-center gap-3">
-        <input
-          type="file"
-          accept=".jpg,.jpeg,.png,.gif,.mp4"
-          onChange={onFileChange}
-          className="text-sm"
-        />
-        <button
-          type="button"
-          onClick={doUpload}
-          disabled={!file || !connected || uploading}
-          className={cx(
-            'px-4 py-1.5 rounded-lg text-sm',
-            !file || !connected || uploading
-              ? 'bg-white/15 text-white/40 cursor-not-allowed'
-              : 'bg-white text-black'
-          )}
-        >
-          {uploading ? 'Uploading…' : 'Upload'}
-        </button>
-      </div>
-
-      {file && (
-        <p className="text-xs text-white/70 break-all">
-          Selected: {file.name} ({Math.ceil(file.size / 1024)} KB)
-        </p>
-      )}
-
-      <p className="text-xs text-white/50">
-        Image: max 15MB (.jpg .gif .png). Video: max 30MB (.mp4).
-      </p>
-
-      {url && (
-        <p className="text-xs text-green-500 break-all">Uploaded ✔ {url}</p>
-      )}
-      {error && (
-        <p className="text-xs text-red-400 break-all">{error}</p>
-      )}
-    </div>
-  );
-}
-
-// -----------------------------------------------------
-// Page
 export default function CreatePage() {
   const router = useRouter();
   const { publicKey, sendTransaction, connected } = useWallet();
   const { connection } = useConnection();
 
-  // form state
+  // form
   const [name, setName] = useState('');
-  const [symbol, setSymbol] = useState(''); // uppercased via clampTicker
+  const [symbol, setSymbol] = useState('');
   const [desc, setDesc] = useState('');
   const [website, setWebsite] = useState('');
   const [xUrl, setXUrl] = useState('');
   const [tg, setTg] = useState('');
   const [curve, setCurve] = useState<'linear' | 'degen' | 'random'>('linear');
-  const [strength, setStrength] = useState(2);
-  const [logoUrl, setLogoUrl] = useState<string | null>(null); // URL from uploader
+  const [strength, setStrength] = useState<number>(2);
+  const [file, setFile] = useState<File | null>(null);
 
-  // first buy modal state
+  // first-buy modal
   const [createdId, setCreatedId] = useState<string | null>(null);
   const [firstBuySol, setFirstBuySol] = useState<string>('0.05');
   const [showBuy, setShowBuy] = useState(false);
 
-  const logoMissing = !logoUrl;
-  const canSubmit = Boolean(name && symbol && logoUrl);
+  // validations
+  const logoMissing = !file;
+  const canSubmit = Boolean(name && symbol && !logoMissing);
+
+  async function uploadFileToSupabase(f: File): Promise<string> {
+    const form = new FormData();
+    // (optional) backends can use a prefix; if your /api/upload supports it, uncomment:
+    // form.append('prefix', 'coins/');
+    form.append('file', f);
+
+    const res = await fetch('/api/upload', { method: 'POST', body: form });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j?.error || 'Upload failed');
+    }
+    const j = await res.json();
+    return j.url as string;
+  }
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!canSubmit) {
-      alert('Please fill required fields and upload media first.');
+      alert('Please fill required fields and select an image or video.');
       return;
     }
+
     try {
+      // 1) upload media
+      const logoUrl = await uploadFileToSupabase(file!);
+
+      // 2) create coin (server also creates mint)
       const res = await fetch('/api/coins', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -164,34 +86,36 @@ export default function CreatePage() {
       const j = await res.json();
       if (!res.ok) throw new Error(j?.error || 'Create failed');
 
-      // open "first buy" modal
+      // 3) open first-buy modal
       setCreatedId(j.coin.id);
       setShowBuy(true);
-    } catch (e: any) {
-      console.error('Create failed', e);
-      alert(`Create failed: ${e?.message || String(e)}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('Create failed:', msg);
+      alert(`Create failed: ${msg}`);
     }
   }
 
   async function confirmFirstBuy() {
     if (!createdId) return;
-    const amt = Number(firstBuySol);
 
-    // if creator skips or enters invalid amount, just go to coin page
+    const amt = Number(firstBuySol);
+    // If creator skips or enters <= 0, just go to the coin page
     if (!Number.isFinite(amt) || amt <= 0) {
       router.push(`/coin/${createdId}`);
       return;
     }
 
     if (!publicKey) {
-      alert('Connect wallet first');
+      alert('Connect your wallet first.');
       return;
     }
 
     try {
-      // 1) transfer SOL to treasury so server can verify
+      // 1) Pay treasury in SOL so server can verify
       const treasuryStr = process.env.NEXT_PUBLIC_TREASURY!;
       const treasury = new PublicKey(treasuryStr);
+
       const tx = new Transaction().add(
         SystemProgram.transfer({
           fromPubkey: publicKey,
@@ -202,9 +126,10 @@ export default function CreatePage() {
       tx.feePayer = publicKey;
       const { blockhash } = await connection.getLatestBlockhash('processed');
       tx.recentBlockhash = blockhash;
+
       const sig = await sendTransaction(tx, connection, { skipPreflight: true });
 
-      // 2) tell server to mint tokens to creator
+      // 2) Tell server to mint tokens to creator
       const res = await fetch(`/api/coins/${createdId}/buy`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -214,15 +139,17 @@ export default function CreatePage() {
           sig,
         }),
       });
+
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
         throw new Error(j?.error || 'Server buy failed');
       }
 
       router.push(`/coin/${createdId}`);
-    } catch (e: any) {
-      console.error('first-buy error', e);
-      alert(`Buy failed: ${e?.message || String(e)}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('first-buy error:', msg);
+      alert(`Buy failed: ${msg}`);
       router.push(`/coin/${createdId}`);
     }
   }
@@ -236,6 +163,7 @@ export default function CreatePage() {
         </Link>
         <nav className="flex items-center gap-3">
           <Link className="underline" href="/coins">Coins</Link>
+          <WalletButton />
         </nav>
       </header>
 
@@ -248,30 +176,41 @@ export default function CreatePage() {
         </div>
 
         <form onSubmit={onSubmit} className="grid gap-5">
+          {/* Name */}
           <div className="grid gap-2">
             <label className="text-sm text-white/70">Coin name</label>
             <input
               maxLength={20}
-              className="px-3 py-2 rounded-lg bg-black/30 border"
+              className={cx(
+                'px-3 py-2 rounded-lg bg-black/30 border',
+                !name && 'border-red-500/60'
+              )}
               placeholder="Name your coin"
               value={name}
               onChange={(e) => setName(e.target.value.slice(0, 20))}
               required
             />
+            <p className="text-xs text-white/50">{name.length}/20</p>
           </div>
 
+          {/* Ticker */}
           <div className="grid gap-2">
             <label className="text-sm text-white/70">Ticker</label>
             <input
               maxLength={8}
-              className="px-3 py-2 rounded-lg bg-black/30 border"
+              className={cx(
+                'px-3 py-2 rounded-lg bg-black/30 border',
+                !symbol && 'border-red-500/60'
+              )}
               placeholder="Add a coin ticker (e.g. PEPE)"
               value={symbol}
               onChange={(e) => setSymbol(clampTicker(e.target.value))}
               required
             />
+            <p className="text-xs text-white/50">{symbol.length}/8</p>
           </div>
 
+          {/* Description */}
           <div className="grid gap-2">
             <label className="text-sm text-white/70">Description (optional)</label>
             <textarea
@@ -283,6 +222,7 @@ export default function CreatePage() {
             />
           </div>
 
+          {/* Socials */}
           <div className="grid gap-2">
             <label className="text-sm text-white/70">Add social links (optional)</label>
             <div className="grid md:grid-cols-3 gap-3">
@@ -307,23 +247,38 @@ export default function CreatePage() {
             </div>
           </div>
 
-          {/* Upload section (uses explicit Upload button) */}
+          {/* Upload */}
           <div className="grid gap-2">
-            <Uploader connected={connected} onUploaded={setLogoUrl} />
-            {!logoUrl && (
-              <p className="text-sm text-red-400">
-                Please upload an image or video before creating.
+            <label className="text-sm text-white/70">
+              Select image or video to upload{' '}
+              {!connected && <span className="text-red-400">(connect wallet)</span>}
+            </label>
+            <input
+              type="file"
+              accept=".jpg,.jpeg,.png,.gif,.mp4"
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            />
+            <p className="text-xs text-white/50">
+              Image: max 15MB (.jpg .gif .png). Video: max 30MB (.mp4).
+            </p>
+            {logoMissing && (
+              <p className="text-sm text-red-400">Please upload an image or video.</p>
+            )}
+            {file && (
+              <p className="text-xs text-white/60 break-all">
+                Selected: {file.name} ({Math.ceil(file.size / 1024)} KB)
               </p>
             )}
           </div>
 
+          {/* Curve + strength */}
           <div className="grid md:grid-cols-2 gap-3">
             <div className="grid gap-2">
               <label className="text-sm text-white/70">Curve</label>
               <select
                 className="px-3 py-2 rounded-lg bg-black/30 border"
                 value={curve}
-                onChange={(e) => setCurve(e.target.value as any)}
+                onChange={(e) => setCurve(e.target.value as 'linear' | 'degen' | 'random')}
               >
                 <option value="linear">Linear</option>
                 <option value="degen">Degen</option>
@@ -344,6 +299,7 @@ export default function CreatePage() {
             </div>
           </div>
 
+          {/* Submit */}
           <div className="pt-2">
             <button
               type="submit"
