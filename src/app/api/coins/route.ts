@@ -5,7 +5,6 @@ import { supabaseAdmin } from '@/lib/db';
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import { createMint } from '@solana/spl-token';
 
-export const runtime = 'nodejs';
 
 function bad(msg: string, code = 400) {
   return NextResponse.json({ error: msg }, { status: code });
