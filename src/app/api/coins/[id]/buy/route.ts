@@ -35,7 +35,7 @@ export async function POST(
 ) {
   try {
     const { id } = await context.params;
-    const body = await req.json().catch(() => ({}));
+    const body = await req.json().catch(() => ({} as any));
 
     const buyerStr: string | undefined = body?.buyer;
     const amountSol: number = Number(body?.amountSol);
@@ -57,13 +57,13 @@ export async function POST(
     const buyer = new PublicKey(buyerStr);
     const treasury = new PublicKey(treasuryStr);
 
-    // Load coin (we need curve params and (maybe) its mint)
-const { data: coin, error: coinErr } = await supabase
-  .from('coins')
-  .select('mint, curve, strength, start_price')
-  .eq('id', id)
-  .single();
-if (coinErr || !coin) return bad('Coin not found', 404);
+    // Load coin (curve params + maybe mint)
+    const { data: coin, error: coinErr } = await supabase
+      .from('coins')
+      .select('mint, curve, strength, start_price')
+      .eq('id', id)
+      .single();
+    if (coinErr || !coin) return bad('Coin not found', 404);
 
     // --- Verify the SOL payment on-chain by reading the transaction ---
     const parsed = await conn.getParsedTransaction(sig, {
@@ -90,50 +90,49 @@ if (coinErr || !coin) return bad('Coin not found', 404);
       return bad('Payment amount too small / not received by treasury');
     }
 
-// --- Ensure we have a mint: lazily create it on first buy if missing ---
-let mintPk: PublicKey;
+    // --- Ensure we have a mint: lazily create it on first buy if missing ---
+    let mintPk: PublicKey;
 
-if (!coin.mint) {
-  const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
-  if (!raw) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
+    if (!coin.mint) {
+      const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
+      if (!raw) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
 
-  const bytes = JSON.parse(raw) as number[];
-  if (!Array.isArray(bytes) || bytes.length !== 64) {
-    return bad('MINT_AUTHORITY_KEYPAIR must be a 64-byte secret key JSON array', 500);
-  }
+      const bytes = JSON.parse(raw) as number[];
+      if (!Array.isArray(bytes) || bytes.length !== 64) {
+        return bad('MINT_AUTHORITY_KEYPAIR must be a 64-byte secret key JSON array', 500);
+      }
+      const payer = Keypair.fromSecretKey(Uint8Array.from(bytes));
+      const mintKp = Keypair.generate();
 
-  const payer = Keypair.fromSecretKey(Uint8Array.from(bytes));
-  const mintKp = Keypair.generate();
+      // default 6 decimals; explicit legacy SPL mint (TOKEN_PROGRAM_ID)
+      await createMint(
+        conn,
+        payer,                 // pays rent
+        payer.publicKey,       // mint authority
+        null,                  // freeze authority
+        6,                     // decimals
+        mintKp,                // mint keypair
+        undefined,             // confirm opts
+        TOKEN_PROGRAM_ID
+      );
 
-  // default 6 decimals; explicit program id
-  await createMint(
-    conn,
-    payer,                    // pays rent
-    payer.publicKey,          // mint authority
-    null,                     // freeze authority (none)
-    6,                        // decimals
-    mintKp,                   // use this keypair as the mint address
-    undefined,                // confirm opts
-    TOKEN_PROGRAM_ID
-  );
+      mintPk = mintKp.publicKey;
 
-  mintPk = mintKp.publicKey;
+      // persist mint to DB (only if still NULL to avoid races)
+      const { error: upErr } = await supabaseAdmin
+        .from('coins')
+        .update({ mint: mintPk.toBase58() })
+        .eq('id', id)
+        .is('mint', null);
 
-  // persist mint to DB (only if still NULL to avoid races)
-  const { error: upErr } = await supabaseAdmin
-    .from('coins')
-    .update({ mint: mintPk.toBase58() })
-    .eq('id', id)
-    .is('mint', null);
-
-  if (upErr) {
-    console.warn('[buy] failed to save mint:', upErr);
-  } else {
-    console.log('[buy] saved mint to DB:', mintPk.toBase58());
-  }
-} else {
-  mintPk = new PublicKey(coin.mint);
-}
+      if (upErr) {
+        console.warn('[buy] failed to save mint:', upErr);
+      } else {
+        console.log('[buy] saved mint to DB:', mintPk.toBase58());
+      }
+    } else {
+      mintPk = new PublicKey(coin.mint);
+    }
 
     // --- Determine token program + decimals (REAL on-chain) ---
     const mintAcc = await conn.getAccountInfo(mintPk);
@@ -143,6 +142,7 @@ if (!coin.mint) {
       ? TOKEN_2022_PROGRAM_ID
       : TOKEN_PROGRAM_ID;
 
+    // getMint(conn, mint, commitment, programId)
     const mintInfo = await getMint(conn, mintPk, 'confirmed', TOKEN_PID);
     const decimals = mintInfo.decimals;
 
@@ -154,33 +154,34 @@ if (!coin.mint) {
       Number(coin.start_price ?? 0)
     );
 
-    // --- Create buyer ATA (payer = mint authority key) & mint to it ---
+    // --- Create buyer ATA under the SAME token program, then mint ---
     const raw2 = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
     if (!raw2) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
     const mintAuthority = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw2)));
 
     const ata = await getOrCreateAssociatedTokenAccount(
       conn,
-      mintAuthority,     // payer for rent
+      mintAuthority,      // payer for rent
       mintPk,
       buyer,
-      true,
+      true,               // allowOwnerOffCurve
       'confirmed',
       undefined,
-      TOKEN_PID
+      TOKEN_PID           // <<< important: match mint program
     );
 
     const mintAmount = uiToAmount(tokensUi, decimals);
+
     const mintSig = await mintTo(
       conn,
       mintAuthority,
       mintPk,
       ata.address,
-      mintAuthority,     // authority
+      mintAuthority,      // authority
       mintAmount,
       [],
       undefined,
-      TOKEN_PID
+      TOKEN_PID           // <<< important: match mint program
     );
 
     // --- Record trade
