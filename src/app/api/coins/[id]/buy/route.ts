@@ -1,12 +1,19 @@
 export const runtime = 'nodejs';
+
 import { NextRequest, NextResponse } from 'next/server';
-import { Connection, PublicKey, LAMPORTS_PER_SOL, Keypair } from '@solana/web3.js';
+import {
+  Connection,
+  PublicKey,
+  LAMPORTS_PER_SOL,
+  Keypair,
+} from '@solana/web3.js';
 import {
   getOrCreateAssociatedTokenAccount,
   mintTo,
+  getMint,
+  createMint,
   TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
-  getMint,
 } from '@solana/spl-token';
 import { supabaseAdmin } from '@/lib/db';
 import { quoteTokensUi } from '@/lib/curve';
@@ -15,7 +22,6 @@ function bad(msg: string, code = 400) {
   return NextResponse.json({ error: msg }, { status: code });
 }
 
-// UI → base units (decimals-aware)
 function uiToAmount(ui: number, decimals: number): bigint {
   const s = String(ui);
   const [i, f = ''] = s.split('.');
@@ -29,55 +35,54 @@ export async function POST(
 ) {
   try {
     const { id } = await context.params;
-
     const body = await req.json().catch(() => ({}));
+
     const buyerStr: string | undefined = body?.buyer;
-    const amountSol: number | undefined = Number(body?.amountSol);
+    const amountSol: number = Number(body?.amountSol);
     const sig: string | undefined = body?.sig;
 
     if (!buyerStr) return bad('Missing buyer');
-    if (!amountSol || amountSol <= 0) return bad('Invalid amountSol');
+    if (!Number.isFinite(amountSol) || amountSol <= 0) return bad('Invalid amountSol');
     if (!sig) return bad('Missing signature');
 
-    // coin row
-    const { data: coin, error } = await supabaseAdmin
-      .from('coins')
-      .select('mint, curve, strength, start_price')
-      .eq('id', id)
-      .single();
-
-    if (error || !coin) return bad('Coin not found', 404);
-    if (!coin.mint) return bad('Coin or mint not found', 404);
-
-    // RPC
     const rpc =
       process.env.NEXT_PUBLIC_HELIUS_RPC ||
-      process.env.HELIUS_RPC ||
       process.env.NEXT_PUBLIC_RPC ||
       'https://api.devnet.solana.com';
     const conn = new Connection(rpc, 'confirmed');
 
-    // verify payment tx (buyer → treasury) on-chain
     const treasuryStr = process.env.NEXT_PUBLIC_TREASURY;
     if (!treasuryStr) return bad('Server missing NEXT_PUBLIC_TREASURY', 500);
 
     const buyer = new PublicKey(buyerStr);
     const treasury = new PublicKey(treasuryStr);
 
+    // Load coin (we need curve params and (maybe) its mint)
+    const { data: coin, error: coinErr } = await supabaseAdmin
+      .from('coins')
+      .select('mint, curve, strength, start_price')
+      .eq('id', id)
+      .single();
+    if (coinErr || !coin) return bad('Coin not found', 404);
+
+    // --- Verify the SOL payment on-chain by reading the transaction ---
     const parsed = await conn.getParsedTransaction(sig, {
       maxSupportedTransactionVersion: 0,
       commitment: 'confirmed',
     });
     if (!parsed || !parsed.meta) return bad('Payment tx not found/confirmed');
 
-    const keyObjs = parsed.transaction.message.accountKeys as any[];
-    const keys = keyObjs.map((k: any) => new PublicKey(typeof k === 'string' ? k : k.pubkey));
-    const pre = parsed.meta.preBalances!;
-    const post = parsed.meta.postBalances!;
+    const keys = parsed.transaction.message.accountKeys.map((k: any) =>
+      new PublicKey(typeof k === 'string' ? k : k.pubkey)
+    );
+    const pre = parsed.meta.preBalances;
+    const post = parsed.meta.postBalances;
 
-    const idxTreasury = keys.findIndex(k => k.equals(treasury));
-    const idxBuyer = keys.findIndex(k => k.equals(buyer));
-    if (idxTreasury === -1 || idxBuyer === -1) return bad('Tx missing buyer/treasury accounts');
+    const idxTreasury = keys.findIndex((k) => k.equals(treasury));
+    const idxBuyer = keys.findIndex((k) => k.equals(buyer));
+    if (idxTreasury === -1 || idxBuyer === -1) {
+      return bad('Tx missing buyer/treasury accounts');
+    }
 
     const lamportsToTreasury = post[idxTreasury] - pre[idxTreasury];
     const minLamports = Math.floor(amountSol * LAMPORTS_PER_SOL * 0.98);
@@ -85,39 +90,57 @@ export async function POST(
       return bad('Payment amount too small / not received by treasury');
     }
 
-    // signer (mint authority)
-    const raw = process.env.MINT_AUTHORITY_KEYPAIR
-      ? (JSON.parse(process.env.MINT_AUTHORITY_KEYPAIR) as number[])
-      : null;
-    if (!raw) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
-    const mintAuthority = Keypair.fromSecretKey(Uint8Array.from(raw));
+    // --- Ensure we have a mint: lazily create it on first buy if missing ---
+    let mintPk: PublicKey;
+    if (!coin.mint) {
+      const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
+      if (!raw) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
 
-    // mint + decimals (Token or Token-2022)
-    const mint = new PublicKey(coin.mint);
-    const acc = await conn.getAccountInfo(mint);
-    if (!acc) return bad('Mint account not found', 400);
+      const payer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw)));
+      const mintKp = Keypair.generate();
 
-    const TOKEN_PID = acc.owner.equals(TOKEN_2022_PROGRAM_ID)
+      // default 6 decimals
+      await createMint(conn, payer, payer.publicKey, null, 6, mintKp);
+
+      mintPk = mintKp.publicKey;
+      // persist mint to DB
+      const { error: upErr } = await supabaseAdmin
+        .from('coins')
+        .update({ mint: mintPk.toBase58() })
+        .eq('id', id);
+      if (upErr) console.warn('[buy] failed to save mint:', upErr);
+    } else {
+      mintPk = new PublicKey(coin.mint);
+    }
+
+    // --- Determine token program + decimals (REAL on-chain) ---
+    const mintAcc = await conn.getAccountInfo(mintPk);
+    if (!mintAcc) return bad('Mint account not found', 400);
+
+    const TOKEN_PID = mintAcc.owner.equals(TOKEN_2022_PROGRAM_ID)
       ? TOKEN_2022_PROGRAM_ID
       : TOKEN_PROGRAM_ID;
 
-    const mintInfo = await getMint(conn, mint, 'confirmed', TOKEN_PID);
+    const mintInfo = await getMint(conn, mintPk, 'confirmed', TOKEN_PID);
     const decimals = mintInfo.decimals;
 
-    // quote number of tokens (UI units) using your curve policy
+    // --- Quote how many tokens to mint based on curve ---
     const tokensUi = quoteTokensUi(
-      coin.curve || 'linear',
+      amountSol,
+      (coin.curve || 'linear') as 'linear' | 'degen' | 'random',
       Number(coin.strength ?? 2),
-      Number(coin.start_price ?? 0),
-      amountSol
+      Number(coin.start_price ?? 0)
     );
-    const mintAmount = uiToAmount(tokensUi, decimals);
 
-    // mint to buyer ATA
+    // --- Create buyer ATA (payer = mint authority key) & mint to it ---
+    const raw2 = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
+    if (!raw2) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
+    const mintAuthority = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw2)));
+
     const ata = await getOrCreateAssociatedTokenAccount(
       conn,
-      mintAuthority,   // payer
-      mint,
+      mintAuthority,     // payer for rent
+      mintPk,
       buyer,
       true,
       'confirmed',
@@ -125,19 +148,20 @@ export async function POST(
       TOKEN_PID
     );
 
+    const mintAmount = uiToAmount(tokensUi, decimals);
     const mintSig = await mintTo(
       conn,
       mintAuthority,
-      mint,
+      mintPk,
       ata.address,
-      mintAuthority,
+      mintAuthority,     // authority
       mintAmount,
       [],
-      { commitment: 'confirmed' },
+      undefined,
       TOKEN_PID
     );
 
-    // record trade (best-effort)
+    // --- Record trade
     await supabaseAdmin.from('trades').insert({
       coin_id: id,
       side: 'buy',
@@ -148,8 +172,8 @@ export async function POST(
 
     return NextResponse.json({
       ok: true,
-      mintedUi: tokensUi,
-      decimals,
+      tokensUi,
+      minted: mintAmount.toString(),
       ata: ata.address.toBase58(),
       mintSig,
     });

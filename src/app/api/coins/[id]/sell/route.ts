@@ -1,20 +1,30 @@
 export const runtime = 'nodejs';
+
 import { NextResponse } from 'next/server';
 import {
-  Connection, PublicKey, SystemProgram, Transaction, Keypair,
+  Connection,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+  Keypair,
+  LAMPORTS_PER_SOL,
 } from '@solana/web3.js';
 import {
-  TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, getMint,
+  TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+  getMint,
   getAssociatedTokenAddressSync,
   createAssociatedTokenAccountIdempotentInstruction,
   createTransferCheckedInstruction,
 } from '@solana/spl-token';
 import { supabaseAdmin } from '@/lib/db';
-import { quoteSellTokensUi } from '@/lib/curve';
+import { quoteSellTokensUi, CurveName } from '@/lib/curve';
 
+// ---------- helpers ----------
 function bad(msg: string, code = 400) {
   return NextResponse.json({ error: msg }, { status: code });
 }
+
 function uiToAmount(ui: number, decimals: number): bigint {
   const s = String(ui);
   const [i, f = ''] = s.split('.');
@@ -22,6 +32,7 @@ function uiToAmount(ui: number, decimals: number): bigint {
   return BigInt(i || '0') * (10n ** BigInt(decimals)) + BigInt(frac || '0');
 }
 
+// ---------- handler ----------
 export async function POST(
   req: Request,
   ctx: { params: Promise<{ id: string }> }
@@ -37,9 +48,13 @@ export async function POST(
     if (!Number.isFinite(amountSol) || amountSol <= 0) return bad('Invalid amount');
 
     let seller: PublicKey;
-    try { seller = new PublicKey(sellerStr); } catch { return bad('Invalid seller'); }
+    try {
+      seller = new PublicKey(sellerStr);
+    } catch {
+      return bad('Invalid seller pubkey');
+    }
 
-    // coin row (need mint + curve)
+    // 1) Load coin (need mint + curve config)
     const { data: coin, error: coinError } = await supabaseAdmin
       .from('coins')
       .select('mint, curve, strength, start_price')
@@ -51,7 +66,7 @@ export async function POST(
 
     const mint = new PublicKey(coin.mint);
 
-    // RPC
+    // 2) RPC
     const rpc =
       process.env.NEXT_PUBLIC_HELIUS_RPC ||
       process.env.HELIUS_RPC ||
@@ -59,14 +74,14 @@ export async function POST(
       'https://api.devnet.solana.com';
     const conn = new Connection(rpc, 'confirmed');
 
-    // server signer (pays SOL to seller)
+    // 3) Server signer (treasury payer)
     const raw = process.env.MINT_AUTHORITY_KEYPAIR
       ? (JSON.parse(process.env.MINT_AUTHORITY_KEYPAIR) as number[])
       : null;
     if (!raw) return bad('Server not configured (MINT_AUTHORITY_KEYPAIR missing)', 500);
     const payer = Keypair.fromSecretKey(Uint8Array.from(raw));
 
-    // token program + decimals
+    // 4) Detect token program & read decimals
     const mintAcc = await conn.getAccountInfo(mint);
     if (!mintAcc) return bad('Mint account not found', 400);
 
@@ -74,47 +89,74 @@ export async function POST(
       ? TOKEN_2022_PROGRAM_ID
       : TOKEN_PROGRAM_ID;
 
-    const mintInfo = await getMint(conn, mint, 'confirmed', TOKEN_PID);
+    // getMint(connection, mint, commitmentOrOpts?, programId?)
+    const mintInfo = await getMint(conn, mint, undefined, TOKEN_PID);
     const decimals = mintInfo.decimals;
 
-    // derive ATAs under same program
-    const vaultOwner = payer.publicKey;
-    const sellerAta = getAssociatedTokenAddressSync(mint, seller, false, TOKEN_PID);
-    const vaultAta = getAssociatedTokenAddressSync(mint, vaultOwner, false, TOKEN_PID);
+    // 5) Derive ATAs with the same program
+    const vaultOwner = payer.publicKey; // receives tokens on sell
+    const sellerAta = getAssociatedTokenAddressSync(
+      mint,
+      seller,
+      false,
+      TOKEN_PID
+    );
+    const vaultAta = getAssociatedTokenAddressSync(
+      mint,
+      vaultOwner,
+      false,
+      TOKEN_PID
+    );
 
+    // Ensure ATAs exist (idempotent)
     const ixEnsureVaultAta = createAssociatedTokenAccountIdempotentInstruction(
-      payer.publicKey, vaultAta, vaultOwner, mint, TOKEN_PID
+      payer.publicKey,
+      vaultAta,
+      vaultOwner,
+      mint,
+      TOKEN_PID
     );
     const ixEnsureSellerAta = createAssociatedTokenAccountIdempotentInstruction(
-      payer.publicKey, sellerAta, seller, mint, TOKEN_PID
+      payer.publicKey,
+      sellerAta,
+      seller,
+      mint,
+      TOKEN_PID
     );
 
-    // how many tokens to take for this payout
+    // 6) Quote how many tokens to pull from seller (UI units)
     const tokensUi = quoteSellTokensUi(
-      coin.curve || 'linear',
+      amountSol,
+      ((coin.curve || 'linear') as CurveName),
       Number(coin.strength ?? 2),
-      Number(coin.start_price ?? 0),
-      amountSol
+      Number(coin.start_price ?? 0)
     );
+
+    // 7) Build the token transfer (seller -> vault)
     const amountTokensBase = uiToAmount(tokensUi, decimals);
-
-    // move tokens from seller → vault (seller will sign)
     const ixToken = createTransferCheckedInstruction(
-      sellerAta, mint, vaultAta, seller,
-      amountTokensBase, decimals, [], TOKEN_PID
+      sellerAta,
+      mint,
+      vaultAta,
+      seller, // seller will sign client-side
+      amountTokensBase,
+      decimals,
+      [],
+      TOKEN_PID
     );
 
-    // pay SOL to seller (server partially signs)
-    const lamports = Math.floor(amountSol * 1_000_000_000);
+    // 8) SOL payout (server -> seller)
+    const lamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
     const ixPayout = SystemProgram.transfer({
       fromPubkey: payer.publicKey,
       toPubkey: seller,
       lamports,
     });
 
+    // 9) Build partial-signed transaction (seller is fee payer)
     const { blockhash } = await conn.getLatestBlockhash('processed');
     const tx = new Transaction({
-      feePayer: seller, // wallet pays fee, server pays SOL payout
+      feePayer: seller,
       recentBlockhash: blockhash,
     }).add(ixEnsureVaultAta, ixEnsureSellerAta, ixToken, ixPayout);
 
@@ -123,9 +165,8 @@ export async function POST(
     const serialized = tx.serialize({ requireAllSignatures: false });
     return NextResponse.json({
       success: true,
-      tokensUi,
-      decimals,
       tx: Buffer.from(serialized).toString('base64'),
+      tokensUi, // helpful for UI
     });
   } catch (e: any) {
     console.error('[SELL] error:', e);
