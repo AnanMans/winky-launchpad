@@ -1,16 +1,16 @@
-// src/app/api/coins/route.ts
 export const runtime = 'nodejs';
+
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/db';
-import { Connection, Keypair, PublicKey } from '@solana/web3.js';
+import { Connection, Keypair } from '@solana/web3.js';
 import { createMint } from '@solana/spl-token';
 
-
+// --- helpers ---
 function bad(msg: string, code = 400) {
   return NextResponse.json({ error: msg }, { status: code });
 }
 
-// GET /api/coins  -> list coins (as before)
+// GET /api/coins  -> list coins (already used by /coins page)
 export async function GET() {
   const { data, error } = await supabaseAdmin
     .from('coins')
@@ -20,13 +20,27 @@ export async function GET() {
 
   if (error) return bad(error.message, 500);
 
-  return NextResponse.json({ coins: data ?? [] });
+  const coins = (data ?? []).map((c: any) => ({
+    id: c.id,
+    name: c.name,
+    symbol: c.symbol,
+    description: c.description || '',
+    logoUrl: c.logo_url || '',
+    socials: c.socials || {},
+    curve: c.curve || 'linear',
+    startPrice: Number(c.start_price ?? 0),
+    strength: Number(c.strength ?? 2),
+    createdAt: c.created_at,
+    mint: c.mint || null,
+  }));
+
+  return NextResponse.json({ coins });
 }
 
-// POST /api/coins  -> create DB row + create SPL mint + update row.mint
+// POST /api/coins  -> create a coin
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json().catch(() => ({} as any));
+    const body = await req.json().catch(() => ({}));
     const {
       name,
       symbol,
@@ -38,10 +52,33 @@ export async function POST(req: NextRequest) {
       startPrice = 0,
     } = body || {};
 
-    if (!name || !symbol) return bad('Missing name/symbol');
+    if (!name || !symbol) return bad('Missing name or symbol');
 
-    // 1) Insert DB row first (mint will be filled after we create it)
-    const { data: inserted, error: insErr } = await supabaseAdmin
+    // Try to create a mint, but NEVER fail creation if the key is missing.
+    let mint: string | null = null;
+    const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
+    if (raw) {
+      try {
+        const payer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw)));
+        const rpc =
+          process.env.NEXT_PUBLIC_HELIUS_RPC ||
+          process.env.NEXT_PUBLIC_RPC ||
+          'https://api.devnet.solana.com';
+        const conn = new Connection(rpc, 'confirmed');
+
+        const mintKp = Keypair.generate();
+        // 6 decimals default; adjust if you want
+        await createMint(conn, payer, payer.publicKey, null, 6, mintKp);
+        mint = mintKp.publicKey.toBase58();
+      } catch (e) {
+        console.warn('[coins.create] Mint creation skipped:', e);
+        // keep mint = null
+      }
+    } else {
+      console.warn('[coins.create] MINT_AUTHORITY_KEYPAIR missing — creating coin without mint');
+    }
+
+    const { data, error } = await supabaseAdmin
       .from('coins')
       .insert({
         name,
@@ -52,62 +89,31 @@ export async function POST(req: NextRequest) {
         curve,
         strength,
         start_price: startPrice,
-        mint: null,
+        mint,
       })
       .select('*')
       .single();
 
-    if (insErr || !inserted) return bad(insErr?.message || 'Insert failed', 500);
+    if (error) return bad(error.message, 500);
 
-    // 2) Create SPL mint on-chain (devnet/mainnet via env)
-    const rpc =
-      process.env.NEXT_PUBLIC_SOLANA_RPC ||
-      process.env.HELIUS_RPC ||
-      'https://api.devnet.solana.com';
-
-    const conn = new Connection(rpc, 'confirmed');
-
-    const raw = process.env.MINT_AUTHORITY_KEYPAIR
-      ? (JSON.parse(process.env.MINT_AUTHORITY_KEYPAIR) as number[])
-      : null;
-    if (!raw) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
-
-    const payer = Keypair.fromSecretKey(Uint8Array.from(raw));
-    const authority = payer.publicKey; // mint + freeze authority (simple for now)
-    const DECIMALS = 6;
-
-    const mintPubkey = await createMint(conn, payer, authority, authority, DECIMALS);
-    const mintStr = mintPubkey.toBase58();
-
-    // 3) Update row with mint
-    const { data: updated, error: updErr } = await supabaseAdmin
-      .from('coins')
-      .update({ mint: mintStr })
-      .eq('id', inserted.id)
-      .select('*')
-      .single();
-
-    if (updErr || !updated) return bad(updErr?.message || 'Update mint failed', 500);
-
-    // 4) Shape response for UI
     const coin = {
-      id: updated.id,
-      name: updated.name,
-      symbol: updated.symbol,
-      description: updated.description || '',
-      logoUrl: updated.logo_url || '',
-      socials: updated.socials || {},
-      curve: updated.curve,
-      startPrice: Number(updated.start_price ?? 0),
-      strength: Number(updated.strength ?? 2),
-      createdAt: updated.created_at,
-      mint: updated.mint,
+      id: data.id,
+      name: data.name,
+      symbol: data.symbol,
+      description: data.description || '',
+      logoUrl: data.logo_url || '',
+      socials: data.socials || {},
+      curve: data.curve || 'linear',
+      startPrice: Number(data.start_price ?? 0),
+      strength: Number(data.strength ?? 2),
+      createdAt: data.created_at,
+      mint: data.mint || null,
     };
 
     return NextResponse.json({ coin }, { status: 201 });
   } catch (e: any) {
     console.error('POST /api/coins error:', e);
-    return bad(e?.message || 'Unexpected error', 500);
+    return bad(e?.message || 'Server error', 500);
   }
 }
 
