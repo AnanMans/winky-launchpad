@@ -51,8 +51,8 @@ export async function GET() {
 // Body: { name, symbol, description?, logoUrl?, socials?, curve?, strength?, startPrice?, creator }
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json().catch(() => ({} as any));
-    let {
+    const body = await req.json().catch(() => ({}));
+    const {
       name,
       symbol,
       description = '',
@@ -61,28 +61,11 @@ export async function POST(req: NextRequest) {
       curve = 'linear',
       strength = 2,
       startPrice = 0,
+      // creator is OPTIONAL now
       creator,
-    } = body || {};
+    } = body;
 
-    // minimal validation
     if (!name || !symbol) return bad('Missing name/symbol');
-    if (!creator) return bad('Missing creator wallet');
-
-    // normalize
-    name = String(name).slice(0, 64);
-    symbol = String(symbol).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
-    curve = toCurve(curve);
-    strength = Number(strength ?? 2);
-    startPrice = Number(startPrice ?? 0);
-
-    // basic wallet sanity (won’t fetch on-chain, just format)
-    try {
-      // throws if invalid base58
-      // eslint-disable-next-line no-new
-      new PublicKey(String(creator));
-    } catch {
-      return bad('Invalid creator public key');
-    }
 
     // --- Create mint NOW (no lazy) ---
     const rpc =
@@ -94,26 +77,20 @@ export async function POST(req: NextRequest) {
     const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
     if (!raw) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
 
-    let secret: number[];
-    try {
-      secret = JSON.parse(raw) as number[];
-    } catch {
-      return bad('MINT_AUTHORITY_KEYPAIR must be JSON array (64 bytes)', 500);
-    }
+    const secret = JSON.parse(raw) as number[];
     if (!Array.isArray(secret) || secret.length !== 64) {
-      return bad('MINT_AUTHORITY_KEYPAIR must be 64-byte secret key JSON array', 500);
+      return bad('MINT_AUTHORITY_KEYPAIR must be 64-byte JSON array', 500);
     }
 
     const payer = Keypair.fromSecretKey(Uint8Array.from(secret));
     const mintKp = Keypair.generate();
 
-    // 6 decimals; classic Token Program
     await createMint(
       conn,
-      payer,               // pays rent
-      payer.publicKey,     // mint authority
-      null,                // freeze authority (none)
-      6,                   // decimals
+      payer,
+      payer.publicKey,
+      null,
+      6,
       mintKp,
       undefined,
       TOKEN_PROGRAM_ID
@@ -121,45 +98,46 @@ export async function POST(req: NextRequest) {
 
     const mintStr = mintKp.publicKey.toBase58();
 
-    // --- Insert coin with mint & creator (service role bypasses RLS) ---
+    // Build insert payload. Only include "creator" if provided
+    const insertRow: any = {
+      name,
+      symbol,
+      description,
+      logo_url: logoUrl,
+      socials,
+      curve,
+      strength,
+      start_price: startPrice,
+      mint: mintStr,
+    };
+    if (creator) insertRow.creator = creator; // safe: only if your table has this column
+
     const { data, error } = await supabaseAdmin
       .from('coins')
-      .insert({
-        name,
-        symbol,
-        description,
-        logo_url: logoUrl,
-        socials,
-        curve,
-        strength,
-        start_price: startPrice,
-        creator,           // 👈 store creator
-        mint: mintStr,     // 👈 store mint created above
-      })
+      .insert(insertRow)
       .select('*')
       .single();
 
-    if (error) return bad(error.message || 'DB error', 500);
+    if (error) return bad(error.message, 500);
 
-    // shape response
+    // snake_case -> camelCase
     const coin = {
       id: data.id,
       name: data.name,
       symbol: data.symbol,
-      description: data.description ?? '',
-      logoUrl: data.logo_url ?? '',
-      socials: data.socials ?? {},
-      curve: data.curve ?? 'linear',
+      description: data.description || '',
+      logoUrl: data.logo_url || '',
+      socials: data.socials || {},
+      curve: data.curve || 'linear',
       startPrice: Number(data.start_price ?? 0),
       strength: Number(data.strength ?? 2),
-      createdAt: data.created_at,
-      mint: data.mint,
-      creator: data.creator,
+      createdAt: data.created_at || new Date().toISOString(),
+      mint: data.mint || null,
     };
 
     return NextResponse.json({ coin }, { status: 201 });
   } catch (e: any) {
-    console.error('/api/coins POST error:', e);
+    console.error('POST /api/coins error:', e);
     return bad(e?.message || 'Server error', 500);
   }
 }
