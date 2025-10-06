@@ -1,4 +1,3 @@
-// src/app/api/coins/route.ts
 export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -22,10 +21,10 @@ export async function GET() {
   return NextResponse.json({ coins: data ?? [] });
 }
 
-// POST /api/coins  (no creator required)
+// POST /api/coins
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json().catch(() => ({} as any));
+    const body = await req.json().catch(() => ({}));
     const {
       name,
       symbol,
@@ -35,23 +34,11 @@ export async function POST(req: NextRequest) {
       curve = 'linear',
       strength = 2,
       startPrice = 0,
-      // creator (optional, ignored by backend)
-    } = body as {
-      name: string;
-      symbol: string;
-      description?: string;
-      logoUrl?: string;
-      socials?: Record<string, string>;
-      curve?: 'linear' | 'degen' | 'random';
-      strength?: number;
-      startPrice?: number;
-    };
+    } = body;
 
-    if (!name || !symbol) return bad('Missing name/symbol', 400);
-    if (symbol.length > 8) return bad('Ticker must be ≤ 8 chars', 400);
-    if (name.length > 20) return bad('Name must be ≤ 20 chars', 400);
+    if (!name || !symbol) return bad('Missing name/symbol');
 
-    // --- Create mint now (no lazy) ---
+    // --- Create a mint now (6 decimals) ---
     const rpc =
       process.env.NEXT_PUBLIC_HELIUS_RPC ||
       process.env.NEXT_PUBLIC_RPC ||
@@ -61,7 +48,12 @@ export async function POST(req: NextRequest) {
     const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
     if (!raw) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
 
-    const secret = JSON.parse(raw) as number[];
+    let secret: number[];
+    try {
+      secret = JSON.parse(raw);
+    } catch {
+      return bad('MINT_AUTHORITY_KEYPAIR must be a JSON array', 500);
+    }
     if (!Array.isArray(secret) || secret.length !== 64) {
       return bad('MINT_AUTHORITY_KEYPAIR must be a 64-byte JSON array', 500);
     }
@@ -69,21 +61,20 @@ export async function POST(req: NextRequest) {
     const payer = Keypair.fromSecretKey(Uint8Array.from(secret));
     const mintKp = Keypair.generate();
 
-    // 6 decimals, classic token program
     await createMint(
       conn,
-      payer,
-      payer.publicKey,
-      null,
-      6,
-      mintKp,
+      payer,               // payer of rent/fees
+      payer.publicKey,     // mint authority
+      null,                // no freeze authority
+      6,                   // decimals
+      mintKp,              // use this as the mint address
       undefined,
-      TOKEN_PROGRAM_ID
+      TOKEN_PROGRAM_ID     // classic token program
     );
 
     const mintStr = mintKp.publicKey.toBase58();
 
-    // --- Insert coin row (service role bypasses RLS) ---
+    // --- Insert row (service role bypasses RLS) ---
     const { data, error } = await supabaseAdmin
       .from('coins')
       .insert({
@@ -102,7 +93,7 @@ export async function POST(req: NextRequest) {
 
     if (error) return bad(error.message, 500);
 
-    // map snake_case → camelCase for client
+    // snake_case -> camelCase for the client
     const coin = {
       id: data.id,
       name: data.name,
@@ -113,8 +104,8 @@ export async function POST(req: NextRequest) {
       curve: data.curve || 'linear',
       startPrice: Number(data.start_price ?? 0),
       strength: Number(data.strength ?? 2),
-      createdAt: data.created_at,
-      mint: data.mint,
+      createdAt: data.created_at || new Date().toISOString(),
+      mint: data.mint || null,
     };
 
     return NextResponse.json({ coin }, { status: 201 });
