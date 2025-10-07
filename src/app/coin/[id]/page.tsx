@@ -56,6 +56,11 @@ export default function CoinPage() {
   // inputs
   const [buySol, setBuySol] = useState<string>('0.05');
   const [sellSol, setSellSol] = useState<string>('0.01');
+{/* Title */}
+<h1 className="text-2xl md:text-3xl font-bold text-white flex items-baseline gap-2">
+  <span>{coin?.name ?? 'Unnamed'}</span>
+  <span className="text-white/60 text-lg">({(coin?.symbol ?? '').toUpperCase()})</span>
+</h1>
 
   // ---------- load coin ----------
   useEffect(() => {
