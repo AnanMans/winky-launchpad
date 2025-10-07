@@ -4,34 +4,33 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   Connection,
   PublicKey,
-  LAMPORTS_PER_SOL,
   Keypair,
+  LAMPORTS_PER_SOL,
+  Transaction,
+  sendAndConfirmTransaction,
 } from '@solana/web3.js';
 import {
-  getOrCreateAssociatedTokenAccount,
-  mintTo,
   getMint,
-  createMint,
+  mintTo,
+  getOrCreateAssociatedTokenAccount,
+  createAssociatedTokenAccountIdempotentInstruction,
+  getAssociatedTokenAddressSync,
   TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
 } from '@solana/spl-token';
 import { supabase, supabaseAdmin } from '@/lib/db';
-import { quoteTokensUi, CurveName } from '@/lib/curve';
+import { quoteTokensUi } from '@/lib/curve';
 
 function bad(msg: string, code = 400) {
   return NextResponse.json({ error: msg }, { status: code });
 }
 
 function uiToAmount(ui: number, decimals: number): bigint {
-  const s = String(ui);
-  const [i, f = ''] = s.split('.');
+  const [i, f = ''] = String(ui).split('.');
   const frac = (f + '0'.repeat(decimals)).slice(0, decimals);
   return BigInt(i || '0') * (10n ** BigInt(decimals)) + BigInt(frac || '0');
 }
-
-// tiny sleep helper
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function POST(
   req: NextRequest,
@@ -39,7 +38,7 @@ export async function POST(
 ) {
   try {
     const { id } = await context.params;
-    const body = await req.json().catch(() => ({}));
+    const body = await req.json().catch(() => ({} as any));
 
     const buyerStr: string | undefined = body?.buyer;
     const amountSol: number = Number(body?.amountSol);
@@ -49,21 +48,19 @@ export async function POST(
     if (!Number.isFinite(amountSol) || amountSol <= 0) return bad('Invalid amount');
     if (!sig) return bad('Missing signature');
 
-    // RPC
     const rpc =
       process.env.NEXT_PUBLIC_HELIUS_RPC ||
       process.env.NEXT_PUBLIC_RPC ||
       'https://api.devnet.solana.com';
     const conn = new Connection(rpc, 'confirmed');
 
-    // Treasury (must be set in env)
     const treasuryStr = process.env.NEXT_PUBLIC_TREASURY;
     if (!treasuryStr) return bad('Server missing NEXT_PUBLIC_TREASURY', 500);
 
     const buyer = new PublicKey(buyerStr);
     const treasury = new PublicKey(treasuryStr);
 
-    // Load coin (need curve + maybe mint)
+    // --- Load coin (must exist)
     const { data: coin, error: coinErr } = await supabase
       .from('coins')
       .select('mint, curve, strength, start_price')
@@ -71,7 +68,7 @@ export async function POST(
       .single();
     if (coinErr || !coin) return bad('Coin not found', 404);
 
-    // Verify payment -> treasury
+    // --- Verify the SOL payment on-chain by reading the transaction ---
     const parsed = await conn.getParsedTransaction(sig, {
       maxSupportedTransactionVersion: 0,
       commitment: 'confirmed',
@@ -96,51 +93,45 @@ export async function POST(
       return bad('Payment amount too small / not received by treasury');
     }
 
-    // --- Ensure we have a mint: lazily create it on first buy if missing ---
+    // --- Ensure we have a mint (should be set at create; keep fallback) ---
     let mintPk: PublicKey;
     if (!coin.mint) {
       const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
       if (!raw) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
 
-      const bytes = JSON.parse(raw) as number[];
-      if (!Array.isArray(bytes) || bytes.length !== 64) {
-        return bad('MINT_AUTHORITY_KEYPAIR must be a 64-byte secret key JSON array', 500);
+      const secret = JSON.parse(raw) as number[];
+      if (!Array.isArray(secret) || secret.length !== 64) {
+        return bad('MINT_AUTHORITY_KEYPAIR must be 64-byte secret key JSON', 500);
       }
-      const payer = Keypair.fromSecretKey(Uint8Array.from(bytes));
-      const mintKp = Keypair.generate();
+      const payer = Keypair.fromSecretKey(Uint8Array.from(secret));
+      const { Keypair: KP } = await import('@solana/web3.js');
+      const newMint = KP.generate();
 
-      // create mint (classic program, 6 decimals)
-      await createMint(
-        conn,
-        payer,
-        payer.publicKey,
-        null,
-        6,
-        mintKp,
-        undefined,
-        TOKEN_PROGRAM_ID
-      );
+      // default 6 decimals, classic token program
+      const { createMint } = await import('@solana/spl-token');
+      await createMint(conn, payer, payer.publicKey, null, 6, newMint);
+      mintPk = newMint.publicKey;
 
-      mintPk = mintKp.publicKey;
-
-      // persist mint — only if still null (avoid races)
-      const { error: upErr } = await supabaseAdmin
+      await supabaseAdmin
         .from('coins')
         .update({ mint: mintPk.toBase58() })
         .eq('id', id)
         .is('mint', null);
-
-      if (upErr) {
-        console.warn('[buy] failed to save mint:', upErr);
-      } else {
-        console.log('[buy] saved mint to DB:', mintPk.toBase58());
-      }
     } else {
       mintPk = new PublicKey(coin.mint);
     }
 
-    // Determine token program + decimals
-    const mintAcc = await conn.getAccountInfo(mintPk, 'confirmed');
+    // --- Determine token program & decimals (REAL on-chain) ---
+    // Retry a couple of times in case mint just got created and RPC is catching up.
+    async function waitForMint(acc: PublicKey, tries = 4) {
+      for (let i = 0; i < tries; i++) {
+        const info = await conn.getAccountInfo(acc, 'confirmed');
+        if (info) return info;
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      return null;
+    }
+    const mintAcc = await waitForMint(mintPk);
     if (!mintAcc) return bad('Mint account not found', 400);
 
     const TOKEN_PID = mintAcc.owner.equals(TOKEN_2022_PROGRAM_ID)
@@ -150,53 +141,70 @@ export async function POST(
     const mintInfo = await getMint(conn, mintPk, 'confirmed', TOKEN_PID);
     const decimals = mintInfo.decimals;
 
-    // Quote tokens to mint based on curve
+    // --- Quote how many tokens to mint based on curve ---
     const tokensUi = quoteTokensUi(
       amountSol,
-      ((coin.curve || 'linear') as CurveName),
+      (coin.curve || 'linear') as 'linear' | 'degen' | 'random',
       Number(coin.strength ?? 2),
       Number(coin.start_price ?? 0)
     );
 
-    // Mint authority
+    // --- ENSURE BUYER ATA ROBUSTLY (handles race conditions) ---
     const raw2 = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
     if (!raw2) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
     const mintAuthority = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw2)));
 
-    // --- Create/confirm buyer ATA robustly ---
-const ata = await getOrCreateAssociatedTokenAccount(
-  conn,
-  mintAuthority,  // payer
-  mintPk,         // mint
-  buyer           // owner
-);
+    const ataAddr = getAssociatedTokenAddressSync(
+      mintPk,
+      buyer,
+      false,
+      TOKEN_PID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
 
-    // Ensure RPC sees it before minting (retry a few times)
-    let seen = false;
-    for (let i = 0; i < 5; i++) {
-      const ai = await conn.getAccountInfo(ata.address, 'confirmed');
-      if (ai) { seen = true; break; }
-      await sleep(300 + i * 150);
-    }
-    if (!seen) {
-      return bad('Token account not ready yet, please retry', 503);
+    // Try helper first…
+    try {
+      await getOrCreateAssociatedTokenAccount(
+        conn,
+        mintAuthority, // payer
+        mintPk,
+        buyer,
+        false,
+        'confirmed',
+        undefined,
+        TOKEN_PID,
+        ASSOCIATED_TOKEN_PROGRAM_ID
+      );
+    } catch (e) {
+      // …fallback to explicit ATA create (idempotent)
+      const ix = createAssociatedTokenAccountIdempotentInstruction(
+        mintAuthority.publicKey,
+        ataAddr,
+        buyer,
+        mintPk,
+        TOKEN_PID,
+        ASSOCIATED_TOKEN_PROGRAM_ID
+      );
+      await sendAndConfirmTransaction(conn, new Transaction().add(ix), [mintAuthority], {
+        commitment: 'confirmed',
+      });
     }
 
-    // Mint tokens
+    // --- Mint to buyer ATA ---
     const mintAmount = uiToAmount(tokensUi, decimals);
     const mintSig = await mintTo(
       conn,
       mintAuthority,
       mintPk,
-      ata.address,
-      mintAuthority,
+      ataAddr,            // destination ATA
+      mintAuthority,      // authority
       mintAmount,
       [],
-      { commitment: 'confirmed' },
+      undefined,
       TOKEN_PID
     );
 
-    // Record trade (server-side insert)
+    // --- Record trade
     await supabaseAdmin.from('trades').insert({
       coin_id: id,
       side: 'buy',
@@ -209,11 +217,11 @@ const ata = await getOrCreateAssociatedTokenAccount(
       ok: true,
       tokensUi,
       minted: mintAmount.toString(),
-      ata: ata.address.toBase58(),
+      ata: ataAddr.toBase58(),
       mintSig,
     });
   } catch (e: any) {
-    console.error('BUY API error:', e);
+    console.error('[BUY] error:', e);
     return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
   }
 }

@@ -1,23 +1,124 @@
+// src/app/api/coins/route.ts
 export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/db';
 
-import {
-  Connection,
-  Keypair,
-  PublicKey,
-  Transaction,
-  sendAndConfirmTransaction,
-} from '@solana/web3.js';
-
+import { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
 import { createMint, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 
+// mpl-token-metadata v2.x exports PROGRAM_ID (not MPL_TOKEN_METADATA_PROGRAM_ID)
+import { PROGRAM_ID as TMETA_PROGRAM_ID } from '@metaplex-foundation/mpl-token-metadata';
+
+// -----------------------------
+// helpers
+// -----------------------------
 function bad(msg: string, code = 400) {
   return NextResponse.json({ error: msg }, { status: code });
 }
 
-// ---------------- GET /api/coins ----------------
+function envRpc(): string {
+  return (
+    process.env.NEXT_PUBLIC_HELIUS_RPC ||
+    process.env.NEXT_PUBLIC_RPC ||
+    'https://api.devnet.solana.com'
+  );
+}
+
+function envBaseHost(): string {
+  if (process.env.NEXT_PUBLIC_SITE_URL) return process.env.NEXT_PUBLIC_SITE_URL;
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
+  return 'http://localhost:3000';
+}
+
+/** Try multiple deep-import paths for the V3 instruction (v2.x package layouts differ) */
+async function loadCreateMetadataV3():
+  Promise<null | ((accounts: any, args: any) => any)> {
+  const candidates = [
+    // common in many v2 builds
+    '@metaplex-foundation/mpl-token-metadata/dist/generated/instructions/createMetadataAccountV3',
+    // some bundles keep /src in path
+    '@metaplex-foundation/mpl-token-metadata/dist/src/generated/instructions/createMetadataAccountV3',
+    // explicit .js variants
+    '@metaplex-foundation/mpl-token-metadata/dist/generated/instructions/createMetadataAccountV3.js',
+    '@metaplex-foundation/mpl-token-metadata/dist/src/generated/instructions/createMetadataAccountV3.js',
+  ];
+
+  for (const p of candidates) {
+    try {
+      const mod: any = await import(/* @vite-ignore */ p);
+      if (mod?.createCreateMetadataAccountV3Instruction) {
+        return mod.createCreateMetadataAccountV3Instruction;
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return null;
+}
+
+/**
+ * Write Token Metadata (V3) so wallets (Phantom) can show name/symbol/icon.
+ * Best-effort: if the instruction import fails we skip gracefully.
+ */
+async function createMetadataForMint(
+  conn: Connection,
+  payer: Keypair,
+  mint: PublicKey,
+  name: string,
+  symbol: string,
+  uri: string
+) {
+  const createIx = await loadCreateMetadataV3();
+  if (!createIx) {
+    console.warn('[metadata] Could not load V3 instruction — skipping on-chain metadata.');
+    return null;
+  }
+
+  // PDA: ["metadata", program, mint]
+  const [metadataPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from('metadata'), TMETA_PROGRAM_ID.toBuffer(), mint.toBuffer()],
+    TMETA_PROGRAM_ID
+  );
+
+  const ix = createIx(
+    {
+      metadata: metadataPda,
+      mint,
+      mintAuthority: payer.publicKey,
+      payer: payer.publicKey,
+      updateAuthority: payer.publicKey,
+    },
+    {
+      createMetadataAccountArgsV3: {
+        data: {
+          name: name.slice(0, 32),
+          symbol: symbol.slice(0, 10),
+          uri,
+          sellerFeeBasisPoints: 0,
+          creators: null,
+          collection: null,
+          uses: null,
+        },
+        isMutable: true,
+        collectionDetails: null,
+      },
+    }
+  );
+
+  const tx = new Transaction().add(ix);
+  tx.feePayer = payer.publicKey;
+  const { blockhash } = await conn.getLatestBlockhash('confirmed');
+  tx.recentBlockhash = blockhash;
+  tx.sign(payer);
+  const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: true });
+  await conn.confirmTransaction(sig, 'confirmed');
+  return sig;
+}
+
+// -----------------------------
+// GET /api/coins (simple list; optional)
+// -----------------------------
 export async function GET() {
   const { data, error } = await supabaseAdmin
     .from('coins')
@@ -29,7 +130,10 @@ export async function GET() {
   return NextResponse.json({ coins: data ?? [] });
 }
 
-// ---------------- POST /api/coins ----------------
+// -----------------------------
+// POST /api/coins  (create a NEW coin)
+// Body: { name, symbol, description?, logoUrl, socials?, curve?, strength?, startPrice? }
+// -----------------------------
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
@@ -45,29 +149,28 @@ export async function POST(req: NextRequest) {
     } = body;
 
     if (!name || !symbol) return bad('Missing name/symbol');
+    if (!logoUrl) return bad('Missing logoUrl (upload first)');
 
-    // RPC + server keypair
-    const rpc =
-      process.env.NEXT_PUBLIC_HELIUS_RPC ||
-      process.env.NEXT_PUBLIC_RPC ||
-      'https://api.devnet.solana.com';
-    const conn = new Connection(rpc, 'confirmed');
+    const cleanName = String(name).trim().slice(0, 32);
+    const cleanSymbol = String(symbol).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
 
+    // RPC + server key
+    const conn = new Connection(envRpc(), 'confirmed');
     const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
     if (!raw) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
 
-    let payer: Keypair;
+    let secret: number[];
     try {
-      const secret = JSON.parse(raw) as number[];
-      if (!Array.isArray(secret) || secret.length !== 64) {
-        return bad('MINT_AUTHORITY_KEYPAIR must be a 64-byte secret key JSON array', 500);
-      }
-      payer = Keypair.fromSecretKey(Uint8Array.from(secret));
+      secret = JSON.parse(raw);
     } catch {
-      return bad('Invalid MINT_AUTHORITY_KEYPAIR format', 500);
+      return bad('MINT_AUTHORITY_KEYPAIR must be a JSON array (64 bytes)', 500);
     }
+    if (!Array.isArray(secret) || secret.length !== 64) {
+      return bad('MINT_AUTHORITY_KEYPAIR must be 64-byte JSON array', 500);
+    }
+    const payer = Keypair.fromSecretKey(Uint8Array.from(secret));
 
-    // Create SPL mint (6 decimals)
+    // Create mint NOW (6 decimals)
     const mintKp = Keypair.generate();
     await createMint(
       conn,
@@ -79,99 +182,55 @@ export async function POST(req: NextRequest) {
       undefined,
       TOKEN_PROGRAM_ID
     );
-
     const mintStr = mintKp.publicKey.toBase58();
 
-    // Try to create Token Metadata (best-effort; skip if not available)
+    // Off-chain JSON URI that wallets fetch
+    const uri = `${envBaseHost()}/api/metadata/${mintStr}.json`;
+
+    // Best-effort metadata
     try {
-      const tmeta = await import('@metaplex-foundation/mpl-token-metadata');
-      const TMETA_PID: PublicKey =
-        (tmeta as any).MPL_TOKEN_METADATA_PROGRAM_ID ??
-        new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
-
-      const createV3 = (tmeta as any).createCreateMetadataAccountV3Instruction;
-      if (typeof createV3 === 'function') {
-        const [metadataPda] = PublicKey.findProgramAddressSync(
-          [Buffer.from('metadata'), TMETA_PID.toBuffer(), mintKp.publicKey.toBuffer()],
-          TMETA_PID
-        );
-
-        const baseUrl =
-          process.env.NEXT_PUBLIC_SITE_URL ||
-          (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
-
-        const ix = createV3(
-          {
-            metadata: metadataPda,
-            mint: mintKp.publicKey,
-            mintAuthority: payer.publicKey,
-            payer: payer.publicKey,
-            updateAuthority: payer.publicKey,
-          },
-          {
-            createMetadataAccountArgsV3: {
-              data: {
-                name: String(name).slice(0, 32),
-                symbol: String(symbol).toUpperCase().slice(0, 10),
-                uri: `${baseUrl}/api/metadata/${mintStr}.json`,
-                sellerFeeBasisPoints: 0,
-                creators: null,
-                collection: null,
-                uses: null,
-              },
-              isMutable: true,
-              collectionDetails: null,
-            },
-          }
-        );
-
-        const tx = new Transaction().add(ix);
-        await sendAndConfirmTransaction(conn, tx, [payer], { commitment: 'confirmed' });
-      } else {
-        console.warn(
-          '[coins POST] Token Metadata V3 builder not found in installed version; skipping on-chain metadata.'
-        );
-      }
+      await createMetadataForMint(conn, payer, mintKp.publicKey, cleanName, cleanSymbol, uri);
+      console.log('[coins POST] metadata OK for', mintStr, '→', uri);
     } catch (e) {
-      console.warn('[coins POST] Token Metadata import/ix failed; skipping:', e);
+      console.warn('[coins POST] metadata failed (continuing):', e);
     }
 
-    // Insert coin row (service role bypasses RLS)
-    const { data: inserted, error: insErr } = await supabaseAdmin
+    // Insert into DB
+    const { data, error } = await supabaseAdmin
       .from('coins')
       .insert({
-        name,
-        symbol,
+        name: cleanName,
+        symbol: cleanSymbol,
         description,
         logo_url: logoUrl,
         socials,
         curve,
-        start_price: Number(startPrice ?? 0),
-        strength: Number(strength ?? 2),
+        start_price: startPrice,
+        strength,
         mint: mintStr,
       })
       .select('*')
       .single();
 
-    if (insErr) return bad(insErr.message || 'DB insert failed', 500);
+    if (error) return bad(error.message, 500);
 
-    const coin = {
-      id: inserted.id,
-      name: inserted.name,
-      symbol: inserted.symbol,
-      description: inserted.description || '',
-      logoUrl: inserted.logo_url || '',
-      socials: inserted.socials || {},
-      curve: inserted.curve || 'linear',
-      startPrice: Number(inserted.start_price ?? 0),
-      strength: Number(inserted.strength ?? 2),
-      createdAt: inserted.created_at,
-      mint: inserted.mint,
+    const resp = {
+      id: data.id,
+      name: data.name,
+      symbol: data.symbol,
+      description: data.description,
+      logoUrl: data.logo_url,
+      socials: data.socials,
+      curve: data.curve,
+      startPrice: data.start_price ?? 0,
+      strength: data.strength ?? 2,
+      createdAt: data.created_at,
+      mint: data.mint,
     };
 
-    return NextResponse.json({ coin }, { status: 201 });
+    return NextResponse.json({ coin: resp }, { status: 201 });
   } catch (e: any) {
-    console.error('POST /api/coins error:', e);
+    console.error('coins POST error:', e);
     return bad(e?.message || 'Server error', 500);
   }
 }
