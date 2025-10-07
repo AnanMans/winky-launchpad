@@ -202,6 +202,8 @@ export default function CreatePage() {
       const { blockhash } = await connection.getLatestBlockhash('processed');
       tx.recentBlockhash = blockhash;
       const sig = await sendTransaction(tx, connection, { skipPreflight: true });
+// Wait for 'confirmed' so the server can find the payment in RPC
+await connection.confirmTransaction(sig, 'confirmed');
 
       // 2) tell server to mint to creator
       const res = await fetch(`/api/coins/${createdId}/buy`, {
