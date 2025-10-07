@@ -1,9 +1,11 @@
 export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
+import { supabaseAdmin } from '@/lib/db';
 
-// --- tiny helpers ---
+// ---------- tiny helpers ----------
 function bad(msg: string, code = 400) {
   return NextResponse.json({ error: msg }, { status: code });
 }
@@ -15,20 +17,26 @@ function siteBase(): string {
   return 'http://localhost:3000';
 }
 function clamp(s: string, n: number) {
-  return (s || '').substring(0, n);
+  return (s || '').slice(0, n);
 }
 
-// Load the deep-exported V3 instruction from mpl-token-metadata v2.x (path varies by build)
+// Try to load the V3 instruction from many possible paths (mpl-token-metadata v2.x)
 async function loadCreateV3() {
-  const candidates = [
+  const paths = [
+    // dist variants
     '@metaplex-foundation/mpl-token-metadata/dist/generated/instructions/createMetadataAccountV3',
     '@metaplex-foundation/mpl-token-metadata/dist/src/generated/instructions/createMetadataAccountV3',
     '@metaplex-foundation/mpl-token-metadata/dist/generated/instructions/createMetadataAccountV3.js',
     '@metaplex-foundation/mpl-token-metadata/dist/src/generated/instructions/createMetadataAccountV3.js',
+    // lib variants
+    '@metaplex-foundation/mpl-token-metadata/lib/generated/instructions/createMetadataAccountV3',
+    '@metaplex-foundation/mpl-token-metadata/lib/src/generated/instructions/createMetadataAccountV3',
+    '@metaplex-foundation/mpl-token-metadata/lib/generated/instructions/createMetadataAccountV3.js',
+    '@metaplex-foundation/mpl-token-metadata/lib/src/generated/instructions/createMetadataAccountV3.js',
   ];
-  for (const p of candidates) {
+  for (const p of paths) {
     try {
-      // @ts-ignore – dynamic deep import
+      // @ts-ignore dynamic deep import
       const mod = await import(p);
       if (mod?.createCreateMetadataAccountV3Instruction) {
         return mod.createCreateMetadataAccountV3Instruction as (
@@ -65,15 +73,66 @@ async function loadCreateV3() {
   return null;
 }
 
-export async function POST(
-  _req: NextRequest,
-  ctx: { params: Promise<{ mint: string }> }
-) {
-  try {
-    const { mint } = await ctx.params;
-    if (!mint) return bad('Missing mint');
+// Fallback to V2 instruction if V3 can’t be found at runtime
+async function loadCreateV2() {
+  const paths = [
+    '@metaplex-foundation/mpl-token-metadata', // some builds export V2 at root
+    '@metaplex-foundation/mpl-token-metadata/dist/generated/instructions/createMetadataAccountV2',
+    '@metaplex-foundation/mpl-token-metadata/dist/src/generated/instructions/createMetadataAccountV2',
+    '@metaplex-foundation/mpl-token-metadata/dist/generated/instructions/createMetadataAccountV2.js',
+    '@metaplex-foundation/mpl-token-metadata/dist/src/generated/instructions/createMetadataAccountV2.js',
+    '@metaplex-foundation/mpl-token-metadata/lib/generated/instructions/createMetadataAccountV2',
+    '@metaplex-foundation/mpl-token-metadata/lib/src/generated/instructions/createMetadataAccountV2',
+    '@metaplex-foundation/mpl-token-metadata/lib/generated/instructions/createMetadataAccountV2.js',
+    '@metaplex-foundation/mpl-token-metadata/lib/src/generated/instructions/createMetadataAccountV2.js',
+  ];
+  for (const p of paths) {
+    try {
+      // @ts-ignore
+      const mod = await import(p);
+      if (mod?.createCreateMetadataAccountV2Instruction) {
+        return mod.createCreateMetadataAccountV2Instruction as (
+          accounts: {
+            metadata: PublicKey;
+            mint: PublicKey;
+            mintAuthority: PublicKey;
+            payer: PublicKey;
+            updateAuthority: PublicKey;
+            systemProgram?: PublicKey;
+            rent?: PublicKey;
+          },
+          args: {
+            createMetadataAccountArgsV2: {
+              data: {
+                name: string;
+                symbol: string;
+                uri: string;
+                sellerFeeBasisPoints: number;
+                creators: null;
+                collection: null;
+                uses: null;
+              };
+              isMutable: boolean;
+            };
+          }
+        ) => any;
+      }
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
 
-    // --- server signer (must be the mint authority you used at createMint) ---
+export async function POST(_req: NextRequest, ctx: any) {
+  try {
+    // Support both Next types (some builds pass params, some Promise<params>)
+    let params = ctx?.params;
+    if (params && typeof params.then === 'function') params = await params;
+    const mintParam: string | undefined = params?.mint;
+    if (!mintParam) return bad('Missing mint');
+
+    // --- env signer (must match your createMint authority) ---
     const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
     if (!raw) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
 
@@ -93,62 +152,104 @@ export async function POST(
       'https://api.devnet.solana.com';
     const conn = new Connection(rpc, 'confirmed');
 
-    const mintPk = new PublicKey(mint);
-
-    // Program id (constant) and PDA for metadata
-    const TMETA = new PublicKey(
-      'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s'
-    );
+    const mintPk = new PublicKey(mintParam);
+    const TMETA = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
     const [metadataPda] = PublicKey.findProgramAddressSync(
       [Buffer.from('metadata'), TMETA.toBuffer(), mintPk.toBuffer()],
       TMETA
     );
 
-    // Build the JSON URI you already serve
-    const uri = `${siteBase()}/api/metadata/${mint}.json`;
+    // If metadata already exists, short-circuit (idempotent)
+    const existing = await conn.getAccountInfo(metadataPda, 'confirmed');
+    if (existing) {
+      return NextResponse.json({ ok: true, already: true });
+    }
 
-    // Optional: put a short on-chain name/symbol (wallets often fetch off-chain anyway)
-    // If you can look up the coin in DB by mint, populate real values; else defaults:
-    const name = clamp('Winky Coin', 32);
-    const symbol = clamp('WINKY', 10);
+    // Pull real values from DB if available (by mint)
+    let name = 'Winky Coin';
+    let symbol = 'WINKY';
+    try {
+      const { data } = await supabaseAdmin
+        .from('coins')
+        .select('name, symbol')
+        .eq('mint', mintPk.toBase58())
+        .maybeSingle();
+      if (data) {
+        name = clamp(String(data.name || name), 32);
+        symbol = clamp(String(data.symbol || symbol), 10);
+      }
+    } catch {
+      /* ignore DB read issues */
+    }
 
-    // Load the v3 instruction (v2 library)
+    // JSON URI you already serve
+    const uri = `${siteBase()}/api/metadata/${mintPk.toBase58()}.json`;
+
+    // Try V3 first
     const createV3 = await loadCreateV3();
-    if (!createV3) {
-      return bad(
-        'Could not load createMetadataAccountV3 from mpl-token-metadata v2.x. (We will still serve JSON at /api/metadata/[mint].json.)',
-        500
+    let ix: any;
+
+    if (createV3) {
+      ix = createV3(
+        {
+          metadata: metadataPda,
+          mint: mintPk,
+          mintAuthority: payer.publicKey,
+          payer: payer.publicKey,
+          updateAuthority: payer.publicKey,
+          systemProgram: SystemProgram.programId,
+        },
+        {
+          createMetadataAccountArgsV3: {
+            data: {
+              name,
+              symbol,
+              uri,
+              sellerFeeBasisPoints: 0,
+              creators: null,
+              collection: null,
+              uses: null,
+            },
+            isMutable: true,
+            collectionDetails: null,
+          },
+        }
+      );
+    } else {
+      // Fallback to V2
+      const createV2 = await loadCreateV2();
+      if (!createV2) {
+        return bad(
+          'Could not load createMetadataAccount V3 or V2 from mpl-token-metadata v2.x. (JSON at /api/metadata/[mint].json still works; wallet icon/name need on-chain account.)',
+          500
+        );
+      }
+      ix = createV2(
+        {
+          metadata: metadataPda,
+          mint: mintPk,
+          mintAuthority: payer.publicKey,
+          payer: payer.publicKey,
+          updateAuthority: payer.publicKey,
+          systemProgram: SystemProgram.programId,
+        },
+        {
+          createMetadataAccountArgsV2: {
+            data: {
+              name,
+              symbol,
+              uri,
+              sellerFeeBasisPoints: 0,
+              creators: null,
+              collection: null,
+              uses: null,
+            },
+            isMutable: true,
+          },
+        }
       );
     }
 
-    // Build the instruction (no TokenStandard argument here — v3 doesn’t require it)
-    const ix = createV3(
-      {
-        metadata: metadataPda,
-        mint: mintPk,
-        mintAuthority: payer.publicKey,
-        payer: payer.publicKey,
-        updateAuthority: payer.publicKey,
-        systemProgram: SystemProgram.programId,
-      },
-      {
-        createMetadataAccountArgsV3: {
-          data: {
-            name,
-            symbol,
-            uri,
-            sellerFeeBasisPoints: 0,
-            creators: null,
-            collection: null,
-            uses: null,
-          },
-          isMutable: true,
-          collectionDetails: null,
-        },
-      }
-    );
-
-    // Send tx
     const tx = new Transaction().add(ix);
     tx.feePayer = payer.publicKey;
     tx.recentBlockhash = (await conn.getLatestBlockhash('confirmed')).blockhash;
@@ -164,15 +265,15 @@ export async function POST(
   } catch (e: any) {
     const msg = String(e?.message || e);
 
-    // If metadata already exists, treat as success (idempotent)
-    if (/already in use|already initialized|custom program error: 0x0b/i.test(msg)) {
+    // treat "already in use/initialized" as success
+    if (/already in use|already initialized|0x0b/i.test(msg)) {
       return NextResponse.json({ ok: true, already: true });
     }
 
-    // If token standard mismatch appears again, tell the user we still serve JSON
+    // Program 0x88 (token standard mismatch) → let user know JSON still works
     if (/Invalid mint account for specified token standard|0x88/i.test(msg)) {
       return bad(
-        'Token standard mismatch reported by program, but off-chain JSON is available at /api/metadata/[mint].json.',
+        'Token standard mismatch reported by program, but off-chain JSON is live at /api/metadata/[mint].json.',
         500
       );
     }
