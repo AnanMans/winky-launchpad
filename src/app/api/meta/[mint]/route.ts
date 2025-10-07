@@ -1,34 +1,68 @@
 export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from 'next/server';
-import { Connection, Keypair, PublicKey } from '@solana/web3.js';
-import {
-  getMint,
-  TOKEN_PROGRAM_ID,
-  TOKEN_2022_PROGRAM_ID,
-} from '@solana/spl-token';
-import { Metaplex, keypairIdentity } from '@metaplex-foundation/js';
+import { Connection, Keypair, PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
 
-// Best-effort import of the enum (works with mpl-token-metadata v2.x)
-let TokenStandard: any = undefined;
-try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  TokenStandard = require('@metaplex-foundation/mpl-token-metadata').TokenStandard;
-} catch {
-  // Fallback enum values used on chain: NonFungible=0, Fungible=2
-  TokenStandard = { NonFungible: 0, Fungible: 2 };
-}
-
+// --- tiny helpers ---
 function bad(msg: string, code = 400) {
   return NextResponse.json({ error: msg }, { status: code });
 }
-
 function siteBase(): string {
   const env = process.env.NEXT_PUBLIC_SITE_URL;
   if (env && /^https?:\/\//i.test(env)) return env.replace(/\/+$/, '');
   const vercel = process.env.VERCEL_URL;
   if (vercel) return `https://${vercel.replace(/\/+$/, '')}`;
   return 'http://localhost:3000';
+}
+function clamp(s: string, n: number) {
+  return (s || '').substring(0, n);
+}
+
+// Load the deep-exported V3 instruction from mpl-token-metadata v2.x (path varies by build)
+async function loadCreateV3() {
+  const candidates = [
+    '@metaplex-foundation/mpl-token-metadata/dist/generated/instructions/createMetadataAccountV3',
+    '@metaplex-foundation/mpl-token-metadata/dist/src/generated/instructions/createMetadataAccountV3',
+    '@metaplex-foundation/mpl-token-metadata/dist/generated/instructions/createMetadataAccountV3.js',
+    '@metaplex-foundation/mpl-token-metadata/dist/src/generated/instructions/createMetadataAccountV3.js',
+  ];
+  for (const p of candidates) {
+    try {
+      // @ts-ignore – dynamic deep import
+      const mod = await import(p);
+      if (mod?.createCreateMetadataAccountV3Instruction) {
+        return mod.createCreateMetadataAccountV3Instruction as (
+          accounts: {
+            metadata: PublicKey;
+            mint: PublicKey;
+            mintAuthority: PublicKey;
+            payer: PublicKey;
+            updateAuthority: PublicKey;
+            systemProgram?: PublicKey;
+            rent?: PublicKey;
+          },
+          args: {
+            createMetadataAccountArgsV3: {
+              data: {
+                name: string;
+                symbol: string;
+                uri: string;
+                sellerFeeBasisPoints: number;
+                creators: null;
+                collection: null;
+                uses: null;
+              };
+              isMutable: boolean;
+              collectionDetails: null;
+            };
+          }
+        ) => any;
+      }
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
 }
 
 export async function POST(
@@ -39,7 +73,7 @@ export async function POST(
     const { mint } = await ctx.params;
     if (!mint) return bad('Missing mint');
 
-    // --- Server signer (same key you used for mint authority) ---
+    // --- server signer (must be the mint authority you used at createMint) ---
     const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
     if (!raw) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
 
@@ -52,67 +86,97 @@ export async function POST(
     }
     const payer = Keypair.fromSecretKey(Uint8Array.from(secret));
 
-    const mintPk = new PublicKey(mint);
-
-    // --- Chain / mint introspection ---
+    // --- chain ---
     const rpc =
       process.env.NEXT_PUBLIC_HELIUS_RPC ||
       process.env.NEXT_PUBLIC_RPC ||
       'https://api.devnet.solana.com';
     const conn = new Connection(rpc, 'confirmed');
 
-    const acct = await conn.getAccountInfo(mintPk, 'confirmed');
-    if (!acct) return bad('Mint not found', 400);
+    const mintPk = new PublicKey(mint);
 
-    const TOKEN_PID = acct.owner.equals(TOKEN_2022_PROGRAM_ID)
-      ? TOKEN_2022_PROGRAM_ID
-      : TOKEN_PROGRAM_ID;
-
-    const mintInfo = await getMint(conn, mintPk, 'confirmed', TOKEN_PID);
-
-    // Choose proper token standard:
-    // - decimals > 0 => Fungible
-    // - decimals === 0 => NonFungible (not your case, but safe)
-    const tokenStandard =
-      mintInfo.decimals > 0 ? TokenStandard.Fungible : TokenStandard.NonFungible;
-
-    const mx = Metaplex.make(conn).use(keypairIdentity(payer));
-    const uri = `${siteBase()}/api/metadata/${mint}.json`;
-
-    // Create the metadata account for this existing mint
-    // Important: pass the correct tokenStandard so TM program doesn't throw 0x88
-    const { response } = await mx.nfts().create(
-      {
-        useExistingMint: mintPk,
-        name: '', // leave blank; wallets will load from `uri`
-        symbol: '',
-        uri,
-        tokenStandard: tokenStandard as any,
-        sellerFeeBasisPoints: 0,
-        isMutable: true,
-        updateAuthority: payer,
-        mintAuthority: payer,
-      },
-      { commitment: 'confirmed' }
+    // Program id (constant) and PDA for metadata
+    const TMETA = new PublicKey(
+      'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s'
+    );
+    const [metadataPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('metadata'), TMETA.toBuffer(), mintPk.toBuffer()],
+      TMETA
     );
 
-    return NextResponse.json({
-      ok: true,
-      sig: response.signature,
-      metadata: uri,
-    });
-  } catch (e: any) {
-    // If metadata already exists, return success-like response to make it idempotent
-    const msg = String(e?.message || e);
-    if (
-      /already in use|already initialized|custom program error: 0x0b/i.test(msg)
-    ) {
-      return NextResponse.json({
-        ok: true,
-        already: true,
-        metadata: `${siteBase()}/api/metadata/${(await ctx.params).mint}.json`,
-      });
+    // Build the JSON URI you already serve
+    const uri = `${siteBase()}/api/metadata/${mint}.json`;
+
+    // Optional: put a short on-chain name/symbol (wallets often fetch off-chain anyway)
+    // If you can look up the coin in DB by mint, populate real values; else defaults:
+    const name = clamp('Winky Coin', 32);
+    const symbol = clamp('WINKY', 10);
+
+    // Load the v3 instruction (v2 library)
+    const createV3 = await loadCreateV3();
+    if (!createV3) {
+      return bad(
+        'Could not load createMetadataAccountV3 from mpl-token-metadata v2.x. (We will still serve JSON at /api/metadata/[mint].json.)',
+        500
+      );
     }
+
+    // Build the instruction (no TokenStandard argument here — v3 doesn’t require it)
+    const ix = createV3(
+      {
+        metadata: metadataPda,
+        mint: mintPk,
+        mintAuthority: payer.publicKey,
+        payer: payer.publicKey,
+        updateAuthority: payer.publicKey,
+        systemProgram: SystemProgram.programId,
+      },
+      {
+        createMetadataAccountArgsV3: {
+          data: {
+            name,
+            symbol,
+            uri,
+            sellerFeeBasisPoints: 0,
+            creators: null,
+            collection: null,
+            uses: null,
+          },
+          isMutable: true,
+          collectionDetails: null,
+        },
+      }
+    );
+
+    // Send tx
+    const tx = new Transaction().add(ix);
+    tx.feePayer = payer.publicKey;
+    tx.recentBlockhash = (await conn.getLatestBlockhash('confirmed')).blockhash;
+    tx.sign(payer);
+
+    const sig = await conn.sendRawTransaction(tx.serialize(), {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+    });
+    await conn.confirmTransaction(sig, 'confirmed');
+
+    return NextResponse.json({ ok: true, sig, metadata: uri });
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+
+    // If metadata already exists, treat as success (idempotent)
+    if (/already in use|already initialized|custom program error: 0x0b/i.test(msg)) {
+      return NextResponse.json({ ok: true, already: true });
+    }
+
+    // If token standard mismatch appears again, tell the user we still serve JSON
+    if (/Invalid mint account for specified token standard|0x88/i.test(msg)) {
+      return bad(
+        'Token standard mismatch reported by program, but off-chain JSON is available at /api/metadata/[mint].json.',
+        500
+      );
+    }
+
     console.error('[meta POST] error:', e);
     return bad(msg, 500);
   }
