@@ -1,55 +1,69 @@
+// src/app/api/metadata/[mint]/route.ts
 export const runtime = 'nodejs';
 
-import { NextRequest, NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/db';
+import { NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
 
-// GET /api/metadata/[mint].json   (Phantom fetches with .json suffix)
 export async function GET(
-  _req: NextRequest,
-  ctx: { params: Promise<{ mint: string }> }
+  req: Request,
+  ctx: { params: Promise<{ mint: string }> } // Next 15: params is async
 ) {
-  try {
-    const { mint: rawParam } = await ctx.params;
+  const { mint: rawMint } = await ctx.params;
+  const mint = rawMint.replace(/\.json$/i, ''); // supports .../[mint].json
 
-    // Allow both .../[mint] and .../[mint].json
-    const mint = rawParam.replace(/\.json$/i, '');
+  const url = new URL(req.url);
+  const v = url.searchParams.get('v') || '1';
 
-    const { data, error } = await supabaseAdmin
-      .from('coins')
-      .select('name, symbol, description, logo_url, socials')
-      .eq('mint', mint)
-      .single();
+  const SUPABASE_URL =
+    process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const SUPABASE_KEY =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-    if (error || !data) return new NextResponse('Not found', { status: 404 });
-
-    const socials = (data.socials ?? {}) as Record<string, string>;
-
-    // Minimal Metaplex/Phantom-friendly JSON
-    const json = {
-      name: data.name ?? '',
-      symbol: (data.symbol ?? '').toUpperCase(),
-      description: data.description ?? '',
-      image: data.logo_url ?? '',
-      external_url: socials.website || '',
-      seller_fee_basis_points: 0,
-      attributes: [],
-      // Some wallets read these:
-      extensions: {
-        website: socials.website || '',
-        twitter: socials.x || '',
-        telegram: socials.telegram || '',
-      },
-    };
-
-    return NextResponse.json(json, {
-      headers: {
-        // cache a bit on the edge
-        'cache-control': 'public, s-maxage=300, stale-while-revalidate=3600',
-      },
-    });
-  } catch (e: any) {
-    console.error('[metadata] error:', e);
-    return new NextResponse('Server error', { status: 500 });
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    return NextResponse.json(
+      { error: 'Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY' },
+      { status: 500 }
+    );
   }
-}
 
+  const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+  // Pull exactly the fields we need, including logo_url
+  const { data, error } = await supabase
+    .from('coins')               // public.coins
+    .select('name,symbol,description,logo_url,mint')
+    .eq('mint', mint)
+    .maybeSingle();
+
+  if (error || !data) {
+    return NextResponse.json(
+      { error: 'Mint not found', reason: error?.message ?? 'no row' },
+      { status: 404 }
+    );
+  }
+
+  if (!data.logo_url) {
+    return NextResponse.json(
+      { error: 'logo_url is empty for this mint' },
+      { status: 500 }
+    );
+  }
+
+  const json = {
+    name: data.name ?? 'Unnamed',
+    symbol: data.symbol ?? '',
+    description: data.description ?? '',
+    image: data.logo_url, // <- directly use your column
+    attributes: [],
+  };
+
+  return new NextResponse(JSON.stringify(json), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': v
+        ? 'public, max-age=31536000, immutable'
+        : 'public, s-maxage=3600, stale-while-revalidate=86400',
+    },
+  });
+}
