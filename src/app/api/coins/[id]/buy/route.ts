@@ -8,10 +8,11 @@ import {
   LAMPORTS_PER_SOL,
   Transaction,
   sendAndConfirmTransaction,
+ComputeBudgetProgram, 
 } from '@solana/web3.js';
 import {
   getMint,
-  mintTo,
+createMintToInstruction, 
   getOrCreateAssociatedTokenAccount,
   createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
@@ -149,80 +150,101 @@ export async function POST(
       Number(coin.start_price ?? 0)
     );
 
-    // --- ENSURE BUYER ATA ROBUSTLY (handles race conditions) ---
-    const raw2 = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
-    if (!raw2) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
-    const mintAuthority = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw2)));
+// --- ENSURE BUYER ATA ROBUSTLY (handles race conditions) ---
+const raw2 = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
+if (!raw2) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
+const mintAuthority = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw2)));
 
-    const ataAddr = getAssociatedTokenAddressSync(
-      mintPk,
-      buyer,
-      false,
-      TOKEN_PID,
-      ASSOCIATED_TOKEN_PROGRAM_ID
-    );
+const ataAddr = getAssociatedTokenAddressSync(
+  mintPk,
+  buyer,
+  false,
+  TOKEN_PID,
+  ASSOCIATED_TOKEN_PROGRAM_ID
+);
 
-    // Try helper first…
-    try {
-      await getOrCreateAssociatedTokenAccount(
-        conn,
-        mintAuthority, // payer
-        mintPk,
-        buyer,
-        false,
-        'confirmed',
-        undefined,
-        TOKEN_PID,
-        ASSOCIATED_TOKEN_PROGRAM_ID
-      );
-    } catch (e) {
-      // …fallback to explicit ATA create (idempotent)
-      const ix = createAssociatedTokenAccountIdempotentInstruction(
-        mintAuthority.publicKey,
-        ataAddr,
-        buyer,
-        mintPk,
-        TOKEN_PID,
-        ASSOCIATED_TOKEN_PROGRAM_ID
-      );
-      await sendAndConfirmTransaction(conn, new Transaction().add(ix), [mintAuthority], {
-        commitment: 'confirmed',
-      });
-    }
-
-    // --- Mint to buyer ATA ---
-    const mintAmount = uiToAmount(tokensUi, decimals);
-    const mintSig = await mintTo(
-      conn,
-      mintAuthority,
-      mintPk,
-      ataAddr,            // destination ATA
-      mintAuthority,      // authority
-      mintAmount,
-      [],
-      undefined,
-      TOKEN_PID
-    );
-
-    // --- Record trade
-    await supabaseAdmin.from('trades').insert({
-      coin_id: id,
-      side: 'buy',
-      amount_sol: amountSol,
-      buyer: buyer.toBase58(),
-      sig,
-    });
-
-    return NextResponse.json({
-      ok: true,
-      tokensUi,
-      minted: mintAmount.toString(),
-      ata: ataAddr.toBase58(),
-      mintSig,
-    });
-  } catch (e: any) {
-    console.error('[BUY] error:', e);
-    return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
-  }
+// Try helper first…
+try {
+  await getOrCreateAssociatedTokenAccount(
+    conn,
+    mintAuthority, // payer
+    mintPk,
+    buyer,
+    false,
+    'confirmed',
+    undefined,
+    TOKEN_PID,
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+} catch (e) {
+  // …fallback to explicit ATA create (idempotent)
+  const ix = createAssociatedTokenAccountIdempotentInstruction(
+    mintAuthority.publicKey,
+    ataAddr,
+    buyer,
+    mintPk,
+    TOKEN_PID,
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+  await sendAndConfirmTransaction(conn, new Transaction().add(ix), [mintAuthority], {
+    commitment: 'confirmed',
+  });
 }
 
+// --- Mint to buyer ATA (with optional priority fee) ---
+const mintAmount = uiToAmount(tokensUi, decimals);
+
+// priority fee prelude (no-op if env flag is false)
+const priority = process.env.PRIORITY_FEES === 'true';
+const cuIxs = priority
+  ? [
+      ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: Number(process.env.PRIORITY_MICROLAMPORTS ?? 2000),
+      }),
+      ComputeBudgetProgram.setComputeUnitLimit({
+        units: Number(process.env.COMPUTE_UNIT_LIMIT ?? 200000),
+      }),
+    ]
+  : [];
+
+// build mint ix and tx
+const mintIx = createMintToInstruction(
+  mintPk,
+  ataAddr,                     // destination ATA
+  mintAuthority.publicKey,     // authority
+  mintAmount,                  // base units (UI * 10^decimals)
+  [],
+  TOKEN_PID                    // TOKEN_PROGRAM_ID or TOKEN_2022_PROGRAM_ID
+);
+
+const tx = new Transaction().add(...cuIxs, mintIx);
+tx.feePayer = mintAuthority.publicKey;
+
+// send + confirm
+const mintSig = await sendAndConfirmTransaction(conn, tx, [mintAuthority], {
+  commitment: 'confirmed',
+});
+
+// --- Record trade
+await supabaseAdmin.from('trades').insert({
+  coin_id: id,
+  side: 'buy',
+  amount_sol: amountSol,
+  buyer: buyer.toBase58(),
+  sig, // payment/transfer signature you already verified
+});
+
+return NextResponse.json({
+  ok: true,
+  tokensUi,
+  minted: mintAmount.toString(),
+  ata: ataAddr.toBase58(),
+  mintSig,
+});
+
+} catch (e: any) {
+  console.error('[BUY] error:', e);
+  return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
+}
+
+}
