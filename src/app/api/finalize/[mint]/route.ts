@@ -117,7 +117,6 @@ export async function POST(
       metadata,
       updateAuthority: signer,
       data: some(dataV2),
-      updateAuthorityAsSigner: true,
       primarySaleHappened: null,
       isMutable: some(true),
     }).sendAndConfirm(umi);
