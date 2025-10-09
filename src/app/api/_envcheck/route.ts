@@ -20,7 +20,6 @@ export async function GET() {
 
   return NextResponse.json({
     hasRPC: !!rpc,
-    rpcSample: rpc ? rpc.slice(0, 32) + '…' : null,
     hasSUPABASE_URL: !!supaUrl,
     hasSERVICE_ROLE: !!supaService,
     hasKEYPAIR: keyValid,
