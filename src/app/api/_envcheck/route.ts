@@ -1,31 +1,34 @@
 export const runtime = 'nodejs';
 
 import { NextResponse } from 'next/server';
-import { Keypair } from '@solana/web3.js';
 
 export async function GET() {
-  const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
-  let parsedOk = false;
-  let pubkey = '';
+  const rpc = process.env.NEXT_PUBLIC_HELIUS_RPC || process.env.RPC || '';
+  const supaUrl = process.env.SUPABASE_URL || '';
+  const supaService = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const rawKey = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
 
+  let keyLen = 0, keyValid = false, parseOk = true;
   try {
-    if (raw) {
-      const arr = JSON.parse(raw) as number[];
-      const kp = Keypair.fromSecretKey(Uint8Array.from(arr));
-      pubkey = kp.publicKey.toBase58();
-      parsedOk = true;
-    }
+    const arr = JSON.parse(rawKey);
+    keyLen = Array.isArray(arr) ? arr.length : 0;
+    keyValid = Array.isArray(arr) && arr.length === 64 && arr.every((n) => Number.isInteger(n));
   } catch {
-    parsedOk = false;
+    parseOk = false;
+    keyLen = -1;
   }
 
   return NextResponse.json({
-    hasVar: !!raw,
-    length: raw.length || 0,
-    parsedOk,
-    pubkey,
-    treasury: process.env.NEXT_PUBLIC_TREASURY || null,
-    runtime: 'nodejs',
+    hasRPC: !!rpc,
+    rpcSample: rpc ? rpc.slice(0, 32) + '…' : null,
+    hasSUPABASE_URL: !!supaUrl,
+    hasSERVICE_ROLE: !!supaService,
+    hasKEYPAIR: keyValid,
+    keypairParseOk: parseOk,
+    keypairLen: keyLen,
+    hasNEXT_PUBLIC_SUPABASE_URL: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
+    hasNEXT_PUBLIC_SUPABASE_ANON_KEY: !!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+    hasNEXT_PUBLIC_TREASURY: !!process.env.NEXT_PUBLIC_TREASURY,
+    siteBase: process.env.SITE_BASE || null,
   });
 }
-
