@@ -7,6 +7,7 @@ import {
   Keypair,
   LAMPORTS_PER_SOL,
   Transaction,
+SystemProgram,  
   ComputeBudgetProgram,
   sendAndConfirmTransaction, // CHANGE: use proper confirm path for ATA fallback
 } from '@solana/web3.js';
@@ -43,11 +44,9 @@ export async function POST(
 
     const buyerStr: string | undefined = body?.buyer;
     const amountSol: number = Number(body?.amountSol);
-    const sig: string | undefined = body?.sig;
 
     if (!buyerStr) return bad('Missing buyer');
     if (!Number.isFinite(amountSol) || amountSol <= 0) return bad('Invalid amount');
-    if (!sig) return bad('Missing signature');
 
     const rpc =
       process.env.NEXT_PUBLIC_HELIUS_RPC ||
@@ -69,45 +68,6 @@ export async function POST(
       .single();
     if (coinErr || !coin) return bad('Coin not found', 404);
 
-// --- Verify the SOL payment (buyer -> treasury) ---
-// Small helper: poll a few times until the tx is visible at 'confirmed'.
-async function waitForParsedTx(
-  c: Connection,
-  signature: string,
-  tries = 8,
-  delayMs = 500
-) {
-  for (let i = 0; i < tries; i++) {
-    const tx = await c.getParsedTransaction(signature, {
-      maxSupportedTransactionVersion: 0,
-      commitment: 'confirmed',
-    });
-    if (tx && tx.meta) return tx;
-    await new Promise((r) => setTimeout(r, delayMs));
-  }
-  return null;
-}
-
-const parsed = await waitForParsedTx(conn, sig, 8, 500);
-if (!parsed) return bad('Payment tx not found/confirmed');
-
-const keys = parsed.transaction.message.accountKeys.map((k: any) =>
-  new PublicKey(typeof k === 'string' ? k : k.pubkey)
-);
-const pre = parsed.meta.preBalances;
-const post = parsed.meta.postBalances;
-
-const idxTreasury = keys.findIndex((k) => k.equals(treasury));
-const idxBuyer = keys.findIndex((k) => k.equals(buyer));
-if (idxTreasury === -1 || idxBuyer === -1) {
-  return bad('Tx missing buyer/treasury accounts');
-}
-
-const lamportsToTreasury = post[idxTreasury] - pre[idxTreasury];
-const minLamports = Math.floor(amountSol * LAMPORTS_PER_SOL * 0.98);
-if (lamportsToTreasury < minLamports) {
-  return bad('Payment amount too small / not received by treasury');
-}
 
     // --- Ensure mint exists (fallback create) ---
     let mintPk: PublicKey;
@@ -206,53 +166,63 @@ if (lamportsToTreasury < minLamports) {
         commitment: 'confirmed',
       });
     }
+// --- Build a single tx: (1) buyer pays SOL to treasury  +  (2) mint tokens to buyer ATA ---
+const mintAmount = uiToAmount(tokensUi, decimals);
 
-    // --- Build mint-to (buyer pays network fees) ---
-    const mintAmount = uiToAmount(tokensUi, decimals);
+// Optional priority fees
+const priority = process.env.PRIORITY_FEES === 'true';
+const cuIxs = priority
+  ? [
+      ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: Number(process.env.PRIORITY_MICROLAMPORTS ?? 2000),
+      }),
+      ComputeBudgetProgram.setComputeUnitLimit({
+        units: Number(process.env.COMPUTE_UNIT_LIMIT ?? 200000),
+      }),
+    ]
+  : [];
 
-    const priority = process.env.PRIORITY_FEES === 'true';
-    const cuIxs = priority
-      ? [
-          ComputeBudgetProgram.setComputeUnitPrice({
-            microLamports: Number(process.env.PRIORITY_MICROLAMPORTS ?? 2000),
-          }),
-          ComputeBudgetProgram.setComputeUnitLimit({
-            units: Number(process.env.COMPUTE_UNIT_LIMIT ?? 200000),
-          }),
-        ]
-      : [];
+// (1) Buyer -> Treasury SOL transfer
+const payIx = SystemProgram.transfer({
+  fromPubkey: buyer,
+  toPubkey: treasury,
+  lamports: Math.floor(amountSol * LAMPORTS_PER_SOL),
+});
 
-    const mintIx = createMintToInstruction(
-      mintPk,
-      ataAddr,
-      mintAuthority.publicKey, // server is mint authority
-      mintAmount,
-      [],
-      TOKEN_PID
-    );
+// (2) Mint tokens to buyer ATA
+const mintIx = createMintToInstruction(
+  mintPk,
+  ataAddr,
+  mintAuthority.publicKey,
+  mintAmount,
+  [],
+  TOKEN_PID
+);
 
-    const { blockhash } = await conn.getLatestBlockhash('confirmed');
-    const tx = new Transaction({
-      feePayer: buyer,             // BUYER pays the network fee
-      recentBlockhash: blockhash,
-    }).add(...cuIxs, mintIx);
+// Fresh blockhash & build the single tx (buyer is fee payer)
+const { blockhash } = await conn.getLatestBlockhash('confirmed');
+const tx = new Transaction({
+  feePayer: buyer,            // BUYER pays the network fee
+  recentBlockhash: blockhash,
+}).add(...cuIxs, payIx, mintIx);
 
-    // Server partially signs (as mint authority)
-    tx.partialSign(mintAuthority);
+// Server signs as mint authority (partial); wallet will co-sign & send
+tx.partialSign(mintAuthority);
 
-    // Return base64 to client; wallet co-signs (as fee payer) and sends
-    const b64 = Buffer.from(
-      tx.serialize({ requireAllSignatures: false })
-    ).toString('base64');
-console.log('[BUY] mode=buyer-sign txB64.len=%d', b64.length);
-    return NextResponse.json({
-      ok: true,
-      tokensUi,
-      minted: mintAmount.toString(),
-      ata: ataAddr.toBase58(),
-      txB64: b64,   // primary key the UI reads
-      tx: b64,      // back-compat
-    });
+// Return the partially-signed transaction for the wallet to sign+send
+const b64 = Buffer.from(
+  tx.serialize({ requireAllSignatures: false })
+).toString('base64');
+
+return NextResponse.json({
+  ok: true,
+  tokensUi,
+  minted: mintAmount.toString(),
+  ata: ataAddr.toBase58(),
+  txB64: b64,   // UI reads this
+  tx: b64,      // back-compat
+});
+
   } catch (e: any) {
     console.error('[BUY] error:', e);
     return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
