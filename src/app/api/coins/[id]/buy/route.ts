@@ -166,10 +166,9 @@ export async function POST(
         commitment: 'confirmed',
       });
     }
-// --- Build a single tx: (1) buyer pays SOL to treasury  +  (2) mint tokens to buyer ATA ---
+// --- Build mint-to (buyer pays fees) ---
 const mintAmount = uiToAmount(tokensUi, decimals);
 
-// Optional priority fees
 const priority = process.env.PRIORITY_FEES === 'true';
 const cuIxs = priority
   ? [
@@ -182,14 +181,14 @@ const cuIxs = priority
     ]
   : [];
 
-// (1) Buyer -> Treasury SOL transfer
-const payIx = SystemProgram.transfer({
+// 1) buyer -> treasury SOL transfer (inside SAME tx)
+const transferIx = SystemProgram.transfer({
   fromPubkey: buyer,
   toPubkey: treasury,
   lamports: Math.floor(amountSol * LAMPORTS_PER_SOL),
 });
 
-// (2) Mint tokens to buyer ATA
+// 2) mint to buyer ATA (server is mint authority)
 const mintIx = createMintToInstruction(
   mintPk,
   ataAddr,
@@ -199,17 +198,18 @@ const mintIx = createMintToInstruction(
   TOKEN_PID
 );
 
-// Fresh blockhash & build the single tx (buyer is fee payer)
-const { blockhash } = await conn.getLatestBlockhash('confirmed');
-const tx = new Transaction({
-  feePayer: buyer,            // BUYER pays the network fee
-  recentBlockhash: blockhash,
-}).add(...cuIxs, payIx, mintIx);
+const latest = await conn.getLatestBlockhash('confirmed');
 
-// Server signs as mint authority (partial); wallet will co-sign & send
+// IMPORTANT: transferIx **before** mintIx
+const tx = new Transaction({
+  feePayer: buyer,                         // buyer pays network fee
+  recentBlockhash: latest.blockhash,
+}).add(...cuIxs, transferIx, mintIx);
+
+// server partially signs (as mint authority only)
 tx.partialSign(mintAuthority);
 
-// Return the partially-signed transaction for the wallet to sign+send
+// send back to client to sign+send
 const b64 = Buffer.from(
   tx.serialize({ requireAllSignatures: false })
 ).toString('base64');
@@ -219,8 +219,7 @@ return NextResponse.json({
   tokensUi,
   minted: mintAmount.toString(),
   ata: ataAddr.toBase58(),
-  txB64: b64,   // UI reads this
-  tx: b64,      // back-compat
+  txB64: b64,   // primary key the UI reads
 });
 
   } catch (e: any) {

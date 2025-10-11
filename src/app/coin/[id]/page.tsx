@@ -8,9 +8,8 @@ import { useParams, useSearchParams } from 'next/navigation';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import {
   PublicKey,
-  SystemProgram,
+LAMPORTS_PER_SOL,
   Transaction,
-  LAMPORTS_PER_SOL,
   VersionedTransaction,
 } from '@solana/web3.js';
 import { getAssociatedTokenAddressSync } from '@solana/spl-token';
@@ -165,22 +164,6 @@ return quoteSellTokensUi(coin.curve, coin.strength, coin.startPrice, a);
     }
 
     try {
-      // 1) Pay treasury
-      const treasuryStr = process.env.NEXT_PUBLIC_TREASURY!;
-      const treasury = new PublicKey(treasuryStr);
-      const tx = new Transaction().add(
-        SystemProgram.transfer({
-          fromPubkey: publicKey,
-          toPubkey: treasury,
-          lamports: Math.floor(amt * LAMPORTS_PER_SOL),
-        })
-      );
-      tx.feePayer = publicKey;
-      const { blockhash } = await connection.getLatestBlockhash('processed');
-      tx.recentBlockhash = blockhash;
-      const sig = await sendTransaction(tx, connection, { skipPreflight: true });
-console.log('[BUY] payment sig (buyer->treasury):', sig);
-await connection.confirmTransaction(sig, 'confirmed');
 
 
 // 2) Ask server to prepare the mint (may return a partial tx for buyer to sign)
@@ -190,7 +173,6 @@ const res = await fetch(`/api/coins/${id}/buy`, {
   body: JSON.stringify({
     buyer: publicKey.toBase58(),
     amountSol: amt,
-    sig, // the SOL payment signature you just sent
   }),
 });
 const j = await res.json().catch(() => ({}));
