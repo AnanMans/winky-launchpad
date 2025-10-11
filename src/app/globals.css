@@ -1,7 +1,7 @@
 /* Imports must be first */
 @import "tailwindcss";
 @import "tw-animate-css";
-@import "@solana/wallet-adapter-react-ui/styles.css";
+@import "../styles/wallet-adapter.css";
 
 /* (Optional) dark helper */
 @custom-variant dark (&:is(.dark *));
@@ -47,4 +47,3 @@
   border: 1px solid var(--sidebar-border);
   border-radius: 0.75rem;
 }
-
