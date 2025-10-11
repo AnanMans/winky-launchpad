@@ -7,12 +7,12 @@ import {
   Keypair,
   LAMPORTS_PER_SOL,
   Transaction,
-  sendAndConfirmTransaction,
-ComputeBudgetProgram, 
+  ComputeBudgetProgram,
+  sendAndConfirmTransaction, // CHANGE: use proper confirm path for ATA fallback
 } from '@solana/web3.js';
 import {
   getMint,
-createMintToInstruction, 
+  createMintToInstruction,
   getOrCreateAssociatedTokenAccount,
   createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
@@ -61,7 +61,7 @@ export async function POST(
     const buyer = new PublicKey(buyerStr);
     const treasury = new PublicKey(treasuryStr);
 
-    // --- Load coin (must exist)
+    // --- Load coin row ---
     const { data: coin, error: coinErr } = await supabase
       .from('coins')
       .select('mint, curve, strength, start_price')
@@ -69,32 +69,47 @@ export async function POST(
       .single();
     if (coinErr || !coin) return bad('Coin not found', 404);
 
-    // --- Verify the SOL payment on-chain by reading the transaction ---
-    const parsed = await conn.getParsedTransaction(sig, {
+// --- Verify the SOL payment (buyer -> treasury) ---
+// Small helper: poll a few times until the tx is visible at 'confirmed'.
+async function waitForParsedTx(
+  c: Connection,
+  signature: string,
+  tries = 8,
+  delayMs = 500
+) {
+  for (let i = 0; i < tries; i++) {
+    const tx = await c.getParsedTransaction(signature, {
       maxSupportedTransactionVersion: 0,
       commitment: 'confirmed',
     });
-    if (!parsed || !parsed.meta) return bad('Payment tx not found/confirmed');
+    if (tx && tx.meta) return tx;
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return null;
+}
 
-    const keys = parsed.transaction.message.accountKeys.map((k: any) =>
-      new PublicKey(typeof k === 'string' ? k : k.pubkey)
-    );
-    const pre = parsed.meta.preBalances;
-    const post = parsed.meta.postBalances;
+const parsed = await waitForParsedTx(conn, sig, 8, 500);
+if (!parsed) return bad('Payment tx not found/confirmed');
 
-    const idxTreasury = keys.findIndex((k) => k.equals(treasury));
-    const idxBuyer = keys.findIndex((k) => k.equals(buyer));
-    if (idxTreasury === -1 || idxBuyer === -1) {
-      return bad('Tx missing buyer/treasury accounts');
-    }
+const keys = parsed.transaction.message.accountKeys.map((k: any) =>
+  new PublicKey(typeof k === 'string' ? k : k.pubkey)
+);
+const pre = parsed.meta.preBalances;
+const post = parsed.meta.postBalances;
 
-    const lamportsToTreasury = post[idxTreasury] - pre[idxTreasury];
-    const minLamports = Math.floor(amountSol * LAMPORTS_PER_SOL * 0.98);
-    if (lamportsToTreasury < minLamports) {
-      return bad('Payment amount too small / not received by treasury');
-    }
+const idxTreasury = keys.findIndex((k) => k.equals(treasury));
+const idxBuyer = keys.findIndex((k) => k.equals(buyer));
+if (idxTreasury === -1 || idxBuyer === -1) {
+  return bad('Tx missing buyer/treasury accounts');
+}
 
-    // --- Ensure we have a mint (should be set at create; keep fallback) ---
+const lamportsToTreasury = post[idxTreasury] - pre[idxTreasury];
+const minLamports = Math.floor(amountSol * LAMPORTS_PER_SOL * 0.98);
+if (lamportsToTreasury < minLamports) {
+  return bad('Payment amount too small / not received by treasury');
+}
+
+    // --- Ensure mint exists (fallback create) ---
     let mintPk: PublicKey;
     if (!coin.mint) {
       const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
@@ -108,7 +123,6 @@ export async function POST(
       const { Keypair: KP } = await import('@solana/web3.js');
       const newMint = KP.generate();
 
-      // default 6 decimals, classic token program
       const { createMint } = await import('@solana/spl-token');
       await createMint(conn, payer, payer.publicKey, null, 6, newMint);
       mintPk = newMint.publicKey;
@@ -122,8 +136,7 @@ export async function POST(
       mintPk = new PublicKey(coin.mint);
     }
 
-    // --- Determine token program & decimals (REAL on-chain) ---
-    // Retry a couple of times in case mint just got created and RPC is catching up.
+    // --- Mint program & decimals ---
     async function waitForMint(acc: PublicKey, tries = 4) {
       for (let i = 0; i < tries; i++) {
         const info = await conn.getAccountInfo(acc, 'confirmed');
@@ -142,7 +155,7 @@ export async function POST(
     const mintInfo = await getMint(conn, mintPk, 'confirmed', TOKEN_PID);
     const decimals = mintInfo.decimals;
 
-    // --- Quote how many tokens to mint based on curve ---
+    // --- Quote tokens ---
     const tokensUi = quoteTokensUi(
       amountSol,
       (coin.curve || 'linear') as 'linear' | 'degen' | 'random',
@@ -150,101 +163,99 @@ export async function POST(
       Number(coin.start_price ?? 0)
     );
 
-// --- ENSURE BUYER ATA ROBUSTLY (handles race conditions) ---
-const raw2 = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
-if (!raw2) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
-const mintAuthority = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw2)));
+    // --- Ensure buyer ATA (server pays to create ATA only) ---
+    const raw2 = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
+    if (!raw2) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
+    const mintAuthority = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw2)));
 
-const ataAddr = getAssociatedTokenAddressSync(
-  mintPk,
-  buyer,
-  false,
-  TOKEN_PID,
-  ASSOCIATED_TOKEN_PROGRAM_ID
-);
+    const ataAddr = getAssociatedTokenAddressSync(
+      mintPk,
+      buyer,
+      false,
+      TOKEN_PID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
 
-// Try helper first…
-try {
-  await getOrCreateAssociatedTokenAccount(
-    conn,
-    mintAuthority, // payer
-    mintPk,
-    buyer,
-    false,
-    'confirmed',
-    undefined,
-    TOKEN_PID,
-    ASSOCIATED_TOKEN_PROGRAM_ID
-  );
-} catch (e) {
-  // …fallback to explicit ATA create (idempotent)
-  const ix = createAssociatedTokenAccountIdempotentInstruction(
-    mintAuthority.publicKey,
-    ataAddr,
-    buyer,
-    mintPk,
-    TOKEN_PID,
-    ASSOCIATED_TOKEN_PROGRAM_ID
-  );
-  await sendAndConfirmTransaction(conn, new Transaction().add(ix), [mintAuthority], {
-    commitment: 'confirmed',
-  });
+    try {
+      await getOrCreateAssociatedTokenAccount(
+        conn,
+        mintAuthority, // payer for ATA creation (server)
+        mintPk,
+        buyer,
+        false,
+        'confirmed',
+        undefined,
+        TOKEN_PID,
+        ASSOCIATED_TOKEN_PROGRAM_ID
+      );
+    } catch {
+      // CHANGE: proper confirm path
+      const ix = createAssociatedTokenAccountIdempotentInstruction(
+        mintAuthority.publicKey,
+        ataAddr,
+        buyer,
+        mintPk,
+        TOKEN_PID,
+        ASSOCIATED_TOKEN_PROGRAM_ID
+      );
+      const ataTx = new Transaction().add(ix);
+      const { blockhash } = await conn.getLatestBlockhash('confirmed');
+      ataTx.recentBlockhash = blockhash;
+      ataTx.feePayer = mintAuthority.publicKey;
+      await sendAndConfirmTransaction(conn, ataTx, [mintAuthority], {
+        commitment: 'confirmed',
+      });
+    }
+
+    // --- Build mint-to (buyer pays network fees) ---
+    const mintAmount = uiToAmount(tokensUi, decimals);
+
+    const priority = process.env.PRIORITY_FEES === 'true';
+    const cuIxs = priority
+      ? [
+          ComputeBudgetProgram.setComputeUnitPrice({
+            microLamports: Number(process.env.PRIORITY_MICROLAMPORTS ?? 2000),
+          }),
+          ComputeBudgetProgram.setComputeUnitLimit({
+            units: Number(process.env.COMPUTE_UNIT_LIMIT ?? 200000),
+          }),
+        ]
+      : [];
+
+    const mintIx = createMintToInstruction(
+      mintPk,
+      ataAddr,
+      mintAuthority.publicKey, // server is mint authority
+      mintAmount,
+      [],
+      TOKEN_PID
+    );
+
+    const { blockhash } = await conn.getLatestBlockhash('confirmed');
+    const tx = new Transaction({
+      feePayer: buyer,             // BUYER pays the network fee
+      recentBlockhash: blockhash,
+    }).add(...cuIxs, mintIx);
+
+    // Server partially signs (as mint authority)
+    tx.partialSign(mintAuthority);
+
+    // Return base64 to client; wallet co-signs (as fee payer) and sends
+    const b64 = Buffer.from(
+      tx.serialize({ requireAllSignatures: false })
+    ).toString('base64');
+console.log('[BUY] mode=buyer-sign txB64.len=%d', b64.length);
+    return NextResponse.json({
+      ok: true,
+      tokensUi,
+      minted: mintAmount.toString(),
+      ata: ataAddr.toBase58(),
+      txB64: b64,   // primary key the UI reads
+      tx: b64,      // back-compat
+    });
+  } catch (e: any) {
+    console.error('[BUY] error:', e);
+    return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
+  }
 }
 
-// --- Mint to buyer ATA (with optional priority fee) ---
-const mintAmount = uiToAmount(tokensUi, decimals);
-
-// priority fee prelude (no-op if env flag is false)
-const priority = process.env.PRIORITY_FEES === 'true';
-const cuIxs = priority
-  ? [
-      ComputeBudgetProgram.setComputeUnitPrice({
-        microLamports: Number(process.env.PRIORITY_MICROLAMPORTS ?? 2000),
-      }),
-      ComputeBudgetProgram.setComputeUnitLimit({
-        units: Number(process.env.COMPUTE_UNIT_LIMIT ?? 200000),
-      }),
-    ]
-  : [];
-
-// build mint ix and tx
-const mintIx = createMintToInstruction(
-  mintPk,
-  ataAddr,                     // destination ATA
-  mintAuthority.publicKey,     // authority
-  mintAmount,                  // base units (UI * 10^decimals)
-  [],
-  TOKEN_PID                    // TOKEN_PROGRAM_ID or TOKEN_2022_PROGRAM_ID
-);
-
-const tx = new Transaction().add(...cuIxs, mintIx);
-tx.feePayer = mintAuthority.publicKey;
-
-// send + confirm
-const mintSig = await sendAndConfirmTransaction(conn, tx, [mintAuthority], {
-  commitment: 'confirmed',
-});
-
-// --- Record trade
-await supabaseAdmin.from('trades').insert({
-  coin_id: id,
-  side: 'buy',
-  amount_sol: amountSol,
-  buyer: buyer.toBase58(),
-  sig, // payment/transfer signature you already verified
-});
-
-return NextResponse.json({
-  ok: true,
-  tokensUi,
-  minted: mintAmount.toString(),
-  ata: ataAddr.toBase58(),
-  mintSig,
-});
-
-} catch (e: any) {
-  console.error('[BUY] error:', e);
-  return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
-}
-
-}

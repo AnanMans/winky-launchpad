@@ -5,7 +5,13 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
-import { LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
+import {
+  LAMPORTS_PER_SOL,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+  VersionedTransaction,   // ← add this
+} from '@solana/web3.js';
 
 function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(' ');
@@ -202,23 +208,43 @@ export default function CreatePage() {
       const { blockhash } = await connection.getLatestBlockhash('processed');
       tx.recentBlockhash = blockhash;
       const sig = await sendTransaction(tx, connection, { skipPreflight: true });
+await connection.confirmTransaction(sig, 'confirmed');
 // Wait for 'confirmed' so the server can find the payment in RPC
 await connection.confirmTransaction(sig, 'confirmed');
 
-      // 2) tell server to mint to creator
-      const res = await fetch(`/api/coins/${createdId}/buy`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          buyer: publicKey.toBase58(),
-          amountSol: amt,
-          sig,
-        }),
-      });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(j?.error || 'Server buy failed');
+// 2) tell server to mint to creator (buyer pays if txB64 present)
+const res = await fetch(`/api/coins/${createdId}/buy`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    buyer: publicKey.toBase58(),
+    amountSol: amt,  // same variable you already use
+    sig,             // SOL payment signature to treasury
+  }),
+});
+const j = await res.json().catch(() => ({}));
+if (!res.ok) throw new Error(j?.error || 'Server buy failed');
 
-      router.push(`/coin/${createdId}`);
+if (j.txB64) {
+  // New path: server returned a partially-signed transaction.
+  const raw = Uint8Array.from(atob(j.txB64 as string), (c) => c.charCodeAt(0));
+
+  let tx: Transaction | VersionedTransaction;
+  try {
+    tx = VersionedTransaction.deserialize(raw);
+  } catch {
+    tx = Transaction.from(raw);
+  }
+
+  const sig2 = await sendTransaction(tx, connection, { skipPreflight: true });
+await connection.confirmTransaction(sig, 'confirmed');
+
+}
+
+router.push(`/coin/${createdId}`);
+
+
+
     } catch (e: any) {
       console.error('first-buy error', e);
       alert(`Buy failed: ${e?.message || String(e)}`);

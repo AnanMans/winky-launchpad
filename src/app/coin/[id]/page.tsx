@@ -179,22 +179,44 @@ return quoteSellTokensUi(coin.curve, coin.strength, coin.startPrice, a);
       const { blockhash } = await connection.getLatestBlockhash('processed');
       tx.recentBlockhash = blockhash;
       const sig = await sendTransaction(tx, connection, { skipPreflight: true });
+console.log('[BUY] payment sig (buyer->treasury):', sig);
+await connection.confirmTransaction(sig, 'confirmed');
 
-      // 2) Tell server to mint tokens
-      const res = await fetch(`/api/coins/${id}/buy`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          buyer: publicKey.toBase58(),
-          amountSol: amt,
-          sig,
-        }),
-      });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(j?.error || 'Server buy failed');
 
-      alert(`Buy submitted: ${j.mintSig || 'ok'}`);
-      setTimeout(() => refreshBalances(), 1500);
+// 2) Ask server to prepare the mint (may return a partial tx for buyer to sign)
+const res = await fetch(`/api/coins/${id}/buy`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    buyer: publicKey.toBase58(),
+    amountSol: amt,
+    sig, // the SOL payment signature you just sent
+  }),
+});
+const j = await res.json().catch(() => ({}));
+console.log('[BUY response]', j);
+if (!res.ok) throw new Error(j?.error || 'Server buy failed');
+
+if (j.txB64) {
+  // NEW path: server wants the buyer to sign the mint tx
+  const raw = Uint8Array.from(atob(j.txB64 as string), (c) => c.charCodeAt(0));
+  let tx: Transaction | VersionedTransaction;
+  try {
+    tx = VersionedTransaction.deserialize(raw);
+  } catch {
+    tx = Transaction.from(raw);
+  }
+
+  const sig2 = await sendTransaction(tx, connection, { skipPreflight: true });
+await connection.confirmTransaction(sig2, 'confirmed');
+  alert(`Buy submitted (mint): ${sig2}`);
+} else {
+  // BACKCOMPAT path: server already broadcast the mint
+  alert(`Buy submitted: ${j.mintSig || 'ok'}`);
+}
+
+setTimeout(() => refreshBalances(), 1500);
+
     } catch (e: any) {
       console.error('buy error:', e);
       alert(`Buy failed: ${e?.message || String(e)}`);
