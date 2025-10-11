@@ -6,9 +6,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import {
-  LAMPORTS_PER_SOL,
   PublicKey,
-  SystemProgram,
   Transaction,
   VersionedTransaction,   // ← add this
 } from '@solana/web3.js';
@@ -195,33 +193,16 @@ export default function CreatePage() {
     }
 
     try {
-      // 1) pay treasury
-      const treasury = new PublicKey(process.env.NEXT_PUBLIC_TREASURY!);
-      const tx = new Transaction().add(
-        SystemProgram.transfer({
-          fromPubkey: publicKey,
-          toPubkey: treasury,
-          lamports: Math.floor(amt * LAMPORTS_PER_SOL),
-        })
-      );
-      tx.feePayer = publicKey;
-      const { blockhash } = await connection.getLatestBlockhash('processed');
-      tx.recentBlockhash = blockhash;
-      const sig = await sendTransaction(tx, connection, { skipPreflight: true });
-await connection.confirmTransaction(sig, 'confirmed');
-// Wait for 'confirmed' so the server can find the payment in RPC
-await connection.confirmTransaction(sig, 'confirmed');
-
 // 2) tell server to mint to creator (buyer pays if txB64 present)
 const res = await fetch(`/api/coins/${createdId}/buy`, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify({
     buyer: publicKey.toBase58(),
-    amountSol: amt,  // same variable you already use
-    sig,             // SOL payment signature to treasury
+    amountSol: amt,
   }),
 });
+
 const j = await res.json().catch(() => ({}));
 if (!res.ok) throw new Error(j?.error || 'Server buy failed');
 
@@ -237,7 +218,7 @@ if (j.txB64) {
   }
 
   const sig2 = await sendTransaction(tx, connection, { skipPreflight: true });
-await connection.confirmTransaction(sig, 'confirmed');
+await connection.confirmTransaction(sig2, 'confirmed');
 
 }
 
