@@ -8,7 +8,7 @@ import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import {
   PublicKey,
   Transaction,
-  VersionedTransaction,   // ← add this
+  VersionedTransaction,
 } from '@solana/web3.js';
 
 function cx(...xs: Array<string | false | null | undefined>) {
@@ -143,10 +143,12 @@ export default function CreatePage() {
 
   // modal (first buy)
   const [createdId, setCreatedId] = useState<string | null>(null);
+  const [createdMint, setCreatedMint] = useState<string | null>(null);
   const [firstBuySol, setFirstBuySol] = useState<string>('0.05');
   const [showBuy, setShowBuy] = useState(false);
 
-  const canSubmit = name.trim().length > 0 && symbol.trim().length > 0 && !!logoUrl;
+  const canSubmit =
+    name.trim().length > 0 && symbol.trim().length > 0 && !!logoUrl;
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -171,12 +173,31 @@ export default function CreatePage() {
       const j = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(j?.error || 'Create failed');
 
+      // Save id and show first-buy modal
       setCreatedId(j.coin.id);
       setShowBuy(true);
+
+      // Auto-finalize so wallets show name/icon instantly (if mint is already known)
+      if (j.coin.mint) {
+        setCreatedMint(j.coin.mint);
+        try {
+          const finRes = await fetch(`/api/finalize/${j.coin.mint}`, { method: 'POST' });
+          const finJson = await finRes.json().catch(() => ({}));
+          if (!finRes.ok) console.warn('Finalize failed:', finJson?.error);
+        } catch (err) {
+          console.warn('Finalize request error:', err);
+        }
+      }
     } catch (e: any) {
       console.error('Create failed', e);
       alert(`Create failed: ${e?.message || String(e)}`);
     }
+  }
+
+  function pushWithBanner() {
+    if (!createdId) return;
+    const banner = `${(name || 'Your coin').toUpperCase()} • ${String(curve || 'linear').toUpperCase()} • Strength ${strength ?? 2} — LET’S TRADE ON CURVE 🚀`;
+    router.push(`/coin/${createdId}?flash=${encodeURIComponent(banner)}`);
   }
 
   async function confirmFirstBuy() {
@@ -184,7 +205,8 @@ export default function CreatePage() {
     const amt = Number(firstBuySol);
 
     if (!Number.isFinite(amt) || amt <= 0) {
-      router.push(`/coin/${createdId}`);
+      // Skip buy → still navigate with banner
+      pushWithBanner();
       return;
     }
     if (!publicKey) {
@@ -193,43 +215,44 @@ export default function CreatePage() {
     }
 
     try {
-// 2) tell server to mint to creator (buyer pays if txB64 present)
-const res = await fetch(`/api/coins/${createdId}/buy`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    buyer: publicKey.toBase58(),
-    amountSol: amt,
-  }),
-});
+      // 2) Tell server to mint to creator (buyer pays if txB64 present)
+      const res = await fetch(`/api/coins/${createdId}/buy`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          buyer: publicKey.toBase58(),
+          amountSol: amt,
+        }),
+      });
 
-const j = await res.json().catch(() => ({}));
-if (!res.ok) throw new Error(j?.error || 'Server buy failed');
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || 'Server buy failed');
 
-if (j.txB64) {
-  // New path: server returned a partially-signed transaction.
-  const raw = Uint8Array.from(atob(j.txB64 as string), (c) => c.charCodeAt(0));
+      if (j.txB64) {
+        // New path: server returned a partially-signed transaction.
+        const raw = Uint8Array.from(atob(j.txB64 as string), (c) =>
+          c.charCodeAt(0)
+        );
 
-  let tx: Transaction | VersionedTransaction;
-  try {
-    tx = VersionedTransaction.deserialize(raw);
-  } catch {
-    tx = Transaction.from(raw);
-  }
+        let tx: Transaction | VersionedTransaction;
+        try {
+          tx = VersionedTransaction.deserialize(raw);
+        } catch {
+          tx = Transaction.from(raw);
+        }
 
-  const sig2 = await sendTransaction(tx, connection, { skipPreflight: true });
-await connection.confirmTransaction(sig2, 'confirmed');
+        const sig2 = await sendTransaction(tx, connection, {
+          skipPreflight: true,
+        });
+        await connection.confirmTransaction(sig2, 'confirmed');
+      }
 
-}
-
-router.push(`/coin/${createdId}`);
-
-
-
+      // Navigate with banner
+      pushWithBanner();
     } catch (e: any) {
       console.error('first-buy error', e);
       alert(`Buy failed: ${e?.message || String(e)}`);
-      router.push(`/coin/${createdId}`);
+      pushWithBanner();
     }
   }
 
@@ -385,7 +408,11 @@ router.push(`/coin/${createdId}`);
               </button>
               <button
                 onClick={() => {
-                  if (createdId) router.push(`/coin/${createdId}`);
+                  if (createdId) {
+                    // Skip → still show banner on coin page
+                    const banner = `${(name || 'Your coin').toUpperCase()} • ${String(curve || 'linear').toUpperCase()} • Strength ${strength ?? 2} — LET’S TRADE ON CURVE 🚀`;
+                    router.push(`/coin/${createdId}?flash=${encodeURIComponent(banner)}`);
+                  }
                 }}
                 className="px-4 py-2 rounded-lg border cursor-pointer"
               >
