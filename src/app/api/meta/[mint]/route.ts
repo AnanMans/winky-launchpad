@@ -102,28 +102,44 @@ export async function POST(
       .eq('mint', mintParam)
       .single();
 
-    const name: string = coin?.name ?? 'Winky Coin';
-    const symbol: string = (coin?.symbol ?? 'WINKY').toUpperCase();
-    const description: string = coin?.description ?? '';
-    const image: string = (coin?.logoUrl ?? coin?.logo_url) || '';
-    const base = baseUrlFrom(req);
-    const uri = `${base}/api/metadata/${mintParam}.json`;
+// REPLACE your current name/symbol/image/base/uri block with:
+const name: string = (coin?.name ?? 'Winky Coin').slice(0, 32);
+const symbol: string = ((coin?.symbol ?? 'WINKY').toUpperCase()).slice(0, 10);
+const description: string = coin?.description ?? '';
+const image: string = (coin?.logoUrl ?? coin?.logo_url) || '';
+const base = baseUrlFrom(req);
+
+// cache-busting param so wallets refetch the JSON
+const version = Date.now();
+const uri = `${base}/api/metadata/${mintParam}.json?v=${version}`;
 
     // 3) Figure out token program + decimals just to sanity-check the mint
     const mintPk = new PublicKey(mintParam);
     const mintAcc = await conn.getAccountInfo(mintPk);
     if (!mintAcc) return bad('Mint account not found on-chain', 400);
 
-    const TOKEN_PID = mintAcc.owner.equals(TOKEN_2022_PROGRAM_ID)
-      ? TOKEN_2022_PROGRAM_ID
-      : TOKEN_PROGRAM_ID;
-    await getMint(conn, mintPk, 'confirmed', TOKEN_PID); // throws if invalid
+const TOKEN_PID = mintAcc.owner.equals(TOKEN_2022_PROGRAM_ID)
+  ? TOKEN_2022_PROGRAM_ID
+  : TOKEN_PROGRAM_ID;
 
-    // 4) Derive Metadata PDA
-    const [metadataPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from('metadata'), TMETA_PID.toBuffer(), mintPk.toBuffer()],
-      TMETA_PID
-    );
+// get actual on-chain mint info
+const mintInfo = await getMint(conn, mintPk, 'confirmed', TOKEN_PID);
+
+// ensure our server key IS the mint authority
+const onchainMintAuth = mintInfo.mintAuthority ? mintInfo.mintAuthority.toBase58() : null;
+if (onchainMintAuth !== payer.publicKey.toBase58()) {
+  return bad(
+    `Mint authority mismatch. On-chain: ${onchainMintAuth ?? 'null'}; server: ${payer.publicKey.toBase58()}. ` +
+    `createMetadataAccountV3 must be signed by the current mint authority.`,
+    400
+  );
+}
+
+// 4) Derive Metadata PDA
+const [metadataPda] = PublicKey.findProgramAddressSync(
+  [Buffer.from('metadata'), TMETA_PID.toBuffer(), mintPk.toBuffer()],
+  TMETA_PID
+);
 
     // 5) Load v3 instruction
     const createV3 = await loadCreateV3();
