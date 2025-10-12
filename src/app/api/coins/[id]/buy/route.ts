@@ -115,6 +115,20 @@ export async function POST(
     const mintInfo = await getMint(conn, mintPk, 'confirmed', TOKEN_PID);
     const decimals = mintInfo.decimals;
 
+// ---- Best-effort finalize metadata in the background (no blocking) ----
+const siteBase =
+  process.env.SITE_BASE ||
+  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
+
+(async () => {
+  try {
+    await fetch(`${siteBase}/api/finalize/${mintPk.toBase58()}`, { method: 'POST' });
+  } catch (_) {
+    // ignore — wallets may still pick it up on next try, and user can re-finalize later
+  }
+})();
+
+
     // --- Quote tokens ---
     const tokensUi = quoteTokensUi(
       amountSol,

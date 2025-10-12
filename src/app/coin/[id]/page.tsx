@@ -55,6 +55,8 @@ export default function CoinPage() {
   // inputs
   const [buySol, setBuySol] = useState<string>('0.05');
   const [sellSol, setSellSol] = useState<string>('0.01');
+const [flash, setFlash] = useState<string | null>(null);
+
 {/* Title */}
 <h1 className="text-2xl md:text-3xl font-bold text-white flex items-baseline gap-2">
   <span>{coin?.name ?? 'Unnamed'}</span>
@@ -190,11 +192,17 @@ if (j.txB64) {
   }
 
   const sig2 = await sendTransaction(tx, connection, { skipPreflight: true });
+
 await connection.confirmTransaction(sig2, 'confirmed');
-  alert(`Buy submitted (mint): ${sig2}`);
+
+setFlash('Buy submitted. Your token metadata will appear shortly.');
+setTimeout(() => setFlash(null), 4000);
+
 } else {
   // BACKCOMPAT path: server already broadcast the mint
-  alert(`Buy submitted: ${j.mintSig || 'ok'}`);
+setFlash('Buy submitted. Your token metadata will appear shortly.');
+setTimeout(() => setFlash(null), 4000);
+
 }
 
 setTimeout(() => refreshBalances(), 1500);
@@ -244,7 +252,9 @@ setTimeout(() => refreshBalances(), 1500);
       }
 
       const sig = await sendTransaction(tx, connection, { skipPreflight: true });
-      alert(`Sell submitted: ${sig}`);
+setFlash('Sell submitted.');
+setTimeout(() => setFlash(null), 3000);
+
       setTimeout(() => refreshBalances(), 1500);
     } catch (e: any) {
       console.error('sell error:', e);
@@ -252,138 +262,152 @@ setTimeout(() => refreshBalances(), 1500);
     }
   }
 
-  // ---------- render ----------
-  if (loading) {
-    return (
-      <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto">
-        <p>Loading…</p>
-      </main>
-    );
-  }
-  if (err || !coin) {
-    return (
-      <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto">
-        <p className="text-red-400">Error: {err || 'Not found'}</p>
-        <Link className="underline" href="/coins">Back to coins</Link>
-      </main>
-    );
-  }
-
+// ---------- render ----------
+if (loading) {
   return (
-    <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto grid gap-8">
-      <header className="flex items-center justify-between">
-        <Link href="/" className="flex items-center gap-2 font-semibold">
-          <Image src="/logo.svg" alt="logo" width={28} height={28} />
-          <span>Winky Launchpad</span>
-        </Link>
-        <nav className="flex items-center gap-3">
-          <Link className="underline" href="/coins">Coins</Link>
-          <WalletButton />
-        </nav>
-      </header>
-
-      <section className="grid gap-4 rounded-2xl border p-6 bg-black/20">
-        <div className="flex items-center gap-4">
-          {coin.logoUrl ? (
-            <Image
-              src={coin.logoUrl}
-              alt={coin.name}
-              width={64}
-              height={64}
-              className="rounded-xl w-16 h-16 object-cover"
-            />
-          ) : (
-            <div className="w-16 h-16 rounded-xl bg-white/10" />
-          )}
-          <div>
-            <h1 className="text-2xl font-bold">
-              {coin.name} <span className="text-white/60">({coin.symbol})</span>
-            </h1>
-            <p className="text-white/60 text-sm">
-              Curve: {coin.curve} · Strength: {coin.strength}
-            </p>
-          </div>
-        </div>
-
-        {coin.description && (
-          <p className="text-white/80">{coin.description}</p>
-        )}
-
-        {coin.socials && (
-          <div className="flex flex-wrap gap-3 text-sm">
-            {coin.socials.website && (
-              <a className="underline" href={coin.socials.website} target="_blank" rel="noreferrer">Website</a>
-            )}
-            {coin.socials.x && (
-              <a className="underline" href={coin.socials.x} target="_blank" rel="noreferrer">X</a>
-            )}
-            {coin.socials.telegram && (
-              <a className="underline" href={coin.socials.telegram} target="_blank" rel="noreferrer">Telegram</a>
-            )}
-          </div>
-        )}
-
-        <div className="flex flex-wrap gap-6 text-sm text-white/70">
-          <div>Wallet SOL: <span className="font-mono">{solBal.toFixed(4)}</span></div>
-          <div>Wallet {coin.symbol}: <span className="font-mono">{tokBal.toLocaleString()}</span></div>
-          <div>Mint: <span className="font-mono">{coin.mint ?? '—'}</span></div>
-        </div>
-      </section>
-
-      <section className="grid md:grid-cols-2 gap-6">
-        {/* BUY */}
-        <div className="rounded-2xl border p-6 bg-black/20 grid gap-4">
-          <h3 className="font-semibold text-lg">Buy</h3>
-          <div className="flex items-center gap-2">
-            <input
-              className="px-3 py-2 rounded-lg bg-black/30 border w-40"
-              value={buySol}
-              onChange={(e) => setBuySol(e.target.value)}
-              inputMode="decimal"
-              placeholder="0.05"
-            />
-            <span className="text-white/60">SOL</span>
-          </div>
-          <p className="text-white/70 text-sm">
-            You’ll get ~ <span className="font-mono">{buyTokens.toLocaleString()}</span> {coin.symbol}
-          </p>
-          <button
-            className="px-4 py-2 rounded-lg bg-white text-black font-medium cursor-pointer"
-            onClick={doBuy}
-            disabled={!connected}
-            title={connected ? 'Buy' : 'Connect wallet first'}
-          >
-            Buy
-          </button>
-        </div>
-
-        {/* SELL */}
-        <div className="rounded-2xl border p-6 bg-black/20 grid gap-4">
-          <h3 className="font-semibold text-lg">Sell</h3>
-          <div className="flex items-center gap-2">
-            <input
-              className="px-3 py-2 rounded-lg bg-black/30 border w-40"
-              value={sellSol}
-              onChange={(e) => setSellSol(e.target.value)}
-              inputMode="decimal"
-              placeholder="0.01"
-            />
-            <span className="text-white/60">SOL</span>
-          </div>
-          <p className="text-white/70 text-sm">
-            Will send ~ <span className="font-mono">{sellTokens.toLocaleString()}</span> {coin.symbol}
-          </p>
-          <button
-            className="px-4 py-2 rounded-lg bg-white text-black font-medium cursor-pointer"
-            onClick={doSell}
-            disabled={!connected}
-            title={connected ? 'Sell' : 'Connect wallet first'}
-          >
-            Sell
-          </button>
-        </div>
-      </section>
+    <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto">
+      <p>Loading…</p>
     </main>
   );
 }
 
+if (err || !coin) {
+  return (
+    <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto">
+      <p className="text-red-400">Error: {err || 'Not found'}</p>
+      <Link className="underline" href="/coins">Back to coins</Link>
+    </main>
+  );
+}
+
+return (
+  <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto grid gap-8">
+    <header className="flex items-center justify-between">
+      <Link href="/" className="flex items-center gap-2 font-semibold">
+        <Image src="/logo.svg" alt="logo" width={28} height={28} />
+        <span>Winky Launchpad</span>
+      </Link>
+      <nav className="flex items-center gap-3">
+        <Link className="underline" href="/coins">Coins</Link>
+        <WalletButton />
+      </nav>
+    </header>
+
+    {flash && (
+      <div className="mb-3 rounded-md border px-3 py-2 text-sm panel">
+        {flash}
+      </div>
+    )}
+
+    <section className="grid gap-4 rounded-2xl border p-6 bg-black/20">
+      <div className="flex items-center gap-4">
+        {coin.logoUrl ? (
+          <Image
+            src={coin.logoUrl}
+            alt={coin.name}
+            width={64}
+            height={64}
+            className="rounded-xl w-16 h-16 object-cover"
+          />
+        ) : (
+          <div className="w-16 h-16 rounded-xl bg-white/10" />
+        )}
+        <div>
+          <h1 className="text-2xl font-bold">
+            {coin.name} <span className="text-white/60">({coin.symbol})</span>
+          </h1>
+          <p className="text-white/60 text-sm">
+            Curve: {coin.curve} · Strength: {coin.strength}
+          </p>
+        </div>
+      </div>
+
+      {coin.description && (
+        <p className="text-white/80">{coin.description}</p>
+      )}
+
+      {coin.socials && (
+        <div className="flex flex-wrap gap-3 text-sm">
+          {coin.socials.website && (
+            <a className="underline" href={coin.socials.website} target="_blank" rel="noreferrer">Website</a>
+          )}
+          {coin.socials.x && (
+            <a className="underline" href={coin.socials.x} target="_blank" rel="noreferrer">X</a>
+          )}
+          {coin.socials.telegram && (
+            <a className="underline" href={coin.socials.telegram} target="_blank" rel="noreferrer">Telegram</a>
+          )}
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-6 text-sm text-white/70">
+        <div>
+          Wallet SOL: <span className="font-mono">{solBal.toFixed(4)}</span>
+        </div>
+        <div>
+          Wallet {coin.symbol}:{' '}
+          <span className="font-mono">{tokBal.toLocaleString()}</span>
+        </div>
+        <div>
+          Mint: <span className="font-mono">{coin.mint ?? '—'}</span>
+        </div>
+      </div>
+    </section>
+
+    <section className="grid md:grid-cols-2 gap-6">
+      {/* BUY */}
+      <div className="rounded-2xl border p-6 bg-black/20 grid gap-4">
+        <h3 className="font-semibold text-lg">Buy</h3>
+        <div className="flex items-center gap-2">
+          <input
+            className="px-3 py-2 rounded-lg bg-black/30 border w-40"
+            value={buySol}
+            onChange={(e) => setBuySol(e.target.value)}
+            inputMode="decimal"
+            placeholder="0.05"
+          />
+          <span className="text-white/60">SOL</span>
+        </div>
+        <p className="text-white/70 text-sm">
+          You’ll get ~ <span className="font-mono">{buyTokens.toLocaleString()}</span> {coin.symbol}
+        </p>
+        <button
+          className="px-4 py-2 rounded-lg bg-white text-black font-medium cursor-pointer"
+          onClick={doBuy}
+          disabled={!connected}
+          title={connected ? 'Buy' : 'Connect wallet first'}
+        >
+          Buy
+        </button>
+      </div>
+
+      {/* SELL */}
+      <div className="rounded-2xl border p-6 bg-black/20 grid gap-4">
+        <h3 className="font-semibold text-lg">Sell</h3>
+        <div className="flex items-center gap-2">
+          <input
+            className="px-3 py-2 rounded-lg bg-black/30 border w-40"
+            value={sellSol}
+            onChange={(e) => setSellSol(e.target.value)}
+            inputMode="decimal"
+            placeholder="0.01"
+          />
+          <span className="text-white/60">SOL</span>
+        </div>
+        <p className="text-white/70 text-sm">
+          Will send ~ <span className="font-mono">{sellTokens.toLocaleString()}</span> {coin.symbol}
+        </p>
+        <button
+          className="px-4 py-2 rounded-lg bg-white text-black font-medium cursor-pointer"
+          onClick={doSell}
+          disabled={!connected}
+          title={connected ? 'Sell' : 'Connect wallet first'}
+        >
+          Sell
+        </button>
+      </div>
+    </section>
+  </main>
+);
+
+}
