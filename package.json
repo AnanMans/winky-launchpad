@@ -15,7 +15,7 @@
   "packageManager": "npm@10.7.0",
   "dependencies": {
     "@metaplex-foundation/js": "0.19.5",
-    "@metaplex-foundation/mpl-token-metadata": "^3.4.0",
+"@metaplex-foundation/mpl-token-metadata": "^3.4.0",
     "@metaplex-foundation/umi": "^1.4.1",
     "@metaplex-foundation/umi-bundle-defaults": "^1.4.1",
     "@radix-ui/react-dialog": "^1.1.15",
