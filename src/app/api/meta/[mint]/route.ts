@@ -1,5 +1,4 @@
 export const runtime = 'nodejs';
-
 import { NextRequest, NextResponse } from 'next/server';
 import {
   Connection,
@@ -40,38 +39,54 @@ function baseUrlFrom(req: NextRequest): string {
   return xfHost.startsWith('http') ? xfHost : `${xfProto}://${xfHost}`;
 }
 
-/**
- * Dynamically load `createCreateMetadataAccountV3Instruction` from mpl-token-metadata v2.x.
- * Different installs expose slightly different deep paths, so we try a few.
- */
+// Dynamically load the v3 instruction across different package layouts (v2/v3)
 async function loadCreateV3(): Promise<
   (accounts: any, args: any) => import('@solana/web3.js').TransactionInstruction
 > {
   const candidates = [
-    // most common in 2.x
+    // v3.x common
     '@metaplex-foundation/mpl-token-metadata/dist/generated/instructions/createMetadataAccountV3',
-    '@metaplex-foundation/mpl-token-metadata/dist/src/generated/instructions/createMetadataAccountV3',
-    // some builds require explicit .js
     '@metaplex-foundation/mpl-token-metadata/dist/generated/instructions/createMetadataAccountV3.js',
+
+    // some builds still keep a "src" folder in dist
+    '@metaplex-foundation/mpl-token-metadata/dist/src/generated/instructions/createMetadataAccountV3',
     '@metaplex-foundation/mpl-token-metadata/dist/src/generated/instructions/createMetadataAccountV3.js',
+
+    // occasionally "lib" is present in certain bundlings
+    '@metaplex-foundation/mpl-token-metadata/lib/generated/instructions/createMetadataAccountV3',
+    '@metaplex-foundation/mpl-token-metadata/lib/generated/instructions/createMetadataAccountV3.js',
+
+    // last resort: try package root (works for some v2/v3 builds)
+    '@metaplex-foundation/mpl-token-metadata',
   ];
 
   for (const p of candidates) {
     try {
       // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore dynamic deep import
+      // @ts-ignore - deep dynamic import, path varies by version
       const mod: any = await import(p);
-      if (mod?.createCreateMetadataAccountV3Instruction) {
-        return mod.createCreateMetadataAccountV3Instruction as any;
-      }
+      const fn =
+        mod?.createCreateMetadataAccountV3Instruction ||
+        mod?.createMetadataAccountV3Instruction || // rare alt name
+        mod?.createMetadataAccountV3 ||            // very rare alt
+        null;
+
+      if (fn) return fn as any;
     } catch {
       // try next
     }
   }
+
   throw new Error(
-    'Could not load createMetadataAccountV3 from mpl-token-metadata v2.x. (We will still serve JSON at /api/metadata/[mint].json.)'
+    'Could not locate createMetadataAccountV3 instruction in @metaplex-foundation/mpl-token-metadata. ' +
+    'Check installed version and try again.'
   );
 }
+
+/**
+ * Dynamically load `createCreateMetadataAccountV3Instruction` from mpl-token-metadata v2.x.
+ * Different installs expose slightly different deep paths, so we try a few.
+ */
 
 // --------------------------------------
 // POST /api/meta/[mint]  -> creates on-chain metadata account (v3) for your fungible token
@@ -141,37 +156,36 @@ const [metadataPda] = PublicKey.findProgramAddressSync(
   TMETA_PID
 );
 
-    // 5) Load v3 instruction
-    const createV3 = await loadCreateV3();
+// 5) Load v3 instruction
+const createV3 = await loadCreateV3();   // <-- ADD THIS LINE
 
-    // 6) Build instruction (TokenStandard = 0 -> Fungible)
-    const accounts = {
-      metadata: metadataPda,
-      mint: mintPk,
-      mintAuthority: payer.publicKey,
-      payer: payer.publicKey,
-      updateAuthority: payer.publicKey,
-      systemProgram: SystemProgram.programId,
-      // Rent is optional in modern runtimes; including it is harmless.
-      rent: new PublicKey('SysvarRent111111111111111111111111111111111'),
-    };
+// 6) Build instruction (TokenStandard = 0 -> Fungible)
+const accounts = {
+  metadata: metadataPda,
+  mint: mintPk,
+  mintAuthority: payer.publicKey,
+  payer: payer.publicKey,
+  updateAuthority: payer.publicKey,
+  systemProgram: SystemProgram.programId,
+  rent: new PublicKey('SysvarRent111111111111111111111111111111111'),
+};
 
-    const args = {
-      createMetadataAccountArgsV3: {
-        data: {
-          name,
-          symbol,
-          uri,
-          sellerFeeBasisPoints: 0, // no royalties for fungible tokens
-          creators: null,
-          collection: null,
-          uses: null,
-        },
-        isMutable: true,
-        collectionDetails: null,
-        tokenStandard: 0, // Fungible
-      },
-    };
+const args = {
+  createMetadataAccountArgsV3: {
+    data: {
+      name,
+      symbol,
+      uri,
+      sellerFeeBasisPoints: 0,
+      creators: null,
+      collection: null,
+      uses: null,
+    },
+    isMutable: true,
+    collectionDetails: null,
+    tokenStandard: 0,
+  },
+};
 
     const ix = createV3(accounts, args);
 
