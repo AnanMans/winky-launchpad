@@ -14,6 +14,9 @@ import {
   ComputeBudgetProgram,
 } from '@solana/web3.js';
 
+
+
+
 import {
   getMint,
   getAssociatedTokenAddressSync,
@@ -58,7 +61,8 @@ export async function POST(
     // --- Load coin, must have a mint now ---
     const { data: coin, error: coinErr } = await supabaseAdmin
       .from('coins')
-      .select('mint, curve, strength, start_price, creator, fee_bps, creator_fee_bps, migrated')
+.select('mint, curve, strength, start_price, creator, fee_bps, creator_fee_bps')
+
       .eq('id', id)
       .single();
 
@@ -66,7 +70,9 @@ export async function POST(
     if (!coin?.mint) return bad('Coin mint not set yet', 400);
 
     const curve = ((coin.curve || 'linear') as string).toLowerCase() as CurveName;
-
+// Fee phase (fallback to 'pre' while there's no DB column)
+const migrated = (coin as any)?.migrated === true;
+const phase: Phase = migrated ? 'post' : 'pre';
     // --- Connection & server signer (for SOL payout & maybe ATA rent) ---
     const rpc =
       process.env.NEXT_PUBLIC_HELIUS_RPC ||
@@ -164,7 +170,6 @@ export async function POST(
     });
 
     // ---------------- Fees (seller pays) ----------------
-    const phase: Phase = coin.migrated ? 'post' : 'pre';
 
     // creator address (optional)
     let creatorAddr: PublicKey | null = null;

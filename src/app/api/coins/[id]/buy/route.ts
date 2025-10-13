@@ -16,6 +16,7 @@ import {
   sendAndConfirmTransaction,
 } from '@solana/web3.js';
 
+
 import {
   getMint,
   createMintToInstruction,
@@ -66,10 +67,15 @@ export async function POST(
     // --- Load coin row (now includes fee fields) ---
     const { data: coin, error: coinErr } = await supabase
       .from('coins')
-      .select('mint, curve, strength, start_price, creator, fee_bps, creator_fee_bps, migrated')
+.select('mint, curve, strength, start_price, creator, fee_bps, creator_fee_bps')
       .eq('id', id)
       .single();
     if (coinErr || !coin) return bad('Coin not found', 404);
+
+// Phase for fees (no 'migrated' column yet → default 'pre')
+const migrated = (coin as any)?.migrated === true;
+const phase: Phase = migrated ? 'post' : 'pre';
+
 
     // --- Ensure mint exists (fallback create) ---
     let mintPk: PublicKey;
@@ -181,7 +187,6 @@ export async function POST(
     }
 
     // ---------------- Fees ----------------
-    const phase: Phase = coin.migrated ? 'post' : 'pre';
 
     // Derive creator + per-coin overrides
     let creatorAddr: PublicKey | null = null;
