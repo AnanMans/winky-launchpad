@@ -1,7 +1,10 @@
 export const runtime = 'nodejs';
 
-import { buildFeeTransfers } from '@/lib/fees';
 import { NextRequest, NextResponse } from 'next/server';
+import { supabase, supabaseAdmin } from '@/lib/db';
+import { quoteTokensUi } from '@/lib/curve';
+import { buildFeeTransfers, type Phase } from '@/lib/fees';
+
 import {
   Connection,
   PublicKey,
@@ -10,8 +13,9 @@ import {
   Transaction,
   SystemProgram,
   ComputeBudgetProgram,
-  sendAndConfirmTransaction, // for ATA fallback only
+  sendAndConfirmTransaction,
 } from '@solana/web3.js';
+
 import {
   getMint,
   createMintToInstruction,
@@ -22,8 +26,6 @@ import {
   TOKEN_2022_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
 } from '@solana/spl-token';
-import { supabase, supabaseAdmin } from '@/lib/db';
-import { quoteTokensUi } from '@/lib/curve';
 
 function bad(msg: string, code = 400) {
   return NextResponse.json({ error: msg }, { status: code });
@@ -55,16 +57,16 @@ export async function POST(
       'https://api.devnet.solana.com';
     const conn = new Connection(rpc, 'confirmed');
 
-    const treasuryStr = process.env.NEXT_PUBLIC_TREASURY;
-    if (!treasuryStr) return bad('Server missing NEXT_PUBLIC_TREASURY', 500);
+    const platformTreasuryStr = process.env.NEXT_PUBLIC_TREASURY;
+    if (!platformTreasuryStr) return bad('Server missing NEXT_PUBLIC_TREASURY', 500);
 
     const buyer = new PublicKey(buyerStr);
-    const treasury = new PublicKey(treasuryStr);
+    const platformTreasury = new PublicKey(platformTreasuryStr);
 
-    // --- Load coin row (pull creator if you store it) ---
+    // --- Load coin row (now includes fee fields) ---
     const { data: coin, error: coinErr } = await supabase
       .from('coins')
-      .select('mint, curve, strength, start_price, creator')
+      .select('mint, curve, strength, start_price, creator, fee_bps, creator_fee_bps, migrated')
       .eq('id', id)
       .single();
     if (coinErr || !coin) return bad('Coin not found', 404);
@@ -115,7 +117,7 @@ export async function POST(
     const mintInfo = await getMint(conn, mintPk, 'confirmed', TOKEN_PID);
     const decimals = mintInfo.decimals;
 
-    // ---- Best-effort finalize metadata in the background (no blocking) ----
+    // ---- Best-effort finalize metadata in background (non-blocking) ----
     const siteBase =
       process.env.SITE_BASE ||
       (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
@@ -123,12 +125,10 @@ export async function POST(
     (async () => {
       try {
         await fetch(`${siteBase}/api/finalize/${mintPk.toBase58()}`, { method: 'POST' });
-      } catch {
-        /* ignore */
-      }
+      } catch { /* ignore */ }
     })();
 
-    // --- Quote tokens ---
+    // --- Quote how many tokens to mint for this SOL size ---
     const tokensUi = quoteTokensUi(
       amountSol,
       (coin.curve || 'linear') as 'linear' | 'degen' | 'random',
@@ -152,7 +152,7 @@ export async function POST(
     try {
       await getOrCreateAssociatedTokenAccount(
         conn,
-        mintAuthority, // payer for ATA creation (server)
+        mintAuthority, // server pays ATA rent
         mintPk,
         buyer,
         false,
@@ -162,7 +162,7 @@ export async function POST(
         ASSOCIATED_TOKEN_PROGRAM_ID
       );
     } catch {
-      // fallback ATA create/broadcast
+      // Idempotent create with proper confirm
       const ix = createAssociatedTokenAccountIdempotentInstruction(
         mintAuthority.publicKey,
         ataAddr,
@@ -180,9 +180,38 @@ export async function POST(
       });
     }
 
-    // --- Build mint-to (buyer pays fees + network fee) ---
-    const mintAmount = uiToAmount(tokensUi, decimals);
+    // ---------------- Fees ----------------
+    const phase: Phase = coin.migrated ? 'post' : 'pre';
 
+    // Derive creator + per-coin overrides
+    let creatorAddr: PublicKey | null = null;
+    if (coin?.creator) {
+      try { creatorAddr = new PublicKey(coin.creator); } catch { /* ignore */ }
+    }
+
+    let overrides: { totalBps?: number; creatorBps?: number } | null = null;
+    if (Number.isFinite(coin?.fee_bps) || Number.isFinite(coin?.creator_fee_bps)) {
+      overrides = {};
+      if (Number.isFinite(coin?.fee_bps)) overrides.totalBps = Number(coin!.fee_bps);
+      if (Number.isFinite(coin?.creator_fee_bps)) overrides.creatorBps = Number(coin!.creator_fee_bps);
+    }
+
+    // Fee treasury
+    const feeTreasuryStr =
+      process.env.NEXT_PUBLIC_FEE_TREASURY || process.env.NEXT_PUBLIC_TREASURY!;
+    if (!feeTreasuryStr) return bad('Missing NEXT_PUBLIC_FEE_TREASURY or NEXT_PUBLIC_TREASURY', 500);
+    const feeTreasury = new PublicKey(feeTreasuryStr);
+
+    // Build fee transfers (buyer pays)
+const { ixs: feeIxs, detail: feeDetail } = buildFeeTransfers({
+  feePayer: buyer,
+  tradeSol: amountSol,
+  phase,
+  protocolTreasury: feeTreasury,
+  creatorAddress: creatorAddr ?? null,
+});
+
+    // ---------------- Build mint-to + transfers in ONE tx ----------------
     const priority = process.env.PRIORITY_FEES === 'true';
     const cuIxs = priority
       ? [
@@ -195,26 +224,11 @@ export async function POST(
         ]
       : [];
 
-    // 1) buyer -> treasury SOL payment (in same tx)
-    const transferIx = SystemProgram.transfer({
+    // (optional) buyer → platform SOL transfer (e.g., pool intake); keep if you use it
+    const intakeIx = SystemProgram.transfer({
       fromPubkey: buyer,
-      toPubkey: treasury,
+      toPubkey: platformTreasury,
       lamports: Math.floor(amountSol * LAMPORTS_PER_SOL),
-    });
-
-    // 2) fee transfers (protocol + optional creator)
-    const feeTreasuryStr =
-      process.env.NEXT_PUBLIC_FEE_TREASURY || process.env.NEXT_PUBLIC_TREASURY;
-    if (!feeTreasuryStr) return bad('Missing NEXT_PUBLIC_FEE_TREASURY or NEXT_PUBLIC_TREASURY', 500);
-    const feeTreasury = new PublicKey(feeTreasuryStr);
-    const creatorAddr = coin.creator ? new PublicKey(coin.creator) : null; // optional
-
-    const { ixs: feeIxs, detail: feeDetail } = buildFeeTransfers({
-      feePayer: buyer,               // buyer pays these fees
-      tradeSol: amountSol,           // tiers use trade size
-      phase: 'pre',                  // until you wire migration flag
-      protocolTreasury: feeTreasury,
-      creatorAddress: creatorAddr,
     });
 
     // 3) mint to buyer ATA (server is mint authority)
@@ -222,27 +236,25 @@ export async function POST(
       mintPk,
       ataAddr,
       mintAuthority.publicKey,
-      mintAmount,
+      uiToAmount(tokensUi, decimals),
       [],
       TOKEN_PID
     );
 
     const latest = await conn.getLatestBlockhash('confirmed');
-
     const tx = new Transaction({
-      feePayer: buyer, // buyer pays the network fee
+      feePayer: buyer, // buyer pays network fee
       recentBlockhash: latest.blockhash,
     }).add(
       ...cuIxs,
-      transferIx,   // purchase funds
-      ...feeIxs,    // platform/creator fees
-      mintIx        // token mint
+      intakeIx,     // optional intake
+      ...feeIxs,    // protocol/creator fees
+      mintIx        // mint tokens to buyer
     );
 
-    // server partially signs (as mint authority only)
+    // server partial sign for mint authority
     tx.partialSign(mintAuthority);
 
-    // send back to client to co-sign + send
     const b64 = Buffer.from(
       tx.serialize({ requireAllSignatures: false })
     ).toString('base64');
@@ -250,10 +262,10 @@ export async function POST(
     return NextResponse.json({
       ok: true,
       tokensUi,
-      minted: mintAmount.toString(),
+      minted: uiToAmount(tokensUi, decimals).toString(),
       ata: ataAddr.toBase58(),
       txB64: b64,
-      feeDetail, // helps you verify caps/tiers in Network preview
+      feeDetail, // handy for debugging in DevTools
     });
   } catch (e: any) {
     console.error('[BUY] error:', e);
