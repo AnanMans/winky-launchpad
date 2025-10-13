@@ -1,5 +1,6 @@
 export const runtime = 'nodejs';
 
+import { buildFeeTransfers } from '@/lib/fees';
 import { NextRequest, NextResponse } from 'next/server';
 import {
   Connection,
@@ -7,9 +8,9 @@ import {
   Keypair,
   LAMPORTS_PER_SOL,
   Transaction,
-SystemProgram,  
+  SystemProgram,
   ComputeBudgetProgram,
-  sendAndConfirmTransaction, // CHANGE: use proper confirm path for ATA fallback
+  sendAndConfirmTransaction, // for ATA fallback only
 } from '@solana/web3.js';
 import {
   getMint,
@@ -60,14 +61,13 @@ export async function POST(
     const buyer = new PublicKey(buyerStr);
     const treasury = new PublicKey(treasuryStr);
 
-    // --- Load coin row ---
+    // --- Load coin row (pull creator if you store it) ---
     const { data: coin, error: coinErr } = await supabase
       .from('coins')
-      .select('mint, curve, strength, start_price')
+      .select('mint, curve, strength, start_price, creator')
       .eq('id', id)
       .single();
     if (coinErr || !coin) return bad('Coin not found', 404);
-
 
     // --- Ensure mint exists (fallback create) ---
     let mintPk: PublicKey;
@@ -115,19 +115,18 @@ export async function POST(
     const mintInfo = await getMint(conn, mintPk, 'confirmed', TOKEN_PID);
     const decimals = mintInfo.decimals;
 
-// ---- Best-effort finalize metadata in the background (no blocking) ----
-const siteBase =
-  process.env.SITE_BASE ||
-  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
+    // ---- Best-effort finalize metadata in the background (no blocking) ----
+    const siteBase =
+      process.env.SITE_BASE ||
+      (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
 
-(async () => {
-  try {
-    await fetch(`${siteBase}/api/finalize/${mintPk.toBase58()}`, { method: 'POST' });
-  } catch (_) {
-    // ignore — wallets may still pick it up on next try, and user can re-finalize later
-  }
-})();
-
+    (async () => {
+      try {
+        await fetch(`${siteBase}/api/finalize/${mintPk.toBase58()}`, { method: 'POST' });
+      } catch {
+        /* ignore */
+      }
+    })();
 
     // --- Quote tokens ---
     const tokensUi = quoteTokensUi(
@@ -163,7 +162,7 @@ const siteBase =
         ASSOCIATED_TOKEN_PROGRAM_ID
       );
     } catch {
-      // CHANGE: proper confirm path
+      // fallback ATA create/broadcast
       const ix = createAssociatedTokenAccountIdempotentInstruction(
         mintAuthority.publicKey,
         ataAddr,
@@ -180,62 +179,82 @@ const siteBase =
         commitment: 'confirmed',
       });
     }
-// --- Build mint-to (buyer pays fees) ---
-const mintAmount = uiToAmount(tokensUi, decimals);
 
-const priority = process.env.PRIORITY_FEES === 'true';
-const cuIxs = priority
-  ? [
-      ComputeBudgetProgram.setComputeUnitPrice({
-        microLamports: Number(process.env.PRIORITY_MICROLAMPORTS ?? 2000),
-      }),
-      ComputeBudgetProgram.setComputeUnitLimit({
-        units: Number(process.env.COMPUTE_UNIT_LIMIT ?? 200000),
-      }),
-    ]
-  : [];
+    // --- Build mint-to (buyer pays fees + network fee) ---
+    const mintAmount = uiToAmount(tokensUi, decimals);
 
-// 1) buyer -> treasury SOL transfer (inside SAME tx)
-const transferIx = SystemProgram.transfer({
-  fromPubkey: buyer,
-  toPubkey: treasury,
-  lamports: Math.floor(amountSol * LAMPORTS_PER_SOL),
-});
+    const priority = process.env.PRIORITY_FEES === 'true';
+    const cuIxs = priority
+      ? [
+          ComputeBudgetProgram.setComputeUnitPrice({
+            microLamports: Number(process.env.PRIORITY_MICROLAMPORTS ?? 2000),
+          }),
+          ComputeBudgetProgram.setComputeUnitLimit({
+            units: Number(process.env.COMPUTE_UNIT_LIMIT ?? 200000),
+          }),
+        ]
+      : [];
 
-// 2) mint to buyer ATA (server is mint authority)
-const mintIx = createMintToInstruction(
-  mintPk,
-  ataAddr,
-  mintAuthority.publicKey,
-  mintAmount,
-  [],
-  TOKEN_PID
-);
+    // 1) buyer -> treasury SOL payment (in same tx)
+    const transferIx = SystemProgram.transfer({
+      fromPubkey: buyer,
+      toPubkey: treasury,
+      lamports: Math.floor(amountSol * LAMPORTS_PER_SOL),
+    });
 
-const latest = await conn.getLatestBlockhash('confirmed');
+    // 2) fee transfers (protocol + optional creator)
+    const feeTreasuryStr =
+      process.env.NEXT_PUBLIC_FEE_TREASURY || process.env.NEXT_PUBLIC_TREASURY;
+    if (!feeTreasuryStr) return bad('Missing NEXT_PUBLIC_FEE_TREASURY or NEXT_PUBLIC_TREASURY', 500);
+    const feeTreasury = new PublicKey(feeTreasuryStr);
+    const creatorAddr = coin.creator ? new PublicKey(coin.creator) : null; // optional
 
-// IMPORTANT: transferIx **before** mintIx
-const tx = new Transaction({
-  feePayer: buyer,                         // buyer pays network fee
-  recentBlockhash: latest.blockhash,
-}).add(...cuIxs, transferIx, mintIx);
+    const { ixs: feeIxs, detail: feeDetail } = buildFeeTransfers({
+      feePayer: buyer,               // buyer pays these fees
+      tradeSol: amountSol,           // tiers use trade size
+      phase: 'pre',                  // until you wire migration flag
+      protocolTreasury: feeTreasury,
+      creatorAddress: creatorAddr,
+    });
 
-// server partially signs (as mint authority only)
-tx.partialSign(mintAuthority);
+    // 3) mint to buyer ATA (server is mint authority)
+    const mintIx = createMintToInstruction(
+      mintPk,
+      ataAddr,
+      mintAuthority.publicKey,
+      mintAmount,
+      [],
+      TOKEN_PID
+    );
 
-// send back to client to sign+send
-const b64 = Buffer.from(
-  tx.serialize({ requireAllSignatures: false })
-).toString('base64');
+    const latest = await conn.getLatestBlockhash('confirmed');
 
-return NextResponse.json({
-  ok: true,
-  tokensUi,
-  minted: mintAmount.toString(),
-  ata: ataAddr.toBase58(),
-  txB64: b64,   // primary key the UI reads
-});
+    const tx = new Transaction({
+      feePayer: buyer, // buyer pays the network fee
+      recentBlockhash: latest.blockhash,
+    }).add(
+      ...cuIxs,
+      transferIx,   // purchase funds
+      ...feeIxs,    // platform/creator fees
+      mintIx        // token mint
+    );
 
+    // server partially signs (as mint authority only)
+    tx.partialSign(mintAuthority);
+
+    // send back to client to co-sign + send
+    const b64 = Buffer.from(
+      tx.serialize({ requireAllSignatures: false })
+    ).toString('base64');
+
+    return NextResponse.json({
+      ok: true,
+      tokensUi,
+      minted: mintAmount.toString(),
+      ata: ataAddr.toBase58(),
+      txB64: b64,
+      feeDetail, // helps you verify caps/tiers in Network preview
+    });
   } catch (e: any) {
     console.error('[BUY] error:', e);
     return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
