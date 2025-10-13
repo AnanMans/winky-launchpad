@@ -213,54 +213,57 @@ setTimeout(() => refreshBalances(), 1500);
     }
   }
 
-  async function doSell() {
-    if (!publicKey) {
-      alert('Connect your wallet first.');
-      return;
-    }
-    if (!coin) {
-      alert('Coin not loaded yet.');
-      return;
-    }
-    const amt = Number(sellSol);
-    if (!Number.isFinite(amt) || amt <= 0) {
-      alert('Enter a valid SOL amount to sell.');
-      return;
-    }
-
-    try {
-      // Ask server for a pre-built tx (seller is fee-payer)
-      const res = await fetch(`/api/coins/${id}/sell`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          seller: publicKey.toBase58(),
-          amountSol: amt,
-        }),
-      });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(j?.error || 'Server sell failed');
-
-      const b64 = j.tx as string;
-      const raw = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-
-      let tx: Transaction | VersionedTransaction;
-      try {
-        tx = VersionedTransaction.deserialize(raw);
-      } catch {
-        tx = Transaction.from(raw);
-      }
-
-      const sig = await sendTransaction(tx, connection, { skipPreflight: true });
-setFlash('Sell submitted.');
-setTimeout(() => setFlash(null), 3000);
-
-      setTimeout(() => refreshBalances(), 1500);
-    } catch (e: any) {
-      console.error('sell error:', e);
-      alert(`Sell failed: ${e?.message || String(e)}`);
-    }
+async function doSell() {
+  if (!publicKey) {
+    alert('Connect your wallet first.');
+    return;
   }
+  if (!coin) {
+    alert('Coin not loaded yet.');
+    return;
+  }
+  const amt = Number(sellSol);
+  if (!Number.isFinite(amt) || amt <= 0) {
+    alert('Enter a valid SOL amount to sell.');
+    return;
+  }
+
+  try {
+    // 1) Ask server to prepare the full sell tx (it returns base64-encoded binary)
+    const res = await fetch(`/api/coins/${id}/sell`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        seller: publicKey.toBase58(),
+        amountSol: amt,
+      }),
+    });
+
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(j?.error || 'Server sell failed');
+
+    if (!j.txB64 || typeof j.txB64 !== 'string') {
+      throw new Error('Server sell failed: no txB64');
+    }
+
+    // 2) Deserialize (try versioned first, fallback to legacy)
+    const raw = Uint8Array.from(atob(j.txB64), (c) => c.charCodeAt(0));
+    let tx: Transaction | VersionedTransaction;
+    try {
+      tx = VersionedTransaction.deserialize(raw);
+    } catch {
+      tx = Transaction.from(raw);
+    }
+
+    // 3) Wallet signs + sends; wait for confirmation
+    const sig = await sendTransaction(tx, connection, { skipPreflight: true });
+    await connection.confirmTransaction(sig, 'confirmed');
+    alert(`Sell submitted: ${sig}`);
+  } catch (e: any) {
+    console.error('sell error', e);
+    alert(`Sell failed: ${e?.message || String(e)}`);
+  }
+}
 
 // ---------- render ----------
 if (loading) {
