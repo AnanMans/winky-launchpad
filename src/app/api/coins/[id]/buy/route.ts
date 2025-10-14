@@ -16,7 +16,6 @@ import {
   sendAndConfirmTransaction,
 } from '@solana/web3.js';
 
-
 import {
   getMint,
   createMintToInstruction,
@@ -64,18 +63,19 @@ export async function POST(
     const buyer = new PublicKey(buyerStr);
     const platformTreasury = new PublicKey(platformTreasuryStr);
 
-    // --- Load coin row (now includes fee fields) ---
+    // --- Load coin row (include migrated so we can choose fee phase) ---
     const { data: coin, error: coinErr } = await supabase
       .from('coins')
-.select('mint, curve, strength, start_price, creator, fee_bps, creator_fee_bps')
+      .select(
+        'mint, curve, strength, start_price, creator, fee_bps, creator_fee_bps, migrated'
+      )
       .eq('id', id)
       .single();
     if (coinErr || !coin) return bad('Coin not found', 404);
 
-// Phase for fees (no 'migrated' column yet → default 'pre')
-const migrated = (coin as any)?.migrated === true;
-const phase: Phase = migrated ? 'post' : 'pre';
-
+    // Fee phase (fallback to pre if column missing/falsey)
+    const migrated = (coin as any)?.migrated === true;
+    const phase: Phase = migrated ? 'post' : 'pre';
 
     // --- Ensure mint exists (fallback create) ---
     let mintPk: PublicKey;
@@ -131,7 +131,9 @@ const phase: Phase = migrated ? 'post' : 'pre';
     (async () => {
       try {
         await fetch(`${siteBase}/api/finalize/${mintPk.toBase58()}`, { method: 'POST' });
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     })();
 
     // --- Quote how many tokens to mint for this SOL size ---
@@ -186,35 +188,33 @@ const phase: Phase = migrated ? 'post' : 'pre';
       });
     }
 
-    // ---------------- Fees ----------------
-
-    // Derive creator + per-coin overrides
+    // ---------------- Fees (buyer pays) ----------------
+    // Optional creator routing
     let creatorAddr: PublicKey | null = null;
     if (coin?.creator) {
-      try { creatorAddr = new PublicKey(coin.creator); } catch { /* ignore */ }
-    }
-
-    let overrides: { totalBps?: number; creatorBps?: number } | null = null;
-    if (Number.isFinite(coin?.fee_bps) || Number.isFinite(coin?.creator_fee_bps)) {
-      overrides = {};
-      if (Number.isFinite(coin?.fee_bps)) overrides.totalBps = Number(coin!.fee_bps);
-      if (Number.isFinite(coin?.creator_fee_bps)) overrides.creatorBps = Number(coin!.creator_fee_bps);
+      try {
+        creatorAddr = new PublicKey(coin.creator);
+      } catch {
+        /* ignore bad creator key */
+      }
     }
 
     // Fee treasury
     const feeTreasuryStr =
       process.env.NEXT_PUBLIC_FEE_TREASURY || process.env.NEXT_PUBLIC_TREASURY!;
-    if (!feeTreasuryStr) return bad('Missing NEXT_PUBLIC_FEE_TREASURY or NEXT_PUBLIC_TREASURY', 500);
+    if (!feeTreasuryStr) {
+      return bad('Missing NEXT_PUBLIC_FEE_TREASURY or NEXT_PUBLIC_TREASURY', 500);
+    }
     const feeTreasury = new PublicKey(feeTreasuryStr);
 
-    // Build fee transfers (buyer pays)
-const { ixs: feeIxs, detail: feeDetail } = buildFeeTransfers({
-  feePayer: buyer,
-  tradeSol: amountSol,
-  phase,
-  protocolTreasury: feeTreasury,
-  creatorAddress: creatorAddr ?? null,
-});
+    // Build fee transfers (buyer pays). Your buildFeeTransfers takes ONE argument.
+    const { ixs: feeIxs /*, detail: feeDetail */ } = buildFeeTransfers({
+      feePayer: buyer,
+      tradeSol: amountSol,
+      phase,
+      protocolTreasury: feeTreasury,
+      creatorAddress: creatorAddr ?? null,
+    });
 
     // ---------------- Build mint-to + transfers in ONE tx ----------------
     const priority = process.env.PRIORITY_FEES === 'true';
@@ -229,14 +229,14 @@ const { ixs: feeIxs, detail: feeDetail } = buildFeeTransfers({
         ]
       : [];
 
-    // (optional) buyer → platform SOL transfer (e.g., pool intake); keep if you use it
+    // SOL intake to platform (bonding-curve treasury)
     const intakeIx = SystemProgram.transfer({
       fromPubkey: buyer,
       toPubkey: platformTreasury,
       lamports: Math.floor(amountSol * LAMPORTS_PER_SOL),
     });
 
-    // 3) mint to buyer ATA (server is mint authority)
+    // Mint to buyer ATA (server is mint authority)
     const mintIx = createMintToInstruction(
       mintPk,
       ataAddr,
@@ -252,17 +252,15 @@ const { ixs: feeIxs, detail: feeDetail } = buildFeeTransfers({
       recentBlockhash: latest.blockhash,
     }).add(
       ...cuIxs,
-      intakeIx,     // optional intake
-      ...feeIxs,    // protocol/creator fees
-      mintIx        // mint tokens to buyer
+      intakeIx,   // buyer -> platform treasury (pool intake)
+      ...feeIxs,  // buyer -> protocol/creator fees
+      mintIx      // mint tokens to buyer
     );
 
-    // server partial sign for mint authority
+    // server partial sign for mint authority only
     tx.partialSign(mintAuthority);
 
-    const b64 = Buffer.from(
-      tx.serialize({ requireAllSignatures: false })
-    ).toString('base64');
+    const b64 = Buffer.from(tx.serialize({ requireAllSignatures: false })).toString('base64');
 
     return NextResponse.json({
       ok: true,
@@ -270,7 +268,7 @@ const { ixs: feeIxs, detail: feeDetail } = buildFeeTransfers({
       minted: uiToAmount(tokensUi, decimals).toString(),
       ata: ataAddr.toBase58(),
       txB64: b64,
-      feeDetail, // handy for debugging in DevTools
+      // feeDetail, // you can include this if you want to inspect in DevTools
     });
   } catch (e: any) {
     console.error('[BUY] error:', e);
