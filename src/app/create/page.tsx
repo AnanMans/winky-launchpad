@@ -30,7 +30,7 @@ function SimpleUploader({
   const [fileName, setFileName] = useState<string | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-
+const { publicKey, connected } = useWallet();
   async function handlePick(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     if (!f) return;
@@ -168,6 +168,7 @@ export default function CreatePage() {
           socials: { website, x: xUrl, telegram: tg },
           curve,
           strength,
+ creatorAddress: publicKey?.toBase58() || null,
 creator: publicKey?.toBase58() || null,
 creatorFeeBps: 30, 
         }),
