@@ -12,10 +12,8 @@ import {
   Transaction,
   Keypair,
   ComputeBudgetProgram,
+  LAMPORTS_PER_SOL,
 } from '@solana/web3.js';
-
-
-
 
 import {
   getMint,
@@ -58,11 +56,12 @@ export async function POST(
       return bad('Invalid seller');
     }
 
-    // --- Load coin, must have a mint now ---
+    // --- Load coin (must have a mint) ---
     const { data: coin, error: coinErr } = await supabaseAdmin
       .from('coins')
-.select('mint, curve, strength, start_price, creator, fee_bps, creator_fee_bps')
-
+      .select(
+        'mint, curve, strength, start_price, creator, fee_bps, creator_fee_bps, migrated'
+      )
       .eq('id', id)
       .single();
 
@@ -70,9 +69,7 @@ export async function POST(
     if (!coin?.mint) return bad('Coin mint not set yet', 400);
 
     const curve = ((coin.curve || 'linear') as string).toLowerCase() as CurveName;
-// Fee phase (fallback to 'pre' while there's no DB column)
-const migrated = (coin as any)?.migrated === true;
-const phase: Phase = migrated ? 'post' : 'pre';
+
     // --- Connection & server signer (for SOL payout & maybe ATA rent) ---
     const rpc =
       process.env.NEXT_PUBLIC_HELIUS_RPC ||
@@ -95,6 +92,33 @@ const phase: Phase = migrated ? 'post' : 'pre';
 
     const mintInfo = await getMint(conn, mint, 'confirmed', TOKEN_PID);
     const decimals = mintInfo.decimals;
+
+    // ---------------- Fees (seller pays) ----------------
+    const migrated = (coin as any)?.migrated === true;
+    const phase: Phase = migrated ? 'post' : 'pre';
+
+    // Optional creator routing
+    let creatorAddr: PublicKey | null = null;
+    if (coin?.creator) {
+      try { creatorAddr = new PublicKey(coin.creator); } catch { /* ignore bad key */ }
+    }
+
+    // Protocol fee treasury
+    const feeTreasuryStr =
+      process.env.NEXT_PUBLIC_FEE_TREASURY || process.env.NEXT_PUBLIC_TREASURY!;
+    if (!feeTreasuryStr) {
+      return bad('Missing NEXT_PUBLIC_FEE_TREASURY or NEXT_PUBLIC_TREASURY', 500);
+    }
+    const feeTreasury = new PublicKey(feeTreasuryStr);
+
+    // Build fee transfers (seller pays). Your helper takes ONE object arg.
+    const { ixs: feeIxs /*, detail: feeDetail */ } = buildFeeTransfers({
+      feePayer: seller,
+      tradeSol: amountSol,
+      phase,
+      protocolTreasury: feeTreasury,
+      creatorAddress: creatorAddr,
+    });
 
     // --- Derive ATAs (seller & vault) using same token program ---
     const vaultOwner = (() => {
@@ -120,7 +144,7 @@ const phase: Phase = migrated ? 'post' : 'pre';
       TOKEN_PID
     );
 
-    // --- Ensure ATAs exist (idempotent)
+    // --- Ensure ATAs exist (idempotent) ---
     const ixEnsureVaultAta = createAssociatedTokenAccountIdempotentInstruction(
       payer.publicKey,
       vaultAta,
@@ -139,7 +163,7 @@ const phase: Phase = migrated ? 'post' : 'pre';
       ASSOCIATED_TOKEN_PROGRAM_ID
     );
 
-    // --- Quote token amount to send from seller (UI units → base)
+    // --- Quote token amount to transfer from seller (UI → base) ---
     const tokensUi = quoteSellTokensUi(
       curve,
       Number(coin.strength ?? 2),
@@ -149,7 +173,7 @@ const phase: Phase = migrated ? 'post' : 'pre';
     if (!Number.isFinite(tokensUi) || tokensUi <= 0) return bad('Nothing to sell', 400);
     const amountTokensBase = uiToAmount(tokensUi, decimals);
 
-    // --- Token transfer (seller → vault), checked with decimals
+    // --- Token transfer (seller → vault), checked with decimals ---
     const ixToken = createTransferCheckedInstruction(
       sellerAta,
       mint,
@@ -161,46 +185,15 @@ const phase: Phase = migrated ? 'post' : 'pre';
       TOKEN_PID
     );
 
-    // --- Server → seller SOL payout (seller gets SOL)
-    const lamports = Math.floor(amountSol * 1_000_000_000);
+    // --- Server → seller SOL payout (seller gets SOL) ---
+    const lamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
     const ixPayout = SystemProgram.transfer({
       fromPubkey: payer.publicKey,
       toPubkey: seller,
       lamports,
     });
 
-    // ---------------- Fees (seller pays) ----------------
-
-    // creator address (optional)
-    let creatorAddr: PublicKey | null = null;
-    if (coin?.creator) {
-      try { creatorAddr = new PublicKey(coin.creator); } catch { /* ignore */ }
-    }
-
-    // per-coin overrides (optional)
-    let overrides: { totalBps?: number; creatorBps?: number } | undefined;
-    if (Number.isFinite(coin?.fee_bps) || Number.isFinite(coin?.creator_fee_bps)) {
-      overrides = {};
-      if (Number.isFinite(coin?.fee_bps)) overrides.totalBps = Number(coin!.fee_bps);
-      if (Number.isFinite(coin?.creator_fee_bps)) overrides.creatorBps = Number(coin!.creator_fee_bps);
-    }
-
-    // protocol fee treasury
-    const feeTreasuryStr =
-      process.env.NEXT_PUBLIC_FEE_TREASURY || process.env.NEXT_PUBLIC_TREASURY!;
-    if (!feeTreasuryStr) return bad('Missing NEXT_PUBLIC_FEE_TREASURY or NEXT_PUBLIC_TREASURY', 500);
-    const feeTreasury = new PublicKey(feeTreasuryStr);
-
-    // build fee transfers (seller pays)
-const { ixs: feeIxs, detail: feeDetail } = buildFeeTransfers({
-  feePayer: seller,
-  tradeSol: amountSol,
-  phase,
-  protocolTreasury: feeTreasury,
-  creatorAddress: creatorAddr ?? null,
-});
-
-    // Optional priority
+    // Optional priority fees
     const priority = process.env.PRIORITY_FEES === 'true';
     const cuIxs = priority
       ? [
@@ -222,12 +215,12 @@ const { ixs: feeIxs, detail: feeDetail } = buildFeeTransfers({
       ...cuIxs,
       ixEnsureVaultAta,
       ixEnsureSellerAta,
-      ixToken,     // seller -> vault tokens
-      ...feeIxs,   // seller -> protocol/creator fees
-      ixPayout     // server -> seller SOL payout (server signs)
+      ixToken,    // seller -> vault tokens
+      ...feeIxs,  // seller -> protocol/creator fees
+      ixPayout    // server -> seller SOL payout (server signs)
     );
 
-    tx.partialSign(payer); // server signs its SOL transfer
+    tx.partialSign(payer); // server signs its own SOL transfer
 
     const serialized = tx.serialize({ requireAllSignatures: false });
 
@@ -235,7 +228,7 @@ const { ixs: feeIxs, detail: feeDetail } = buildFeeTransfers({
       ok: true,
       tokensUi,
       txB64: Buffer.from(serialized).toString('base64'),
-      feeDetail, // inspect in DevTools → Network → Preview
+      // feeDetail, // uncomment to debug in DevTools → Network → Preview
     });
   } catch (e: any) {
     console.error('[SELL] error:', e);

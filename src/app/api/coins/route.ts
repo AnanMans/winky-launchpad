@@ -32,16 +32,22 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({} as any));
-    const {
-      name,
-      symbol,
-      description = '',
-      logoUrl,
-      socials: socialsIn,
-      curve: curveIn,
-      strength: strengthIn,
-      startPrice: startPriceIn,
-    } = body || {};
+const {
+  name,
+  symbol,
+  description = '',
+  logoUrl,
+  socials: socialsIn,
+  curve: curveIn,
+  strength: strengthIn,
+  startPrice: startPriceIn,
+
+  // NEW optional inputs
+  creatorAddress,
+  feeBps,
+  creatorFeeBps,
+  migrated: migratedIn,
+} = body || {};
 
     if (!name || !symbol || !logoUrl) {
       return bad('Missing required fields: name, symbol, logoUrl', 422);
@@ -62,6 +68,25 @@ export async function POST(req: NextRequest) {
         : strengthIn != null
         ? Number(strengthIn)
         : 2;
+
+// NEW: normalize optional fee/creator fields (snake_case for DB)
+const creator =
+  typeof creatorAddress === 'string' && creatorAddress.length > 0 ? creatorAddress : null;
+
+const fee_bps =
+  typeof feeBps === 'number' && Number.isFinite(feeBps)
+    ? Math.max(0, Math.floor(feeBps))
+    : null;
+
+const creator_fee_bps =
+  typeof creatorFeeBps === 'number' && Number.isFinite(creatorFeeBps)
+    ? Math.max(0, Math.floor(creatorFeeBps))
+    : null;
+
+// default false if not sent
+const migrated = migratedIn === true ? true : false;
+
+
 
     // RPC
     const rpc =
@@ -100,21 +125,27 @@ export async function POST(req: NextRequest) {
     const mintStr = mintKp.publicKey.toBase58();
 
     // 2) Insert in Supabase (snake_case)
-    const { data: row, error } = await supabaseAdmin
-      .from('coins')
-      .insert({
-        name,
-        symbol,
-        description,
-        logo_url: logoUrl,
-        socials,
-        curve,
-        start_price: startPrice,
-        strength,
-        mint: mintStr,
-      })
-      .select()
-      .single();
+const { data: row, error } = await supabaseAdmin
+  .from('coins')
+  .insert({
+    name,
+    symbol,
+    description,
+    logo_url: logoUrl,
+    socials,
+    curve,
+    start_price: startPrice,
+    strength,
+    mint: mintStr,
+
+    // NEW fields (your DB columns already exist)
+    creator,
+    fee_bps,
+    creator_fee_bps,
+    migrated,
+  })
+  .select()
+  .single();
 
     if (error) return bad(error.message, 500);
 
@@ -149,7 +180,12 @@ export async function POST(req: NextRequest) {
           strength: row.strength,
           createdAt: row.created_at,
           mint: row.mint,
-        },
+creator: row.creator,
+feeBps: row.fee_bps,
+creatorFeeBps: row.creator_fee_bps,
+migrated: row.migrated,
+    
+    },
       },
       { status: 201 }
     );
