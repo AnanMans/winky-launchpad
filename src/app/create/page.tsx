@@ -168,7 +168,8 @@ export default function CreatePage() {
           socials: { website, x: xUrl, telegram: tg },
           curve,
           strength,
-creator: publicKey?.toBase58() || null, 
+creator: publicKey?.toBase58() || null,
+creatorFeeBps: 30, 
         }),
       });
       const j = await res.json().catch(() => ({}));

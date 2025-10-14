@@ -31,7 +31,8 @@ export async function GET() {
 // ---------- POST /api/coins ----------
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json().catch(() => ({} as any));
+const body = await req.json().catch(() => ({} as any));
+
 const {
   name,
   symbol,
@@ -42,58 +43,66 @@ const {
   strength: strengthIn,
   startPrice: startPriceIn,
 
-  // NEW optional inputs
-  creatorAddress,
+  // OPTIONAL inputs
+  creator: creatorIn,             // you may send `creator`
+  creatorAddress,                 // or `creatorAddress` (alias)
   feeBps,
-  creatorFeeBps,
-  migrated: migratedIn,
+  creatorFeeBps: creatorFeeBpsIn, // number (bps) or omit
+  migrated: migratedIn,           // boolean or omit
 } = body || {};
 
-    if (!name || !symbol || !logoUrl) {
-      return bad('Missing required fields: name, symbol, logoUrl', 422);
-    }
+if (!name || !symbol || !logoUrl) {
+  return bad('Missing required fields: name, symbol, logoUrl', 422);
+}
 
-    // Defaults to satisfy NOT NULL constraints (adjust to your schema)
-    const socials = socialsIn ?? {};
-    const curve = curveIn ?? 'linear';
-    const startPrice =
-      typeof startPriceIn === 'number'
-        ? startPriceIn
-        : startPriceIn != null
-        ? Number(startPriceIn)
-        : 0;
-    const strength =
-      typeof strengthIn === 'number'
-        ? strengthIn
-        : strengthIn != null
-        ? Number(strengthIn)
-        : 2;
+// Defaults
+const socials = socialsIn ?? {};
+const curve = curveIn ?? 'linear';
+const startPrice =
+  typeof startPriceIn === 'number'
+    ? startPriceIn
+    : startPriceIn != null
+    ? Number(startPriceIn)
+    : 0;
+const strength =
+  typeof strengthIn === 'number'
+    ? strengthIn
+    : strengthIn != null
+    ? Number(strengthIn)
+    : 2;
 
-// NEW: normalize optional fee/creator fields (snake_case for DB)
-const creator =
-  typeof creatorAddress === 'string' && creatorAddress.length > 0 ? creatorAddress : null;
+// --- normalize optional fee/creator fields (for DB snake_case) ---
+let creatorAddrStr: string | null = null;
+const candidateCreator =
+  (typeof creatorIn === 'string' && creatorIn.length > 0 && creatorIn) ||
+  (typeof creatorAddress === 'string' && creatorAddress.length > 0 && creatorAddress) ||
+  null;
 
-const fee_bps =
+if (candidateCreator) {
+  try {
+    new PublicKey(candidateCreator); // validate it’s a pubkey
+    creatorAddrStr = candidateCreator;
+  } catch { /* invalid => stays null */ }
+}
+
+const feeBpsNorm =
   typeof feeBps === 'number' && Number.isFinite(feeBps)
     ? Math.max(0, Math.floor(feeBps))
     : null;
 
-const creator_fee_bps =
-  typeof creatorFeeBps === 'number' && Number.isFinite(creatorFeeBps)
-    ? Math.max(0, Math.floor(creatorFeeBps))
+const creatorFeeBpsNorm =
+  typeof creatorFeeBpsIn === 'number' && Number.isFinite(creatorFeeBpsIn)
+    ? Math.max(0, Math.floor(creatorFeeBpsIn))
     : null;
 
-// default false if not sent
-const migrated = migratedIn === true ? true : false;
+const migrated = migratedIn === true;
 
-
-
-    // RPC
-    const rpc =
-      process.env.NEXT_PUBLIC_HELIUS_RPC ||
-      process.env.NEXT_PUBLIC_RPC ||
-      'https://api.devnet.solana.com';
-    const conn = new Connection(rpc, 'confirmed');
+// RPC
+const rpc =
+  process.env.NEXT_PUBLIC_HELIUS_RPC ||
+  process.env.NEXT_PUBLIC_RPC ||
+  'https://api.devnet.solana.com';
+const conn = new Connection(rpc, 'confirmed');
 
     // Server signer (mint authority)
     const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
@@ -124,7 +133,7 @@ const migrated = migratedIn === true ? true : false;
     );
     const mintStr = mintKp.publicKey.toBase58();
 
-    // 2) Insert in Supabase (snake_case)
+// 2) Insert in Supabase (snake_case)
 const { data: row, error } = await supabaseAdmin
   .from('coins')
   .insert({
@@ -138,11 +147,11 @@ const { data: row, error } = await supabaseAdmin
     strength,
     mint: mintStr,
 
-    // NEW fields (your DB columns already exist)
-    creator,
-    fee_bps,
-    creator_fee_bps,
-    migrated,
+    // NEW: normalized/validated fields
+    creator: creatorAddrStr,            // string | null
+    fee_bps: feeBpsNorm,                // number | null
+    creator_fee_bps: creatorFeeBpsNorm, // number | null
+    migrated,                           // boolean
   })
   .select()
   .single();
