@@ -3,15 +3,26 @@ export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/db';
-import { Connection, Keypair, PublicKey } from '@solana/web3.js';
-import { createMint, TOKEN_PROGRAM_ID } from '@solana/spl-token';
+
+import {
+  Connection,
+  PublicKey,
+  Keypair,
+  SystemProgram,
+  Transaction,
+} from '@solana/web3.js';
+
+import {
+  MINT_SIZE,
+  createInitializeMintInstruction,
+  TOKEN_PROGRAM_ID,
+} from '@solana/spl-token';
 
 // --- helpers ---
 function bad(msg: string, code = 400) {
   return NextResponse.json({ error: msg }, { status: code });
 }
 
-/** Build absolute base for local + Vercel */
 const siteBase = () =>
   process.env.SITE_BASE ||
   (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
@@ -31,78 +42,79 @@ export async function GET() {
 // ---------- POST /api/coins ----------
 export async function POST(req: NextRequest) {
   try {
-const body = await req.json().catch(() => ({} as any));
+    const body = await req.json().catch(() => ({} as any));
+    const {
+      // required
+      name,
+      symbol,
+      logoUrl,
 
-const {
-  name,
-  symbol,
-  description = '',
-  logoUrl,
-  socials: socialsIn,
-  curve: curveIn,
-  strength: strengthIn,
-  startPrice: startPriceIn,
+      // optional meta
+      description = '',
+      socials: socialsIn,
+      curve: curveIn,
+      strength: strengthIn,
+      startPrice: startPriceIn,
 
-  // OPTIONAL inputs
-  creator: creatorIn,             // you may send `creator`
-  creatorAddress,                 // or `creatorAddress` (alias)
-  feeBps,
-  creatorFeeBps: creatorFeeBpsIn, // number (bps) or omit
-  migrated: migratedIn,           // boolean or omit
-} = body || {};
+      // NEW optional fee/creator fields provided by client
+      creatorAddress,     // pubkey string of creator (payer of mint rent + tx fee)
+      feeBps,             // per-coin override (total bps)
+      creatorFeeBps,      // per-coin override (creator share bps)
+      migrated: migratedIn, // default false
+    } = body || {};
 
-if (!name || !symbol || !logoUrl) {
-  return bad('Missing required fields: name, symbol, logoUrl', 422);
-}
+    if (!name || !symbol || !logoUrl) {
+      return bad('Missing required fields: name, symbol, logoUrl', 422);
+    }
 
-// Defaults
-const socials = socialsIn ?? {};
-const curve = curveIn ?? 'linear';
-const startPrice =
-  typeof startPriceIn === 'number'
-    ? startPriceIn
-    : startPriceIn != null
-    ? Number(startPriceIn)
-    : 0;
-const strength =
-  typeof strengthIn === 'number'
-    ? strengthIn
-    : strengthIn != null
-    ? Number(strengthIn)
-    : 2;
+    // Normalize/Defaults
+    const socials = socialsIn ?? {};
+    const curve = curveIn ?? 'linear';
+    const startPrice =
+      typeof startPriceIn === 'number'
+        ? startPriceIn
+        : startPriceIn != null
+        ? Number(startPriceIn)
+        : 0;
+    const strength =
+      typeof strengthIn === 'number'
+        ? strengthIn
+        : strengthIn != null
+        ? Number(strengthIn)
+        : 2;
 
-// --- normalize optional fee/creator fields (for DB snake_case) ---
-let creatorAddrStr: string | null = null;
-const candidateCreator =
-  (typeof creatorIn === 'string' && creatorIn.length > 0 && creatorIn) ||
-  (typeof creatorAddress === 'string' && creatorAddress.length > 0 && creatorAddress) ||
-  null;
+    // Optional creator address (must be a valid pubkey if provided)
+    let creatorAddrStr: string | null = null;
+    if (typeof creatorAddress === 'string' && creatorAddress.length > 0) {
+      try {
+        new PublicKey(creatorAddress);
+        creatorAddrStr = creatorAddress;
+      } catch {
+        return bad('Invalid creatorAddress', 422);
+      }
+    } else {
+      return bad('Missing creatorAddress', 422);
+    }
 
-if (candidateCreator) {
-  try {
-    new PublicKey(candidateCreator); // validate it’s a pubkey
-    creatorAddrStr = candidateCreator;
-  } catch { /* invalid => stays null */ }
-}
+    // Optional per-coin fee overrides
+    const feeBpsNorm =
+      Number.isFinite(feeBps as number)
+        ? Math.max(0, Math.floor(Number(feeBps)))
+        : null;
 
-const feeBpsNorm =
-  typeof feeBps === 'number' && Number.isFinite(feeBps)
-    ? Math.max(0, Math.floor(feeBps))
-    : null;
+    const creatorFeeBpsNorm =
+      Number.isFinite(creatorFeeBps as number)
+        ? Math.max(0, Math.floor(Number(creatorFeeBps)))
+        : null;
 
-const creatorFeeBpsNorm =
-  typeof creatorFeeBpsIn === 'number' && Number.isFinite(creatorFeeBpsIn)
-    ? Math.max(0, Math.floor(creatorFeeBpsIn))
-    : null;
+    const migrated = typeof migratedIn === 'boolean' ? migratedIn : false;
 
-const migrated = migratedIn === true;
-
-// RPC
-const rpc =
-  process.env.NEXT_PUBLIC_HELIUS_RPC ||
-  process.env.NEXT_PUBLIC_RPC ||
-  'https://api.devnet.solana.com';
-const conn = new Connection(rpc, 'confirmed');
+    // RPC
+    const rpc =
+      process.env.NEXT_PUBLIC_HELIUS_RPC ||
+      process.env.NEXT_PUBLIC_RPC ||
+      'https://api.devnet.solana.com';
+    const conn = new Connection(rpc, 'confirmed');
 
     // Server signer (mint authority)
     const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
@@ -117,64 +129,73 @@ const conn = new Connection(rpc, 'confirmed');
     if (!Array.isArray(secret) || secret.length !== 64) {
       return bad('MINT_AUTHORITY_KEYPAIR must be a 64-byte secret key JSON array', 500);
     }
-    const payer = Keypair.fromSecretKey(Uint8Array.from(secret));
+    const serverKp = Keypair.fromSecretKey(Uint8Array.from(secret));
 
-    // 1) Create mint (6 decimals)
+    // ---------------- Client-funded mint creation ----------------
+    const creatorPubkey = new PublicKey(creatorAddrStr);
     const mintKp = Keypair.generate();
-    await createMint(
-      conn,
-      payer,                     // fee payer
-      payer.publicKey,           // mint authority
-      null,                      // freeze authority (none)
-      6,                         // decimals
-      mintKp,                    // mint keypair
-      undefined,                 // confirm options
-      TOKEN_PROGRAM_ID
-    );
     const mintStr = mintKp.publicKey.toBase58();
 
-// 2) Insert in Supabase (snake_case)
-const { data: row, error } = await supabaseAdmin
-  .from('coins')
-  .insert({
-    name,
-    symbol,
-    description,
-    logo_url: logoUrl,
-    socials,
-    curve,
-    start_price: startPrice,
-    strength,
-    mint: mintStr,
+    // Rent for mint account
+    const lamportsForMint = await conn.getMinimumBalanceForRentExemption(MINT_SIZE, 'confirmed');
 
-    // NEW: normalized/validated fields
-    creator: creatorAddrStr,            // string | null
-    fee_bps: feeBpsNorm,                // number | null
-    creator_fee_bps: creatorFeeBpsNorm, // number | null
-    migrated,                           // boolean
-  })
-  .select()
-  .single();
+    // 1) Create the mint account (creator funds rent)
+    const ixCreateMint = SystemProgram.createAccount({
+      fromPubkey: creatorPubkey,            // CREATOR pays rent + tx fee
+      newAccountPubkey: mintKp.publicKey,
+      lamports: lamportsForMint,
+      space: MINT_SIZE,
+      programId: TOKEN_PROGRAM_ID,
+    });
+
+    // 2) Initialize mint — server is the mint authority
+    const ixInitMint = createInitializeMintInstruction(
+      mintKp.publicKey,
+      6,                        // decimals
+      serverKp.publicKey,       // mint authority = server
+      null,                     // no freeze authority
+      TOKEN_PROGRAM_ID
+    );
+
+    // Build unsigned tx for the client to sign-and-send
+    const { blockhash } = await conn.getLatestBlockhash('confirmed');
+    const tx = new Transaction({
+      feePayer: creatorPubkey,              // CREATOR pays tx fee
+      recentBlockhash: blockhash,
+    }).add(ixCreateMint, ixInitMint);
+
+    // The new mint account must sign the createAccount
+    tx.partialSign(mintKp);
+
+    // ---------------- Insert coin row now ----------------
+    const { data: row, error } = await supabaseAdmin
+      .from('coins')
+      .insert({
+        name,
+        symbol,
+        description,
+        logo_url: logoUrl,
+        socials,
+        curve,
+        start_price: startPrice,
+        strength,
+        mint: mintStr,
+        creator: creatorAddrStr,
+        fee_bps: feeBpsNorm,
+        creator_fee_bps: creatorFeeBpsNorm,
+        migrated,
+      })
+      .select()
+      .single();
 
     if (error) return bad(error.message, 500);
 
-    // 3) Finalize on-chain metadata (non-blocking).
-    //    This writes name/symbol/URI via your /api/finalize/[mint] endpoint.
-    try {
-      const res = await fetch(`${siteBase()}/api/finalize/${mintStr}`, {
-        method: 'POST',
-        cache: 'no-store',
-      });
-      const out = await res.json().catch(() => ({}));
-      console.log('[finalize]', res.status, out);
-    } catch (e) {
-      console.error('[finalize] failed', e);
-    }
+    // Serialize tx → base64 for client
+    const txB64 = Buffer.from(tx.serialize({ requireAllSignatures: false })).toString('base64');
 
-    // Optional: make metadata immutable forever
-    // await fetch(`${siteBase()}/api/finalize/${mintStr}/lock`, { method: 'POST' });
+    // You can finalize metadata AFTER the client confirms the tx.
+    // The client can call: POST /api/finalize/[mint] once confirmed.
 
-    // 4) Respond camelCase for UI
     return NextResponse.json(
       {
         coin: {
@@ -189,12 +210,12 @@ const { data: row, error } = await supabaseAdmin
           strength: row.strength,
           createdAt: row.created_at,
           mint: row.mint,
-creator: row.creator,
-feeBps: row.fee_bps,
-creatorFeeBps: row.creator_fee_bps,
-migrated: row.migrated,
-    
-    },
+          creator: row.creator,
+          feeBps: row.fee_bps,
+          creatorFeeBps: row.creator_fee_bps,
+          migrated: row.migrated,
+        },
+        txB64, // client must sign & send
       },
       { status: 201 }
     );
