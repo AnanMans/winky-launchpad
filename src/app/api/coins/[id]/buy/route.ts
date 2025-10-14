@@ -1,3 +1,4 @@
+// src/app/api/coins/[id]/buy/route.ts
 export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -13,13 +14,11 @@ import {
   Transaction,
   SystemProgram,
   ComputeBudgetProgram,
-  sendAndConfirmTransaction,
 } from '@solana/web3.js';
 
 import {
   getMint,
   createMintToInstruction,
-  getOrCreateAssociatedTokenAccount,
   createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
   TOKEN_PROGRAM_ID,
@@ -66,9 +65,7 @@ export async function POST(
     // --- Load coin row (include migrated so we can choose fee phase) ---
     const { data: coin, error: coinErr } = await supabase
       .from('coins')
-      .select(
-        'mint, curve, strength, start_price, creator, fee_bps, creator_fee_bps, migrated'
-      )
+      .select('mint, curve, strength, start_price, creator, fee_bps, creator_fee_bps, migrated')
       .eq('id', id)
       .single();
     if (coinErr || !coin) return bad('Coin not found', 404);
@@ -86,7 +83,7 @@ export async function POST(
       const secret = JSON.parse(raw) as number[];
       if (!Array.isArray(secret) || secret.length !== 64) {
         return bad('MINT_AUTHORITY_KEYPAIR must be 64-byte secret key JSON', 500);
-      }
+        }
       const payer = Keypair.fromSecretKey(Uint8Array.from(secret));
       const { Keypair: KP } = await import('@solana/web3.js');
       const newMint = KP.generate();
@@ -131,9 +128,7 @@ export async function POST(
     (async () => {
       try {
         await fetch(`${siteBase}/api/finalize/${mintPk.toBase58()}`, { method: 'POST' });
-      } catch {
-        /* ignore */
-      }
+      } catch { /* ignore */ }
     })();
 
     // --- Quote how many tokens to mint for this SOL size ---
@@ -144,11 +139,12 @@ export async function POST(
       Number(coin.start_price ?? 0)
     );
 
-    // --- Ensure buyer ATA (server pays to create ATA only) ---
-    const raw2 = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
-    if (!raw2) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
-    const mintAuthority = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw2)));
+    // --- Mint authority (server signer to mint tokens) ---
+    const rawAuth = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
+    if (!rawAuth) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
+    const mintAuthority = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(rawAuth)));
 
+    // --- Derive buyer ATA + idempotent-creation ix (buyer pays rent) ---
     const ataAddr = getAssociatedTokenAddressSync(
       mintPk,
       buyer,
@@ -157,57 +153,29 @@ export async function POST(
       ASSOCIATED_TOKEN_PROGRAM_ID
     );
 
-    try {
-      await getOrCreateAssociatedTokenAccount(
-        conn,
-        mintAuthority, // server pays ATA rent
-        mintPk,
-        buyer,
-        false,
-        'confirmed',
-        undefined,
-        TOKEN_PID,
-        ASSOCIATED_TOKEN_PROGRAM_ID
-      );
-    } catch {
-      // Idempotent create with proper confirm
-      const ix = createAssociatedTokenAccountIdempotentInstruction(
-        mintAuthority.publicKey,
-        ataAddr,
-        buyer,
-        mintPk,
-        TOKEN_PID,
-        ASSOCIATED_TOKEN_PROGRAM_ID
-      );
-      const ataTx = new Transaction().add(ix);
-      const { blockhash } = await conn.getLatestBlockhash('confirmed');
-      ataTx.recentBlockhash = blockhash;
-      ataTx.feePayer = mintAuthority.publicKey;
-      await sendAndConfirmTransaction(conn, ataTx, [mintAuthority], {
-        commitment: 'confirmed',
-      });
-    }
+    const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+      buyer,        // payer = buyer (inside user's tx)
+      ataAddr,      // ATA address
+      buyer,        // token account owner
+      mintPk,
+      TOKEN_PID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
 
     // ---------------- Fees (buyer pays) ----------------
     // Optional creator routing
     let creatorAddr: PublicKey | null = null;
     if (coin?.creator) {
-      try {
-        creatorAddr = new PublicKey(coin.creator);
-      } catch {
-        /* ignore bad creator key */
-      }
+      try { creatorAddr = new PublicKey(coin.creator); } catch { /* ignore bad key */ }
     }
 
     // Fee treasury
     const feeTreasuryStr =
       process.env.NEXT_PUBLIC_FEE_TREASURY || process.env.NEXT_PUBLIC_TREASURY!;
-    if (!feeTreasuryStr) {
-      return bad('Missing NEXT_PUBLIC_FEE_TREASURY or NEXT_PUBLIC_TREASURY', 500);
-    }
+    if (!feeTreasuryStr) return bad('Missing NEXT_PUBLIC_FEE_TREASURY or NEXT_PUBLIC_TREASURY', 500);
     const feeTreasury = new PublicKey(feeTreasuryStr);
 
-    // Build fee transfers (buyer pays). Your buildFeeTransfers takes ONE argument.
+    // Build fee transfers (buyer pays)
     const { ixs: feeIxs /*, detail: feeDetail */ } = buildFeeTransfers({
       feePayer: buyer,
       tradeSol: amountSol,
@@ -229,7 +197,7 @@ export async function POST(
         ]
       : [];
 
-    // SOL intake to platform (bonding-curve treasury)
+    // (optional) buyer → platform SOL intake (if you are using this as curve treasury)
     const intakeIx = SystemProgram.transfer({
       fromPubkey: buyer,
       toPubkey: platformTreasury,
@@ -247,17 +215,19 @@ export async function POST(
     );
 
     const latest = await conn.getLatestBlockhash('confirmed');
+
     const tx = new Transaction({
-      feePayer: buyer, // buyer pays network fee
+      feePayer: buyer,                 // buyer also pays the network fee
       recentBlockhash: latest.blockhash,
     }).add(
       ...cuIxs,
-      intakeIx,   // buyer -> platform treasury (pool intake)
-      ...feeIxs,  // buyer -> protocol/creator fees
-      mintIx      // mint tokens to buyer
+      createAtaIx,                     // ensure buyer ATA exists (no-op if already created)
+      intakeIx,                        // optional intake
+      ...feeIxs,                       // protocol + creator fees
+      mintIx                           // mint tokens to buyer
     );
 
-    // server partial sign for mint authority only
+    // server partial-signs as mint authority only
     tx.partialSign(mintAuthority);
 
     const b64 = Buffer.from(tx.serialize({ requireAllSignatures: false })).toString('base64');
@@ -268,7 +238,7 @@ export async function POST(
       minted: uiToAmount(tokensUi, decimals).toString(),
       ata: ataAddr.toBase58(),
       txB64: b64,
-      // feeDetail, // you can include this if you want to inspect in DevTools
+      // feeDetail, // uncomment if you want to inspect in DevTools
     });
   } catch (e: any) {
     console.error('[BUY] error:', e);
