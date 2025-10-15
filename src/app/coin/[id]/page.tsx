@@ -8,7 +8,7 @@ import { useParams, useSearchParams } from 'next/navigation';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import {
   PublicKey,
-LAMPORTS_PER_SOL,
+  LAMPORTS_PER_SOL,
   Transaction,
   VersionedTransaction,
 } from '@solana/web3.js';
@@ -55,13 +55,9 @@ export default function CoinPage() {
   // inputs
   const [buySol, setBuySol] = useState<string>('0.05');
   const [sellSol, setSellSol] = useState<string>('0.01');
-const [flash, setFlash] = useState<string | null>(null);
 
-{/* Title */}
-<h1 className="text-2xl md:text-3xl font-bold text-white flex items-baseline gap-2">
-  <span>{coin?.name ?? 'Unnamed'}</span>
-  <span className="text-white/60 text-lg">({(coin?.symbol ?? '').toUpperCase()})</span>
-</h1>
+  // UI flash
+  const [flash, setFlash] = useState<string | null>(null);
 
   // ---------- load coin ----------
   useEffect(() => {
@@ -98,14 +94,14 @@ const [flash, setFlash] = useState<string | null>(null);
 
       if (coin?.mint) {
         const mintPk = new PublicKey(coin.mint);
-        // Try direct ATA first
         let ui = 0;
         try {
+          // derive ATA (allowOwnerOffCurve = true is harmless for normal wallets)
           const ata = getAssociatedTokenAddressSync(mintPk, publicKey, true);
           const info = await connection.getTokenAccountBalance(ata, 'confirmed').catch(() => null);
           if (info?.value?.uiAmount != null) ui = info.value.uiAmount;
         } catch {
-          // fallback: parsed accounts
+          // fallback: scan parsed token accounts for this mint
           const p = await connection.getParsedTokenAccountsByOwner(publicKey, { mint: mintPk }, 'confirmed');
           for (const acc of p.value) {
             const amt = (acc.account.data as any).parsed?.info?.tokenAmount?.uiAmount as number | undefined;
@@ -120,7 +116,7 @@ const [flash, setFlash] = useState<string | null>(null);
         setTokBal(0);
       }
     } catch {
-      // ignore
+      // ignore transient errors
     }
   }
 
@@ -145,8 +141,8 @@ const [flash, setFlash] = useState<string | null>(null);
   const sellTokens = useMemo(() => {
     const a = Number(sellSol);
     if (!coin || !Number.isFinite(a) || a <= 0) return 0;
-    // quoteSellTokensUi(amountSol, curve, strength, startPrice)
-return quoteSellTokensUi(coin.curve, coin.strength, coin.startPrice, a);
+    // quoteSellTokensUi(curve, strength, startPrice, amountSol)
+    return quoteSellTokensUi(coin.curve, coin.strength, coin.startPrice, a);
   }, [sellSol, coin]);
 
   // ---------- actions ----------
@@ -166,251 +162,256 @@ return quoteSellTokensUi(coin.curve, coin.strength, coin.startPrice, a);
     }
 
     try {
+      // Ask server to prepare the mint (may return a partial tx for buyer to sign)
+      const res = await fetch(`/api/coins/${id}/buy`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          buyer: publicKey.toBase58(),
+          amountSol: amt,
+        }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || 'Server buy failed');
 
+      if (j.txB64) {
+        // Server returned a partial tx — wallet signs + sends
+        const raw = Uint8Array.from(atob(j.txB64 as string), (c) => c.charCodeAt(0));
+        let tx: Transaction | VersionedTransaction;
+        try {
+          tx = VersionedTransaction.deserialize(raw);
+        } catch {
+          tx = Transaction.from(raw);
+        }
 
-// 2) Ask server to prepare the mint (may return a partial tx for buyer to sign)
-const res = await fetch(`/api/coins/${id}/buy`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    buyer: publicKey.toBase58(),
-    amountSol: amt,
-  }),
-});
-const j = await res.json().catch(() => ({}));
-console.log('[BUY response]', j);
-if (!res.ok) throw new Error(j?.error || 'Server buy failed');
+        const sig2 = await sendTransaction(tx, connection, { skipPreflight: true });
+        await connection.confirmTransaction(sig2, 'confirmed');
+      }
 
-if (j.txB64) {
-  // NEW path: server wants the buyer to sign the mint tx
-  const raw = Uint8Array.from(atob(j.txB64 as string), (c) => c.charCodeAt(0));
-  let tx: Transaction | VersionedTransaction;
-  try {
-    tx = VersionedTransaction.deserialize(raw);
-  } catch {
-    tx = Transaction.from(raw);
-  }
+      // Best-effort finalize on-chain metadata so wallet shows name/icon
+      if (coin.mint) {
+        try {
+          const finRes = await fetch(`/api/finalize/${coin.mint}`, { method: 'POST' });
+          const finJson = await finRes.json().catch(() => ({} as any));
+          if (!finRes.ok) console.warn('Finalize failed:', finJson?.error);
+        } catch (e) {
+          console.warn('Finalize request error:', e);
+        }
+      }
 
-  const sig2 = await sendTransaction(tx, connection, { skipPreflight: true });
+      setFlash('Buy submitted. Your balances and token metadata will update shortly.');
+      setTimeout(() => setFlash(null), 4000);
 
-await connection.confirmTransaction(sig2, 'confirmed');
-
-setFlash('Buy submitted. Your token metadata will appear shortly.');
-setTimeout(() => setFlash(null), 4000);
-
-} else {
-  // BACKCOMPAT path: server already broadcast the mint
-setFlash('Buy submitted. Your token metadata will appear shortly.');
-setTimeout(() => setFlash(null), 4000);
-
-}
-
-setTimeout(() => refreshBalances(), 1500);
-
+      // Refresh balances after a short delay
+      setTimeout(() => refreshBalances(), 1200);
     } catch (e: any) {
       console.error('buy error:', e);
       alert(`Buy failed: ${e?.message || String(e)}`);
     }
   }
 
-async function doSell() {
-  if (!publicKey) {
-    alert('Connect your wallet first.');
-    return;
-  }
-  if (!coin) {
-    alert('Coin not loaded yet.');
-    return;
-  }
-  const amt = Number(sellSol);
-  if (!Number.isFinite(amt) || amt <= 0) {
-    alert('Enter a valid SOL amount to sell.');
-    return;
-  }
-
-  try {
-    // 1) Ask server to prepare the full sell tx (it returns base64-encoded binary)
-    const res = await fetch(`/api/coins/${id}/sell`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        seller: publicKey.toBase58(),
-        amountSol: amt,
-      }),
-    });
-
-    const j = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(j?.error || 'Server sell failed');
-
-    if (!j.txB64 || typeof j.txB64 !== 'string') {
-      throw new Error('Server sell failed: no txB64');
+  async function doSell() {
+    if (!publicKey) {
+      alert('Connect your wallet first.');
+      return;
+    }
+    if (!coin) {
+      alert('Coin not loaded yet.');
+      return;
+    }
+    const amt = Number(sellSol);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      alert('Enter a valid SOL amount to sell.');
+      return;
     }
 
-    // 2) Deserialize (try versioned first, fallback to legacy)
-    const raw = Uint8Array.from(atob(j.txB64), (c) => c.charCodeAt(0));
-    let tx: Transaction | VersionedTransaction;
     try {
-      tx = VersionedTransaction.deserialize(raw);
-    } catch {
-      tx = Transaction.from(raw);
+      // Ask server to prepare the full sell tx
+      const res = await fetch(`/api/coins/${id}/sell`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          seller: publicKey.toBase58(),
+          amountSol: amt,
+        }),
+      });
+
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || 'Server sell failed');
+
+      if (!j.txB64 || typeof j.txB64 !== 'string') {
+        throw new Error('Server sell failed: no txB64');
+      }
+
+      // Deserialize (try versioned first)
+      const raw = Uint8Array.from(atob(j.txB64), (c) => c.charCodeAt(0));
+      let tx: Transaction | VersionedTransaction;
+      try {
+        tx = VersionedTransaction.deserialize(raw);
+      } catch {
+        tx = Transaction.from(raw);
+      }
+
+      const sig = await sendTransaction(tx, connection, { skipPreflight: true });
+      await connection.confirmTransaction(sig, 'confirmed');
+
+      setFlash('Sell submitted. Balances will update shortly.');
+      setTimeout(() => setFlash(null), 4000);
+
+      // Refresh balances after a short delay
+      setTimeout(() => refreshBalances(), 1200);
+    } catch (e: any) {
+      console.error('sell error', e);
+      alert(`Sell failed: ${e?.message || String(e)}`);
     }
-
-    // 3) Wallet signs + sends; wait for confirmation
-    const sig = await sendTransaction(tx, connection, { skipPreflight: true });
-    await connection.confirmTransaction(sig, 'confirmed');
-    alert(`Sell submitted: ${sig}`);
-  } catch (e: any) {
-    console.error('sell error', e);
-    alert(`Sell failed: ${e?.message || String(e)}`);
   }
-}
 
-// ---------- render ----------
-if (loading) {
+  // ---------- render ----------
+  if (loading) {
+    return (
+      <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto">
+        <p>Loading…</p>
+      </main>
+    );
+  }
+
+  if (err || !coin) {
+    return (
+      <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto">
+        <p className="text-red-400">Error: {err || 'Not found'}</p>
+        <Link className="underline" href="/coins">Back to coins</Link>
+      </main>
+    );
+  }
+
   return (
-    <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto">
-      <p>Loading…</p>
-    </main>
-  );
-}
+    <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto grid gap-8">
+      <header className="flex items-center justify-between">
+        <Link href="/" className="flex items-center gap-2 font-semibold">
+          <Image src="/logo.svg" alt="logo" width={28} height={28} />
+          <span>Winky Launchpad</span>
+        </Link>
+        <nav className="flex items-center gap-3">
+          <Link className="underline" href="/coins">Coins</Link>
+          <WalletButton />
+        </nav>
+      </header>
 
-if (err || !coin) {
-  return (
-    <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto">
-      <p className="text-red-400">Error: {err || 'Not found'}</p>
-      <Link className="underline" href="/coins">Back to coins</Link>
-    </main>
-  );
-}
+      {flash && (
+        <div className="mb-3 rounded-md border px-3 py-2 text-sm panel">
+          {flash}
+        </div>
+      )}
 
-return (
-  <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto grid gap-8">
-    <header className="flex items-center justify-between">
-      <Link href="/" className="flex items-center gap-2 font-semibold">
-        <Image src="/logo.svg" alt="logo" width={28} height={28} />
-        <span>Winky Launchpad</span>
-      </Link>
-      <nav className="flex items-center gap-3">
-        <Link className="underline" href="/coins">Coins</Link>
-        <WalletButton />
-      </nav>
-    </header>
+      <section className="grid gap-4 rounded-2xl border p-6 bg-black/20">
+        <div className="flex items-center gap-4">
+          {coin.logoUrl ? (
+            <Image
+              src={coin.logoUrl}
+              alt={coin.name}
+              width={64}
+              height={64}
+              className="rounded-xl w-16 h-16 object-cover"
+            />
+          ) : (
+            <div className="w-16 h-16 rounded-xl bg-white/10" />
+          )}
+          <div>
+            <h1 className="text-2xl font-bold">
+              {coin.name} <span className="text-white/60">({(coin.symbol || '').toUpperCase()})</span>
+            </h1>
+            <p className="text-white/60 text-sm">
+              Curve: {coin.curve} · Strength: {coin.strength}
+            </p>
+          </div>
+        </div>
 
-    {flash && (
-      <div className="mb-3 rounded-md border px-3 py-2 text-sm panel">
-        {flash}
-      </div>
-    )}
-
-    <section className="grid gap-4 rounded-2xl border p-6 bg-black/20">
-      <div className="flex items-center gap-4">
-        {coin.logoUrl ? (
-          <Image
-            src={coin.logoUrl}
-            alt={coin.name}
-            width={64}
-            height={64}
-            className="rounded-xl w-16 h-16 object-cover"
-          />
-        ) : (
-          <div className="w-16 h-16 rounded-xl bg-white/10" />
+        {coin.description && (
+          <p className="text-white/80">{coin.description}</p>
         )}
-        <div>
-          <h1 className="text-2xl font-bold">
-            {coin.name} <span className="text-white/60">({coin.symbol})</span>
-          </h1>
-          <p className="text-white/60 text-sm">
-            Curve: {coin.curve} · Strength: {coin.strength}
+
+        {coin.socials && (
+          <div className="flex flex-wrap gap-3 text-sm">
+            {coin.socials.website && (
+              <a className="underline" href={coin.socials.website} target="_blank" rel="noreferrer">Website</a>
+            )}
+            {coin.socials.x && (
+              <a className="underline" href={coin.socials.x} target="_blank" rel="noreferrer">X</a>
+            )}
+            {coin.socials.telegram && (
+              <a className="underline" href={coin.socials.telegram} target="_blank" rel="noreferrer">Telegram</a>
+            )}
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-6 text-sm text-white/70">
+          <div>
+            Wallet SOL: <span className="font-mono">{solBal.toFixed(4)}</span>
+          </div>
+          <div>
+            Wallet {coin.symbol}:{' '}
+            <span className="font-mono">{tokBal.toLocaleString()}</span>
+          </div>
+          <div>
+            Mint: <span className="font-mono">{coin.mint ?? '—'}</span>
+          </div>
+        </div>
+      </section>
+
+      <section className="grid md:grid-cols-2 gap-6">
+        {/* BUY */}
+        <div className="rounded-2xl border p-6 bg-black/20 grid gap-4">
+          <h3 className="font-semibold text-lg">Buy</h3>
+          <div className="flex items-center gap-2">
+            <input
+              className="px-3 py-2 rounded-lg bg-black/30 border w-40"
+              value={buySol}
+              onChange={(e) => setBuySol(e.target.value)}
+              inputMode="decimal"
+              placeholder="0.05"
+            />
+            <span className="text-white/60">SOL</span>
+          </div>
+          <p className="text-white/70 text-sm">
+            You’ll get ~ <span className="font-mono">{buyTokens.toLocaleString()}</span> {coin.symbol}
           </p>
+          <button
+            className="px-4 py-2 rounded-lg bg-white text-black font-medium cursor-pointer"
+            onClick={doBuy}
+            disabled={!connected}
+            title={connected ? 'Buy' : 'Connect wallet first'}
+          >
+            Buy
+          </button>
         </div>
-      </div>
 
-      {coin.description && (
-        <p className="text-white/80">{coin.description}</p>
-      )}
-
-      {coin.socials && (
-        <div className="flex flex-wrap gap-3 text-sm">
-          {coin.socials.website && (
-            <a className="underline" href={coin.socials.website} target="_blank" rel="noreferrer">Website</a>
-          )}
-          {coin.socials.x && (
-            <a className="underline" href={coin.socials.x} target="_blank" rel="noreferrer">X</a>
-          )}
-          {coin.socials.telegram && (
-            <a className="underline" href={coin.socials.telegram} target="_blank" rel="noreferrer">Telegram</a>
-          )}
+        {/* SELL */}
+        <div className="rounded-2xl border p-6 bg-black/20 grid gap-4">
+          <h3 className="font-semibold text-lg">Sell</h3>
+          <div className="flex items-center gap-2">
+            <input
+              className="px-3 py-2 rounded-lg bg-black/30 border w-40"
+              value={sellSol}
+              onChange={(e) => setSellSol(e.target.value)}
+              inputMode="decimal"
+              placeholder="0.01"
+            />
+            <span className="text-white/60">SOL</span>
+          </div>
+          <p className="text-white/70 text-sm">
+            Will send ~ <span className="font-mono">{sellTokens.toLocaleString()}</span> {coin.symbol}
+          </p>
+          <button
+            className="px-4 py-2 rounded-lg bg-white text-black font-medium cursor-pointer"
+            onClick={doSell}
+            disabled={!connected}
+            title={connected ? 'Sell' : 'Connect wallet first'}
+          >
+            Sell
+          </button>
         </div>
-      )}
-
-      <div className="flex flex-wrap gap-6 text-sm text-white/70">
-        <div>
-          Wallet SOL: <span className="font-mono">{solBal.toFixed(4)}</span>
-        </div>
-        <div>
-          Wallet {coin.symbol}:{' '}
-          <span className="font-mono">{tokBal.toLocaleString()}</span>
-        </div>
-        <div>
-          Mint: <span className="font-mono">{coin.mint ?? '—'}</span>
-        </div>
-      </div>
-    </section>
-
-    <section className="grid md:grid-cols-2 gap-6">
-      {/* BUY */}
-      <div className="rounded-2xl border p-6 bg-black/20 grid gap-4">
-        <h3 className="font-semibold text-lg">Buy</h3>
-        <div className="flex items-center gap-2">
-          <input
-            className="px-3 py-2 rounded-lg bg-black/30 border w-40"
-            value={buySol}
-            onChange={(e) => setBuySol(e.target.value)}
-            inputMode="decimal"
-            placeholder="0.05"
-          />
-          <span className="text-white/60">SOL</span>
-        </div>
-        <p className="text-white/70 text-sm">
-          You’ll get ~ <span className="font-mono">{buyTokens.toLocaleString()}</span> {coin.symbol}
-        </p>
-        <button
-          className="px-4 py-2 rounded-lg bg-white text-black font-medium cursor-pointer"
-          onClick={doBuy}
-          disabled={!connected}
-          title={connected ? 'Buy' : 'Connect wallet first'}
-        >
-          Buy
-        </button>
-      </div>
-
-      {/* SELL */}
-      <div className="rounded-2xl border p-6 bg-black/20 grid gap-4">
-        <h3 className="font-semibold text-lg">Sell</h3>
-        <div className="flex items-center gap-2">
-          <input
-            className="px-3 py-2 rounded-lg bg-black/30 border w-40"
-            value={sellSol}
-            onChange={(e) => setSellSol(e.target.value)}
-            inputMode="decimal"
-            placeholder="0.01"
-          />
-          <span className="text-white/60">SOL</span>
-        </div>
-        <p className="text-white/70 text-sm">
-          Will send ~ <span className="font-mono">{sellTokens.toLocaleString()}</span> {coin.symbol}
-        </p>
-        <button
-          className="px-4 py-2 rounded-lg bg-white text-black font-medium cursor-pointer"
-          onClick={doSell}
-          disabled={!connected}
-          title={connected ? 'Sell' : 'Connect wallet first'}
-        >
-          Sell
-        </button>
-      </div>
-    </section>
-  </main>
-);
-
+      </section>
+    </main>
+  );
 }
+
