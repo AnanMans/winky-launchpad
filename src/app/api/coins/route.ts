@@ -1,10 +1,23 @@
-// src/app/api/coins/route.ts
 export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/db';
-import { Connection, Keypair, PublicKey } from '@solana/web3.js';
-import { createMint, TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+} from '@solana/web3.js';
+import {
+  TOKEN_PROGRAM_ID,
+  MINT_SIZE,
+  getMinimumBalanceForRentExemptMint,
+  createInitializeMintInstruction,
+  getAssociatedTokenAddressSync,
+  createAssociatedTokenAccountIdempotentInstruction,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+} from '@solana/spl-token';
 
 // --- helpers ---
 function bad(msg: string, code = 400) {
@@ -46,7 +59,7 @@ export async function POST(req: NextRequest) {
       startPrice: startPriceIn,
 
       // optional fee/creator/migration fields
-      creatorAddress,        // prefer this; we'll validate as Pubkey
+      creatorAddress,        // prefer this; we'll validate as Pubkey (REQUIRED now for creator-pays)
       feeBps,                // per-coin override (total bps)
       creatorFeeBps,         // per-coin override (creator bps)
       migrated: migratedIn,  // boolean
@@ -55,6 +68,11 @@ export async function POST(req: NextRequest) {
     // required validations
     if (!name || !symbol || !logoUrl) {
       return bad('Missing required fields: name, symbol, logoUrl', 422);
+    }
+
+    // creator must be provided to be the fee payer for mint creation
+    if (!creatorAddress) {
+      return bad('Missing creatorAddress', 422);
     }
 
     // normalize simple fields
@@ -75,14 +93,12 @@ export async function POST(req: NextRequest) {
 
     // normalize/validate creator & fee overrides
     let creator: string | null = null;
-    if (typeof creatorAddress === 'string' && creatorAddress.length > 0) {
-      try {
-        // throws if invalid
-        new PublicKey(creatorAddress);
-        creator = creatorAddress;
-      } catch {
-        creator = null; // ignore invalid pubkey
-      }
+    let creatorPk: PublicKey;
+    try {
+      creatorPk = new PublicKey(creatorAddress);
+      creator = creatorPk.toBase58();
+    } catch {
+      return bad('Invalid creatorAddress', 422);
     }
 
     const fee_bps =
@@ -104,7 +120,7 @@ export async function POST(req: NextRequest) {
       'https://api.devnet.solana.com';
     const conn = new Connection(rpc, 'confirmed');
 
-    // Server signer (mint authority)
+    // Server signer (this remains the MINT AUTHORITY used later by buy/sell)
     const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
     if (!raw) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
 
@@ -117,21 +133,65 @@ export async function POST(req: NextRequest) {
     if (!Array.isArray(secret) || secret.length !== 64) {
       return bad('MINT_AUTHORITY_KEYPAIR must be a 64-byte secret key JSON array', 500);
     }
-    const payer = Keypair.fromSecretKey(Uint8Array.from(secret));
+    const serverMintAuthority = Keypair.fromSecretKey(Uint8Array.from(secret));
 
-    // 1) Create mint (6 decimals, Token-2022 not required here)
+    // 1) Create mint (creator pays) — build a tx for the CLIENT to sign & send
+    //    (server does NOT spend SOL here; it only partial-signs with the new mint keypair)
     const mintKp = Keypair.generate();
-    await createMint(
-      conn,
-      payer,                     // fee payer
-      payer.publicKey,           // mint authority
-      null,                      // freeze authority
-      6,                         // decimals
-      mintKp,                    // mint keypair
-      undefined,                 // confirm options
+    const mintPubkey = mintKp.publicKey;
+    const rent = await getMinimumBalanceForRentExemptMint(conn);
+
+    const { blockhash } = await conn.getLatestBlockhash('confirmed');
+
+    // account creation (fee payer = creator)
+    const createMintAccountIx = SystemProgram.createAccount({
+      fromPubkey: creatorPk,
+      newAccountPubkey: mintPubkey,
+      lamports: rent,
+      space: MINT_SIZE,
+      programId: TOKEN_PROGRAM_ID,
+    });
+
+    // initialize mint (mint authority = server; no freeze authority)
+    const initMintIx = createInitializeMintInstruction(
+      mintPubkey,
+      6,
+      serverMintAuthority.publicKey,
+      null,
       TOKEN_PROGRAM_ID
     );
-    const mintStr = mintKp.publicKey.toBase58();
+
+    // (optional) pre-create creator’s ATA in same tx so they’re ready to receive
+    const creatorAta = getAssociatedTokenAddressSync(
+      mintPubkey,
+      creatorPk,
+      false,
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+    const ataIx = createAssociatedTokenAccountIdempotentInstruction(
+      creatorPk,           // payer (creator funds ATA rent if needed)
+      creatorAta,
+      creatorPk,
+      mintPubkey,
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+
+    // assemble unsigned tx for the client to sign+send
+    const createTx = new Transaction({
+      feePayer: creatorPk,
+      recentBlockhash: blockhash,
+    }).add(createMintAccountIx, initMintIx, ataIx);
+
+    // server must partial-sign with the new mint keypair (required signer)
+    createTx.partialSign(mintKp);
+
+    const txB64 = Buffer.from(
+      createTx.serialize({ requireAllSignatures: false })
+    ).toString('base64');
+
+    const mintStr = mintPubkey.toBase58();
 
     // 2) Insert in Supabase (snake_case)
     const { data: row, error } = await supabaseAdmin
@@ -157,6 +217,8 @@ export async function POST(req: NextRequest) {
     if (error) return bad(error.message, 500);
 
     // 3) Finalize on-chain metadata (non-blocking)
+    // NOTE: this may run before the creator submits the createTx; that’s fine to keep as-is,
+    // but if your /finalize endpoint spends SOL, consider moving that to a client-signed flow too.
     try {
       await fetch(`${siteBase()}/api/finalize/${mintStr}`, {
         method: 'POST',
@@ -166,7 +228,7 @@ export async function POST(req: NextRequest) {
       console.error('[finalize] failed', e);
     }
 
-    // 4) Respond camelCase for UI
+    // 4) Respond camelCase for UI + the unsigned txB64 the creator must sign+send
     return NextResponse.json(
       {
         coin: {
@@ -187,6 +249,7 @@ export async function POST(req: NextRequest) {
           creatorFeeBps: row.creator_fee_bps,
           migrated: row.migrated,
         },
+        txB64, // <<< CREATOR must sign+send this tx
       },
       { status: 201 }
     );
