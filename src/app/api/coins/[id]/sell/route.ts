@@ -131,12 +131,25 @@ export async function POST(
     const sellerAta = getAssociatedTokenAddressSync(mint, seller, false, TOKEN_PID);
     const vaultAta  = getAssociatedTokenAddressSync(mint, vaultOwner, false, TOKEN_PID);
 
-    const ixEnsureVaultAta = createAssociatedTokenAccountIdempotentInstruction(
-      payer.publicKey, vaultAta, vaultOwner, mint, TOKEN_PID, ASSOCIATED_TOKEN_PROGRAM_ID
-    );
-    const ixEnsureSellerAta = createAssociatedTokenAccountIdempotentInstruction(
-      payer.publicKey, sellerAta, seller, mint, TOKEN_PID, ASSOCIATED_TOKEN_PROGRAM_ID
-    );
+// --- Ensure ATAs exist (idempotent)
+// Make the SELLER pay ATA rent so server doesn't need SOL
+const ixEnsureVaultAta = createAssociatedTokenAccountIdempotentInstruction(
+  seller,        // payer changed from payer.publicKey -> seller
+  vaultAta,
+  vaultOwner,
+  mint,
+  TOKEN_PID,
+  ASSOCIATED_TOKEN_PROGRAM_ID
+);
+
+const ixEnsureSellerAta = createAssociatedTokenAccountIdempotentInstruction(
+  seller,        // payer changed from payer.publicKey -> seller
+  sellerAta,
+  seller,
+  mint,
+  TOKEN_PID,
+  ASSOCIATED_TOKEN_PROGRAM_ID
+);
 
     // --- Quote token amount to transfer seller -> vault ---
     const tokensUi = quoteSellTokensUi(
