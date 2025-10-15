@@ -59,7 +59,7 @@ export async function POST(req: NextRequest) {
       startPrice: startPriceIn,
 
       // optional fee/creator/migration fields
-      creatorAddress,        // prefer this; we'll validate as Pubkey (REQUIRED now for creator-pays)
+      creatorAddress,        // REQUIRED now for creator-pays
       feeBps,                // per-coin override (total bps)
       creatorFeeBps,         // per-coin override (creator bps)
       migrated: migratedIn,  // boolean
@@ -69,7 +69,6 @@ export async function POST(req: NextRequest) {
     if (!name || !symbol || !logoUrl) {
       return bad('Missing required fields: name, symbol, logoUrl', 422);
     }
-
     // creator must be provided to be the fee payer for mint creation
     if (!creatorAddress) {
       return bad('Missing creatorAddress', 422);
@@ -140,7 +139,6 @@ export async function POST(req: NextRequest) {
     const mintKp = Keypair.generate();
     const mintPubkey = mintKp.publicKey;
     const rent = await getMinimumBalanceForRentExemptMint(conn);
-
     const { blockhash } = await conn.getLatestBlockhash('confirmed');
 
     // account creation (fee payer = creator)
@@ -217,8 +215,6 @@ export async function POST(req: NextRequest) {
     if (error) return bad(error.message, 500);
 
     // 3) Finalize on-chain metadata (non-blocking)
-    // NOTE: this may run before the creator submits the createTx; that’s fine to keep as-is,
-    // but if your /finalize endpoint spends SOL, consider moving that to a client-signed flow too.
     try {
       await fetch(`${siteBase()}/api/finalize/${mintStr}`, {
         method: 'POST',

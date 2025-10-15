@@ -11,6 +11,24 @@ import {
   VersionedTransaction,
 } from '@solana/web3.js';
 
+
+async function sendB64Tx(
+  txB64: string,
+  connection: ReturnType<typeof useConnection>['connection'],
+  sendTransaction: ReturnType<typeof useWallet>['sendTransaction']
+) {
+  const raw = Uint8Array.from(atob(txB64), (c) => c.charCodeAt(0));
+  let tx: Transaction | VersionedTransaction;
+  try {
+    tx = VersionedTransaction.deserialize(raw);
+  } catch {
+    tx = Transaction.from(raw);
+  }
+  const sig = await sendTransaction(tx, connection, { skipPreflight: false });
+  await connection.confirmTransaction(sig, 'confirmed');
+  return sig;
+}
+
 function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(' ');
 }
@@ -31,48 +49,50 @@ function SimpleUploader({
   const [preview, setPreview] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 const { publicKey, connected } = useWallet();
-  async function handlePick(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    setErr(null);
-    setFileName(f.name);
 
-    const isImage = /^image\/(png|jpeg|gif)$/.test(f.type);
-    const isVideo = f.type === 'video/mp4';
-    if (!isImage && !isVideo) {
-      setErr('Allowed types: .jpg .png .gif .mp4');
-      return;
-    }
-    if (isImage && f.size > 15 * 1024 * 1024) {
-      setErr('Max image size is 15MB.');
-      return;
-    }
-    if (isVideo && f.size > 30 * 1024 * 1024) {
-      setErr('Max video size is 30MB.');
-      return;
-    }
+async function handlePick(e: React.ChangeEvent<HTMLInputElement>) {
+  const f = e.target.files?.[0];
+  if (!f) return;
+  setErr(null);
+  setFileName(f.name);
 
-    if (isImage) setPreview(URL.createObjectURL(f));
-    else setPreview(null);
-
-    try {
-      setUploading(true);
-      const fd = new FormData();
-      fd.append('file', f);
-      fd.append('prefix', 'coins/');
-
-      const res = await fetch('/api/upload', { method: 'POST', body: fd });
-      if (!res.ok) throw new Error((await res.text()) || 'Upload failed');
-      const j = await res.json();
-      if (!j?.url) throw new Error('Upload failed (no URL returned)');
-      onUploaded(j.url);
-    } catch (e: any) {
-      setErr(e?.message || String(e));
-    } finally {
-      setUploading(false);
-      e.currentTarget.value = '';
-    }
+  const isImage = /^image\/(png|jpeg|gif)$/.test(f.type);
+  const isVideo = f.type === 'video/mp4';
+  if (!isImage && !isVideo) {
+    setErr('Allowed types: .jpg .png .gif .mp4');
+    return;
   }
+  if (isImage && f.size > 15 * 1024 * 1024) {
+    setErr('Max image size is 15MB.');
+    return;
+  }
+  if (isVideo && f.size > 30 * 1024 * 1024) {
+    setErr('Max video size is 30MB.');
+    return;
+  }
+
+  if (isImage) setPreview(URL.createObjectURL(f));
+  else setPreview(null);
+
+  try {
+    setUploading(true);
+    const fd = new FormData();
+    fd.append('file', f);
+    fd.append('prefix', 'coins/');
+
+    const res = await fetch('/api/upload', { method: 'POST', body: fd });
+    if (!res.ok) throw new Error((await res.text()) || 'Upload failed');
+    const j = await res.json();
+
+    if (!j?.url) throw new Error('Upload failed (no URL returned)');
+    onUploaded(j.url);
+  } catch (e: any) {
+    setErr(e?.message || String(e));
+  } finally {
+    setUploading(false);
+    e.currentTarget.value = '';
+  }
+}
 
   return (
     <div className="grid gap-2 rounded-xl border border-white/10 p-4">
