@@ -6,11 +6,9 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import {
-  PublicKey,
   Transaction,
   VersionedTransaction,
 } from '@solana/web3.js';
-
 
 async function sendB64Tx(
   txB64: string,
@@ -24,7 +22,7 @@ async function sendB64Tx(
   } catch {
     tx = Transaction.from(raw);
   }
-  const sig = await sendTransaction(tx, connection, { skipPreflight: false });
+  const sig = await sendTransaction(tx, connection, { skipPreflight: true });
   await connection.confirmTransaction(sig, 'confirmed');
   return sig;
 }
@@ -48,58 +46,57 @@ function SimpleUploader({
   const [fileName, setFileName] = useState<string | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-const { publicKey, connected } = useWallet();
+  const { publicKey } = useWallet();
 
-async function handlePick(e: React.ChangeEvent<HTMLInputElement>) {
-  const f = e.target.files?.[0];
-  if (!f) return;
-  setErr(null);
-  setFileName(f.name);
+  async function handlePick(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setErr(null);
+    setFileName(f.name);
 
-  const isImage = /^image\/(png|jpeg|gif)$/.test(f.type);
-  const isVideo = f.type === 'video/mp4';
-  if (!isImage && !isVideo) {
-    setErr('Allowed types: .jpg .png .gif .mp4');
-    return;
+    const isImage = /^image\/(png|jpeg|gif)$/.test(f.type);
+    const isVideo = f.type === 'video/mp4';
+    if (!isImage && !isVideo) {
+      setErr('Allowed types: .jpg .png .gif .mp4');
+      return;
+    }
+    if (isImage && f.size > 15 * 1024 * 1024) {
+      setErr('Max image size is 15MB.');
+      return;
+    }
+    if (isVideo && f.size > 30 * 1024 * 1024) {
+      setErr('Max video size is 30MB.');
+      return;
+    }
+
+    if (isImage) setPreview(URL.createObjectURL(f));
+    else setPreview(null);
+
+    try {
+      setUploading(true);
+      const fd = new FormData();
+      fd.append('file', f);
+      fd.append('prefix', 'coins/');
+
+      const res = await fetch('/api/upload', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error((await res.text()) || 'Upload failed');
+      const j = await res.json();
+
+      if (!j?.url) throw new Error('Upload failed (no URL returned)');
+      onUploaded(j.url);
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    } finally {
+      setUploading(false);
+      e.currentTarget.value = '';
+    }
   }
-  if (isImage && f.size > 15 * 1024 * 1024) {
-    setErr('Max image size is 15MB.');
-    return;
-  }
-  if (isVideo && f.size > 30 * 1024 * 1024) {
-    setErr('Max video size is 30MB.');
-    return;
-  }
-
-  if (isImage) setPreview(URL.createObjectURL(f));
-  else setPreview(null);
-
-  try {
-    setUploading(true);
-    const fd = new FormData();
-    fd.append('file', f);
-    fd.append('prefix', 'coins/');
-
-    const res = await fetch('/api/upload', { method: 'POST', body: fd });
-    if (!res.ok) throw new Error((await res.text()) || 'Upload failed');
-    const j = await res.json();
-
-    if (!j?.url) throw new Error('Upload failed (no URL returned)');
-    onUploaded(j.url);
-  } catch (e: any) {
-    setErr(e?.message || String(e));
-  } finally {
-    setUploading(false);
-    e.currentTarget.value = '';
-  }
-}
 
   return (
     <div className="grid gap-2 rounded-xl border border-white/10 p-4">
       <label className="text-sm font-medium">Select image or video to upload</label>
 
       <div className="flex items-center gap-3">
-        {/* Hidden input + styled label as button */}
         <label
           className={cx(
             'px-4 py-1.5 rounded-lg text-sm cursor-pointer',
@@ -140,6 +137,13 @@ async function handlePick(e: React.ChangeEvent<HTMLInputElement>) {
         </div>
       )}
 
+      {/* Optional: show connected creator wallet */}
+      {publicKey && (
+        <p className="text-xs text-white/50 mt-1">
+          Creator wallet: <span className="text-white/80">{publicKey.toBase58()}</span>
+        </p>
+      )}
+
       {err && <p className="text-xs text-red-400 break-all">{err}</p>}
     </div>
   );
@@ -176,7 +180,13 @@ export default function CreatePage() {
       alert('Please fill required fields and upload an image/video.');
       return;
     }
+    if (!publicKey) {
+      alert('Connect wallet first');
+      return;
+    }
+
     try {
+      // 1) Tell backend who pays for on-chain mint creation
       const res = await fetch('/api/coins', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -188,23 +198,38 @@ export default function CreatePage() {
           socials: { website, x: xUrl, telegram: tg },
           curve,
           strength,
- creatorAddress: publicKey?.toBase58() || null,
-creator: publicKey?.toBase58() || null,
-creatorFeeBps: 30, 
+          // IMPORTANT: creatorAddress = connected wallet (fee payer for mint account)
+          creatorAddress: publicKey.toBase58(),
+          // Optional: per-coin overrides if you want to expose them later
+          // feeBps,
+          // creatorFeeBps: 30,
+          // migrated: false,
         }),
       });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(j?.error || 'Create failed');
 
-      // Save id and show first-buy modal
-      setCreatedId(j.coin.id);
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(out?.error || 'Create failed');
+
+      const { txB64, coin } = out || {};
+      if (!txB64 || typeof txB64 !== 'string') {
+        throw new Error('Server did not return txB64');
+      }
+
+      // 2) Creator wallet signs + sends the mint-creation tx
+      await sendB64Tx(txB64, connection, sendTransaction);
+
+      // 3) Tiny wait so RPC sees the new account
+      await new Promise((r) => setTimeout(r, 500));
+
+      // 4) Save id & show first-buy modal
+      setCreatedId(coin?.id || null);
       setShowBuy(true);
 
-      // Auto-finalize so wallets show name/icon instantly (if mint is already known)
-      if (j.coin.mint) {
-        setCreatedMint(j.coin.mint);
+      // 5) Best-effort finalize metadata (icon/name in wallets)
+      if (coin?.mint) {
+        setCreatedMint(coin.mint);
         try {
-          const finRes = await fetch(`/api/finalize/${j.coin.mint}`, { method: 'POST' });
+          const finRes = await fetch(`/api/finalize/${coin.mint}`, { method: 'POST' });
           const finJson = await finRes.json().catch(() => ({}));
           if (!finRes.ok) console.warn('Finalize failed:', finJson?.error);
         } catch (err) {
@@ -238,7 +263,7 @@ creatorFeeBps: 30,
     }
 
     try {
-      // 2) Tell server to mint to creator (buyer pays if txB64 present)
+      // Ask server for a buy tx; user signs it
       const res = await fetch(`/api/coins/${createdId}/buy`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -252,25 +277,9 @@ creatorFeeBps: 30,
       if (!res.ok) throw new Error(j?.error || 'Server buy failed');
 
       if (j.txB64) {
-        // New path: server returned a partially-signed transaction.
-        const raw = Uint8Array.from(atob(j.txB64 as string), (c) =>
-          c.charCodeAt(0)
-        );
-
-        let tx: Transaction | VersionedTransaction;
-        try {
-          tx = VersionedTransaction.deserialize(raw);
-        } catch {
-          tx = Transaction.from(raw);
-        }
-
-        const sig2 = await sendTransaction(tx, connection, {
-          skipPreflight: true,
-        });
-        await connection.confirmTransaction(sig2, 'confirmed');
+        await sendB64Tx(j.txB64, connection, sendTransaction);
       }
 
-      // Navigate with banner
       pushWithBanner();
     } catch (e: any) {
       console.error('first-buy error', e);
@@ -432,8 +441,9 @@ creatorFeeBps: 30,
               <button
                 onClick={() => {
                   if (createdId) {
-                    // Skip → still show banner on coin page
-                    const banner = `${(name || 'Your coin').toUpperCase()} • ${String(curve || 'linear').toUpperCase()} • Strength ${strength ?? 2} — LET’S TRADE ON CURVE 🚀`;
+                    const banner = `${(name || 'Your coin').toUpperCase()} • ${String(
+                      curve || 'linear'
+                    ).toUpperCase()} • Strength ${strength ?? 2} — LET’S TRADE ON CURVE 🚀`;
                     router.push(`/coin/${createdId}?flash=${encodeURIComponent(banner)}`);
                   }
                 }}
