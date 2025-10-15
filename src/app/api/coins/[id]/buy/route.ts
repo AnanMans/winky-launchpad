@@ -102,14 +102,15 @@ export async function POST(
     }
 
     // --- Mint program & decimals ---
-    async function waitForMint(acc: PublicKey, tries = 4) {
-      for (let i = 0; i < tries; i++) {
-        const info = await conn.getAccountInfo(acc, 'confirmed');
-        if (info) return info;
-        await new Promise((r) => setTimeout(r, 300));
-      }
-      return null;
-    }
+async function waitForMint(acc: PublicKey, tries = 20, delayMs = 500) {
+  for (let i = 0; i < tries; i++) {
+    const info = await conn.getAccountInfo(acc, 'processed'); // looser commitment to see it sooner
+    if (info) return info;
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return null;
+}
+
     const mintAcc = await waitForMint(mintPk);
     if (!mintAcc) return bad('Mint account not found', 400);
 
