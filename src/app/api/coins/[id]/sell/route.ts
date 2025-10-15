@@ -1,4 +1,3 @@
-// src/app/api/coins/[id]/sell/route.ts
 export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -69,16 +68,31 @@ export async function POST(
     const migrated = (coin as any)?.migrated === true;
     const phase: Phase = migrated ? 'post' : 'pre';
 
-    // --- RPC & server signer (server pays seller) ---
+    // --- RPC ---
     const rpc =
       process.env.NEXT_PUBLIC_HELIUS_RPC ||
       process.env.NEXT_PUBLIC_RPC ||
       'https://api.devnet.solana.com';
     const conn = new Connection(rpc, 'confirmed');
 
-    const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
-    if (!raw) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
-    const payer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw)));
+    // (still load mint-authority if you use it elsewhere / for fallback vault owner)
+    const rawMintAuth = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
+    if (!rawMintAuth) return bad('Server missing MINT_AUTHORITY_KEYPAIR', 500);
+    const payer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(rawMintAuth)));
+
+    // --- Load TREASURY keypair (pays SOL to seller on SELL) ---
+    const rawTreasury = (process.env.PLATFORM_TREASURY_KEYPAIR || process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
+    if (!rawTreasury) return bad('Server missing PLATFORM_TREASURY_KEYPAIR (or MINT_AUTHORITY_KEYPAIR)', 500);
+    let treasurySecret: number[];
+    try {
+      treasurySecret = JSON.parse(rawTreasury);
+    } catch {
+      return bad('PLATFORM_TREASURY_KEYPAIR must be JSON array (64 bytes)', 500);
+    }
+    if (!Array.isArray(treasurySecret) || treasurySecret.length !== 64) {
+      return bad('PLATFORM_TREASURY_KEYPAIR must be 64-byte secret key JSON array', 500);
+    }
+    const treasuryKp = Keypair.fromSecretKey(Uint8Array.from(treasurySecret));
 
     // --- Detect token program & decimals ---
     const mint = new PublicKey(coin.mint);
@@ -131,25 +145,24 @@ export async function POST(
     const sellerAta = getAssociatedTokenAddressSync(mint, seller, false, TOKEN_PID);
     const vaultAta  = getAssociatedTokenAddressSync(mint, vaultOwner, false, TOKEN_PID);
 
-// --- Ensure ATAs exist (idempotent)
-// Make the SELLER pay ATA rent so server doesn't need SOL
-const ixEnsureVaultAta = createAssociatedTokenAccountIdempotentInstruction(
-  seller,        // payer changed from payer.publicKey -> seller
-  vaultAta,
-  vaultOwner,
-  mint,
-  TOKEN_PID,
-  ASSOCIATED_TOKEN_PROGRAM_ID
-);
+    // --- Ensure ATAs exist (idempotent) - SELLER pays ATA rent ---
+    const ixEnsureVaultAta = createAssociatedTokenAccountIdempotentInstruction(
+      seller,        // payer = seller
+      vaultAta,
+      vaultOwner,
+      mint,
+      TOKEN_PID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
 
-const ixEnsureSellerAta = createAssociatedTokenAccountIdempotentInstruction(
-  seller,        // payer changed from payer.publicKey -> seller
-  sellerAta,
-  seller,
-  mint,
-  TOKEN_PID,
-  ASSOCIATED_TOKEN_PROGRAM_ID
-);
+    const ixEnsureSellerAta = createAssociatedTokenAccountIdempotentInstruction(
+      seller,        // payer = seller
+      sellerAta,
+      seller,
+      mint,
+      TOKEN_PID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
 
     // --- Quote token amount to transfer seller -> vault ---
     const tokensUi = quoteSellTokensUi(
@@ -163,10 +176,10 @@ const ixEnsureSellerAta = createAssociatedTokenAccountIdempotentInstruction(
       sellerAta, mint, vaultAta, seller, amountTokensBase, decimals, [], TOKEN_PID
     );
 
-    // --- Server pays seller SOL payout ---
+    // --- Payout seller from TREASURY (must be funded by buy intake) ---
     const lamports = Math.floor(amountSol * 1_000_000_000);
     const ixPayout = SystemProgram.transfer({
-      fromPubkey: payer.publicKey,
+      fromPubkey: treasuryKp.publicKey,
       toPubkey: seller,
       lamports,
     });
@@ -184,7 +197,7 @@ const ixEnsureSellerAta = createAssociatedTokenAccountIdempotentInstruction(
         ]
       : [];
 
-    // --- Build tx (fee payer = seller). Server partial-signs payout. ---
+    // --- Build tx (fee payer = seller). Treasury partial-signs payout. ---
     const { blockhash } = await conn.getLatestBlockhash('processed');
     const tx = new Transaction({
       feePayer: seller,
@@ -195,10 +208,12 @@ const ixEnsureSellerAta = createAssociatedTokenAccountIdempotentInstruction(
       ixEnsureSellerAta,
       ixToken,     // seller -> vault tokens
       ...feeIxs,   // seller -> protocol/creator fees
-      ixPayout     // server -> seller SOL
+      ixPayout     // treasury -> seller SOL
     );
 
-    tx.partialSign(payer); // server signs its SOL transfer
+    // treasury signs its transfer
+    tx.partialSign(treasuryKp);
+
     const serialized = tx.serialize({ requireAllSignatures: false });
 
     return NextResponse.json({
