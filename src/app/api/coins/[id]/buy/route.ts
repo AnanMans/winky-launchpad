@@ -65,9 +65,12 @@ export async function POST(
     // --- Load coin row (include migrated so we can choose fee phase) ---
     const { data: coin, error: coinErr } = await supabase
       .from('coins')
-      .select('mint, curve, strength, start_price, creator, fee_bps, creator_fee_bps, migrated')
+      .select(
+        'mint, curve, strength, start_price, creator, fee_bps, creator_fee_bps, migrated'
+      )
       .eq('id', id)
       .single();
+
     if (coinErr || !coin) return bad('Coin not found', 404);
 
     // Fee phase (fallback to pre if column missing/falsey)
@@ -83,7 +86,7 @@ export async function POST(
       const secret = JSON.parse(raw) as number[];
       if (!Array.isArray(secret) || secret.length !== 64) {
         return bad('MINT_AUTHORITY_KEYPAIR must be 64-byte secret key JSON', 500);
-        }
+      }
       const payer = Keypair.fromSecretKey(Uint8Array.from(secret));
       const { Keypair: KP } = await import('@solana/web3.js');
       const newMint = KP.generate();
@@ -101,15 +104,15 @@ export async function POST(
       mintPk = new PublicKey(coin.mint);
     }
 
-    // --- Mint program & decimals ---
-async function waitForMint(acc: PublicKey, tries = 20, delayMs = 500) {
-  for (let i = 0; i < tries; i++) {
-    const info = await conn.getAccountInfo(acc, 'processed'); // looser commitment to see it sooner
-    if (info) return info;
-    await new Promise((r) => setTimeout(r, delayMs));
-  }
-  return null;
-}
+    // --- Mint program & decimals (wait for mint just in case it was freshly created) ---
+    async function waitForMint(acc: PublicKey, tries = 20, delayMs = 500) {
+      for (let i = 0; i < tries; i++) {
+        const info = await conn.getAccountInfo(acc, 'processed');
+        if (info) return info;
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+      return null;
+    }
 
     const mintAcc = await waitForMint(mintPk);
     if (!mintAcc) return bad('Mint account not found', 400);
@@ -129,7 +132,9 @@ async function waitForMint(acc: PublicKey, tries = 20, delayMs = 500) {
     (async () => {
       try {
         await fetch(`${siteBase}/api/finalize/${mintPk.toBase58()}`, { method: 'POST' });
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     })();
 
     // --- Quote how many tokens to mint for this SOL size ---
@@ -164,19 +169,22 @@ async function waitForMint(acc: PublicKey, tries = 20, delayMs = 500) {
     );
 
     // ---------------- Fees (buyer pays) ----------------
-    // Optional creator routing
     let creatorAddr: PublicKey | null = null;
     if (coin?.creator) {
-      try { creatorAddr = new PublicKey(coin.creator); } catch { /* ignore bad key */ }
+      try {
+        creatorAddr = new PublicKey(coin.creator);
+      } catch {
+        /* ignore bad key */
+      }
     }
 
-    // Fee treasury
     const feeTreasuryStr =
       process.env.NEXT_PUBLIC_FEE_TREASURY || process.env.NEXT_PUBLIC_TREASURY!;
-    if (!feeTreasuryStr) return bad('Missing NEXT_PUBLIC_FEE_TREASURY or NEXT_PUBLIC_TREASURY', 500);
+    if (!feeTreasuryStr) {
+      return bad('Missing NEXT_PUBLIC_FEE_TREASURY or NEXT_PUBLIC_TREASURY', 500);
+    }
     const feeTreasury = new PublicKey(feeTreasuryStr);
 
-    // Build fee transfers (buyer pays)
     const { ixs: feeIxs /*, detail: feeDetail */ } = buildFeeTransfers({
       feePayer: buyer,
       tradeSol: amountSol,
@@ -198,10 +206,10 @@ async function waitForMint(acc: PublicKey, tries = 20, delayMs = 500) {
         ]
       : [];
 
-    // (optional) buyer → platform SOL intake (if you are using this as curve treasury)
+    // Buyer → platform SOL intake (treasury/pool intake)
     const intakeIx = SystemProgram.transfer({
       fromPubkey: buyer,
-      toPubkey: platformTreasury,
+      toPubkey: platformTreasury, // ← fixed: DO NOT use `payer` (undefined)
       lamports: Math.floor(amountSol * LAMPORTS_PER_SOL),
     });
 
@@ -216,22 +224,23 @@ async function waitForMint(acc: PublicKey, tries = 20, delayMs = 500) {
     );
 
     const latest = await conn.getLatestBlockhash('confirmed');
-
     const tx = new Transaction({
-      feePayer: buyer,                 // buyer also pays the network fee
+      feePayer: buyer, // buyer pays network fee
       recentBlockhash: latest.blockhash,
     }).add(
       ...cuIxs,
-      createAtaIx,                     // ensure buyer ATA exists (no-op if already created)
-      intakeIx,                        // optional intake
-      ...feeIxs,                       // protocol + creator fees
-      mintIx                           // mint tokens to buyer
+      createAtaIx, // ensure buyer ATA exists (no-op if already created)
+      intakeIx,    // intake into platform treasury / pool
+      ...feeIxs,   // protocol + creator fees
+      mintIx       // mint tokens to buyer ATA
     );
 
     // server partial-signs as mint authority only
     tx.partialSign(mintAuthority);
 
-    const b64 = Buffer.from(tx.serialize({ requireAllSignatures: false })).toString('base64');
+    const b64 = Buffer.from(
+      tx.serialize({ requireAllSignatures: false })
+    ).toString('base64');
 
     return NextResponse.json({
       ok: true,
@@ -239,7 +248,6 @@ async function waitForMint(acc: PublicKey, tries = 20, delayMs = 500) {
       minted: uiToAmount(tokensUi, decimals).toString(),
       ata: ataAddr.toBase58(),
       txB64: b64,
-      // feeDetail, // uncomment if you want to inspect in DevTools
     });
   } catch (e: any) {
     console.error('[BUY] error:', e);
