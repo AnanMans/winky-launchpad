@@ -55,12 +55,13 @@ export async function POST(
       return bad('Invalid seller');
     }
 
-    // --- DB: load coin (needs a mint) ---
+    // --- Load coin (needs a mint) ---
     const { data: coin, error: coinErr } = await supabaseAdmin
       .from('coins')
       .select('mint, curve, strength, start_price, creator, fee_bps, creator_fee_bps, migrated')
       .eq('id', id)
       .single();
+
     if (coinErr) return bad(coinErr.message || 'DB error', 500);
     if (!coin?.mint) return bad('Coin mint not set yet', 400);
 
@@ -68,24 +69,34 @@ export async function POST(
     const migrated = (coin as any)?.migrated === true;
     const phase: Phase = migrated ? 'post' : 'pre';
 
-    // --- RPC & TREASURY signer (vault that pays seller & ATA rent) ---
+    // --- RPC ---
     const rpc =
       process.env.NEXT_PUBLIC_HELIUS_RPC ||
       process.env.NEXT_PUBLIC_RPC ||
       'https://api.devnet.solana.com';
     const conn = new Connection(rpc, 'confirmed');
 
-    const traw = (process.env.PLATFORM_TREASURY_KEYPAIR || '').trim();
-    if (!traw) return bad('Server missing PLATFORM_TREASURY_KEYPAIR', 500);
+    // --- Treasury public key (receives BUY intake & sends SELL payouts) ---
+    const platformTreasuryStr =
+      process.env.NEXT_PUBLIC_TREASURY || process.env.NEXT_PUBLIC_PLATFORM_WALLET;
+    if (!platformTreasuryStr) {
+      return bad('Missing NEXT_PUBLIC_TREASURY (or NEXT_PUBLIC_PLATFORM_WALLET)', 500);
+    }
+    const platformTreasury = new PublicKey(platformTreasuryStr);
+
+    // --- Treasury signer (SECRET KEY). Prefer PLATFORM_TREASURY_KEYPAIR; fallback to MINT_AUTHORITY_KEYPAIR ---
+    const rawTreasury =
+      (process.env.PLATFORM_TREASURY_KEYPAIR || process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
+    if (!rawTreasury) return bad('Server missing PLATFORM_TREASURY_KEYPAIR (or MINT_AUTHORITY_KEYPAIR fallback)', 500);
 
     let treasurySecret: number[];
     try {
-      treasurySecret = JSON.parse(traw);
+      treasurySecret = JSON.parse(rawTreasury);
     } catch {
-      return bad('PLATFORM_TREASURY_KEYPAIR must be a JSON array (64 bytes)', 500);
+      return bad('PLATFORM_TREASURY_KEYPAIR must be 64-byte secret key JSON array', 500);
     }
     if (!Array.isArray(treasurySecret) || treasurySecret.length !== 64) {
-      return bad('PLATFORM_TREASURY_KEYPAIR must be 64-byte secret key JSON array', 500);
+      return bad('PLATFORM_TREASURY_KEYPAIR must be a 64-byte secret key JSON array', 500);
     }
     const treasuryKp = Keypair.fromSecretKey(Uint8Array.from(treasurySecret));
 
@@ -101,27 +112,20 @@ export async function POST(
     const mintInfo = await getMint(conn, mint, 'confirmed', TOKEN_PID);
     const decimals = mintInfo.decimals;
 
-    // --- Creator (optional) & per-coin overrides (optional) ---
+    // --- Creator & optional per-coin fees override for buildFeeTransfers ---
     let creatorAddr: PublicKey | null = null;
     if (coin?.creator) {
-      try { creatorAddr = new PublicKey(coin.creator); } catch {}
-    }
-    let overrides: { totalBps?: number; creatorBps?: number } | undefined;
-    if (Number.isFinite(coin?.fee_bps) || Number.isFinite(coin?.creator_fee_bps)) {
-      overrides = {
-        totalBps: Number.isFinite(coin?.fee_bps) ? Number(coin!.fee_bps) : undefined,
-        creatorBps: Number.isFinite(coin?.creator_fee_bps) ? Number(coin!.creator_fee_bps) : undefined,
-      };
+      try { creatorAddr = new PublicKey(coin.creator); } catch { /* ignore */ }
     }
 
-    // --- Fee treasury (where protocol/creator fees go) ---
+    // --- Protocol/creator fee treasury (for buildFeeTransfers) ---
     const feeTreasuryStr =
       process.env.NEXT_PUBLIC_FEE_TREASURY || process.env.NEXT_PUBLIC_TREASURY!;
     if (!feeTreasuryStr) return bad('Missing NEXT_PUBLIC_FEE_TREASURY or NEXT_PUBLIC_TREASURY', 500);
     const feeTreasury = new PublicKey(feeTreasuryStr);
 
-    // --- Build fee IXs (seller pays protocol/creator fees) ---
-    const { ixs: feeIxs /*, detail: feeDetail */ } = buildFeeTransfers({
+    // --- Build fee instructions (seller pays) ---
+    const { ixs: feeIxs /*, detail */ } = buildFeeTransfers({
       feePayer: seller,
       tradeSol: amountSol,
       phase,
@@ -129,30 +133,24 @@ export async function POST(
       creatorAddress: creatorAddr ?? null,
     });
 
-    // --- ATAs (seller + vault) ---
-    // vault owner = NEXT_PUBLIC_PLATFORM_WALLET if set, else the treasury pubkey
-    let vaultOwner: PublicKey;
-    try {
-      const env = process.env.NEXT_PUBLIC_PLATFORM_WALLET;
-      vaultOwner = env ? new PublicKey(env) : treasuryKp.publicKey;
-    } catch {
-      vaultOwner = treasuryKp.publicKey;
-    }
+    // --- ATAs (seller & vault). Vault owner = platform treasury (pool) ---
+    const vaultOwner = platformTreasury;
 
     const sellerAta = getAssociatedTokenAddressSync(mint, seller, false, TOKEN_PID);
     const vaultAta  = getAssociatedTokenAddressSync(mint, vaultOwner, false, TOKEN_PID);
 
-    // Ensure ATAs exist (treasury pays ATA rent so seller doesn't need SOL)
+    // Ensure ATAs exist; seller pays rent to avoid server SOL drain
     const ixEnsureVaultAta = createAssociatedTokenAccountIdempotentInstruction(
-      treasuryKp.publicKey,         // payer
+      seller,        // payer = seller
       vaultAta,
       vaultOwner,
       mint,
       TOKEN_PID,
       ASSOCIATED_TOKEN_PROGRAM_ID
     );
+
     const ixEnsureSellerAta = createAssociatedTokenAccountIdempotentInstruction(
-      treasuryKp.publicKey,         // payer
+      seller,        // payer = seller
       sellerAta,
       seller,
       mint,
@@ -162,10 +160,7 @@ export async function POST(
 
     // --- Quote token amount to transfer seller -> vault ---
     const tokensUi = quoteSellTokensUi(
-      curve,
-      Number(coin.strength ?? 2),
-      Number(coin.start_price ?? 0),
-      amountSol
+      curve, Number(coin.strength ?? 2), Number(coin.start_price ?? 0), amountSol
     );
     if (!Number.isFinite(tokensUi) || tokensUi <= 0) return bad('Nothing to sell', 400);
     const amountTokensBase = uiToAmount(tokensUi, decimals);
@@ -175,7 +170,7 @@ export async function POST(
       sellerAta, mint, vaultAta, seller, amountTokensBase, decimals, [], TOKEN_PID
     );
 
-    // --- Payout seller from TREASURY (must be funded by buy intake) ---
+    // --- Payout seller from TREASURY (funded by BUY intake) ---
     const lamports = Math.floor(amountSol * 1_000_000_000);
     const ixPayout = SystemProgram.transfer({
       fromPubkey: treasuryKp.publicKey,
@@ -206,8 +201,8 @@ export async function POST(
       ixEnsureVaultAta,
       ixEnsureSellerAta,
       ixToken,     // seller -> vault tokens
-      ...feeIxs,   // seller -> protocol/creator fees (SOL from seller)
-      ixPayout     // treasury -> seller SOL payout (treasury signs)
+      ...feeIxs,   // seller -> protocol/creator fees
+      ixPayout     // treasury -> seller SOL
     );
 
     // treasury signs its transfer
