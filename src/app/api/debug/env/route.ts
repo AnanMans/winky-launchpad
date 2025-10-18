@@ -15,9 +15,16 @@ function pubFromSecret(name: string) {
 
 export async function GET() {
   return NextResponse.json({
+    // what your server is actually reading
     NEXT_PUBLIC_TREASURY: process.env.NEXT_PUBLIC_TREASURY || '(missing)',
     PLATFORM_TREASURY_KEYPAIR_pub: pubFromSecret('PLATFORM_TREASURY_KEYPAIR'),
     MINT_AUTHORITY_KEYPAIR_pub: pubFromSecret('MINT_AUTHORITY_KEYPAIR'),
+
+    // deployment context — super helpful to avoid hitting the wrong URL
+    VERCEL_ENV: process.env.VERCEL_ENV || '(unknown)',          // "production" | "preview" | "development"
+    VERCEL_URL: process.env.VERCEL_URL || '(unknown)',          // deployment hostname
+    VERCEL_REGION: process.env.VERCEL_REGION || '(unknown)',
+    VERCEL_GIT_COMMIT_SHA: process.env.VERCEL_GIT_COMMIT_SHA || '(unknown)',
   });
 }
 
