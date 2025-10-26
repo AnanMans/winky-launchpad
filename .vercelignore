@@ -1,0 +1,5 @@
+curve-launchpad/target
+curve-launchpad/target/**
+curve-launchpad/target/**/*
+**/*.so
+**/*.a
