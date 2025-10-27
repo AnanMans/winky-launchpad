@@ -1,6 +1,6 @@
 // src/app/api/ops/health/route.ts
 export const runtime = 'nodejs';
-
+import { TREASURY_PK } from "@/lib/config";
 import { NextResponse } from 'next/server';
 import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { getAssociatedTokenAddressSync } from '@solana/spl-token';
@@ -17,10 +17,11 @@ export async function GET() {
     const conn = new Connection(rpc, 'confirmed');
 
     // 2) Required: treasury public key (we use the public env; your routes already enforce drift)
-    const trePub = process.env.NEXT_PUBLIC_TREASURY;
-    if (!trePub) {
-      return NextResponse.json({ error: 'NEXT_PUBLIC_TREASURY missing' }, { status: 500 });
-    }
+const trePub = TREASURY_PK.toBase58();
+if (!trePub) {
+  return NextResponse.json({ error: "TREASURY missing in config" }, { status: 500 });
+}
+
     const TREASURY = new PublicKey(trePub);
 
     // 3) Optional: last mint to show vault token balance

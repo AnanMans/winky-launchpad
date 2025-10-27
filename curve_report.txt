@@ -1,0 +1,217 @@
+
+=== HOST ===
+Darwin anans-mac-mini 23.5.0 Darwin Kernel Version 23.5.0: Wed May  1 20:19:05 PDT 2024; root:xnu-10063.121.3~5/RELEASE_ARM64_T8112 arm64
+ProductName:		macOS
+ProductVersion:		14.5
+BuildVersion:		23F79
+
+=== Global env (masked subset) ===
+
+=== FRONTEND (sol-curve/web): PATH = /Users/ananmansour/sol-curve/web ===
+
+=== FRONTEND (sol-curve/web): GIT ===
+remote:
+origin	https://github.com/AnanMans/winky-launchpad.git (fetch)
+origin	https://github.com/AnanMans/winky-launchpad.git (push)
+branch/head:
+  checkpoint/2025-10-06-mvp 92af1a6 [origin/checkpoint/2025-10-06-mvp: ahead 3] coins POST: remove creator requirement; mint on create
+* main                      64c14e0 [origin/main: ahead 1] chore: vercel ignore program artifacts
+head:
+64c14e0495f82b61f33512624045db9ecc44031a
+last 5:
+64c14e0 chore: vercel ignore program artifacts
+813a23a ops/health: use getTokenAccountBalance for vault ATA
+24ff409 buy: add treasury drift check; remove debug endpoint
+1f37dfb debug: add /api/debug/env to show treasury & key alignment
+1322b55 debug: add /api/debug/env to show treasury & key alignment
+status:
+ M next.config.ts
+ M package-lock.json
+ M package.json
+ M src/app/api/coins/[id]/buy/route.ts
+ M src/app/api/coins/[id]/route.ts
+ M src/app/api/coins/[id]/sell/route.ts
+ D src/app/api/coins/[id]/trades/route.ts
+ M src/app/api/coins/route.ts
+ M src/app/api/envcheck/route.ts
+ M src/app/api/ops/health/route.ts
+ M src/app/coin/[id]/page.tsx
+ M src/app/coins/page.tsx
+ M src/app/layout.tsx
+ M src/app/page.tsx
+ M src/components/ClientProviders.tsx
+ M src/components/WalletButton.tsx
+?? __backup__/20251026_192223/api_coins_[mint]/route.ts
+?? __backup__/api_coins_20251026_171816/[id]/buy/route.ts
+?? __backup__/api_coins_20251026_171816/[id]/route.ts
+?? __backup__/api_coins_20251026_171816/[id]/sell/route.ts
+?? __backup__/api_coins_20251026_171816/[id]/trades/route.ts
+?? __backup__/api_coins_20251026_171816/[mint]/route.ts
+?? __backup__/coin_20251026_181708/[mint]/page.tsx
+?? __snapshot__/20251027_201025/web.tgz
+?? curve-launchpad/
+?? curve_diag.sh
+?? curve_report.txt
+?? src/app/api/coins/[id]/init/route.ts
+?? src/app/api/debug/env/route.ts
+?? src/components/CurveActions.tsx
+?? src/lib/config.ts
+?? src/lib/curveClient.ts
+?? src/lib/curveClient_sanity.bak
+?? src/lib/pdas.ts
+?? src/lib/supabaseAdmin.ts
+?? src/types/curve_launchpad.ts
+?? src/types/idl/curve_launchpad.json
+?? web/src/idl/curve_launchpad.json
+?? web/src/types/curve_launchpad.ts
+
+=== FRONTEND (sol-curve/web): env keys (.env.local masked) ===
+SUPABASE_URL=***REDACTED***
+NEXT_PUBLIC_SUPABASE_URL=***REDACTED***
+NEXT_PUBLIC_SUPABASE_ANON_KEY=***REDACTED***
+SUPABASE_SERVICE_ROLE_KEY=***REDACTED***
+
+# --- Solana / RPC (Helius devnet) ---
+NEXT_PUBLIC_SOLANA_RPC=***REDACTED***
+
+# --- Treasury (devnet) ---
+NEXT_PUBLIC_TREASURY=***REDACTED***
+PLATFORM_TREASURY_KEYPAIR=***REDACTED***
+NEXT_PUBLIC_PLATFORM_WALLET=***REDACTED***
+
+# --- Mint authority (JSON array) ---
+MINT_AUTHORITY_KEYPAIR=***REDACTED***
+SITE_BASE=***REDACTED***
+
+PRIORITY_FEES=***REDACTED***
+PRIORITY_MICROLAMPORTS=***REDACTED***
+COMPUTE_UNIT_LIMIT=***REDACTED***
+
+NEXT_PUBLIC_HELIUS_RPC=***REDACTED***
+
+# --- Fee splits (basis points =***REDACTED***
+# PRE =***REDACTED***
+# POST =***REDACTED***
+
+F_PROTOCOL_BP_PRE=***REDACTED***
+F_CREATOR_BP_PRE=***REDACTED***
+
+F_PROTOCOL_BP_POST=***REDACTED***
+F_CREATOR_BP_POST=***REDACTED***
+
+# --- Absolute caps per trade (lamports) ---
+# 0.5 SOL cap pre, 0.25 SOL post (change as you like)
+F_CAP_LAMPORTS_PRE=***REDACTED***
+F_CAP_LAMPORTS_POST=***REDACTED***
+
+NEXT_PUBLIC_FEE_TREASURY=***REDACTED***
+
+NEXT_PUBLIC_PROGRAM_ID=***REDACTED***
+
+NEXT_PUBLIC_DEMO_MINT=***REDACTED***
+
+=== FRONTEND (sol-curve/web): node & next ===
+v24.4.1
+11.4.2
+1.22.22
+jq-1.8.1
+
+=== FRONTEND (sol-curve/web): package.json (name+scripts) ===
+{
+  "name": "web",
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build --turbopack",
+    "start": "next start",
+    "lint": "eslint"
+  }
+}
+
+=== FRONTEND (sol-curve/web): file tree (app/components/api) ===
+src/app
+├── api
+│   ├── coins
+│   │   ├── [id]
+│   │   └── route.ts
+│   ├── debug
+│   │   └── env
+│   ├── envcheck
+│   │   └── route.ts
+│   ├── finalize
+│   │   └── [mint]
+│   ├── meta
+│   │   └── [mint]
+│   ├── metadata
+│   │   └── [mint]
+│   ├── ops
+│   │   └── health
+│   ├── ping-rpc
+│   │   └── route.ts
+│   └── upload
+│       └── route.ts
+├── coin
+│   └── [id]
+│       └── page.tsx
+├── coins
+│   └── page.tsx
+├── create
+│   └── page.tsx
+├── favicon.ico
+├── globals.css
+├── layout.tsx
+└── page.tsx
+src/components
+├── ActivitySparkline.tsx
+├── ClientProviders.tsx
+├── ConnectWallet.tsx
+├── CurveActions.tsx
+├── CurveChart.tsx
+├── CurveParams.tsx
+├── WalletButton.tsx
+├── WalletStatus.tsx
+└── ui
+    ├── button.tsx
+    ├── card.tsx
+    ├── dialog.tsx
+    ├── input.tsx
+    ├── label.tsx
+    ├── select.tsx
+    ├── slider.tsx
+    └── tooltip.tsx
+src/lib
+├── config.ts
+├── curve.ts
+├── curveClient.ts
+├── curveClient_sanity.bak
+├── curves.ts
+├── db.ts
+├── fees.ts
+├── pdas.ts
+├── store.ts
+├── supabaseAdmin.ts
+├── types.ts
+├── upload.ts
+└── utils.ts
+
+24 directories, 40 files
+
+=== PROGRAM (programs/curve_launchpad): PATH NOT FOUND (/Users/ananmansour/programs/curve_launchpad) ===
+
+=== Solana/Helius ===
+solana-cli 2.2.20 (src:dabc99a5; feat:3073396398, client:Agave)
+Config File: /Users/ananmansour/.config/solana/cli/config.yml
+RPC URL: https://api.devnet.solana.com 
+WebSocket URL: wss://api.devnet.solana.com/ (computed)
+Keypair Path: /Users/ananmansour/.config/solana/id.json 
+Commitment: confirmed 
+HvUFCReFQNakWtXQ7SRu6aME5ZmB8i2ifCN8uiSm6rbV
+3.73672276 SOL
+
+=== Vercel (if logged in) ===
+Vercel CLI 48.6.0
+ananmans
+Vercel CLI 48.6.0
+Error: unknown or unexpected option: --environment
+not logged into Vercel CLI
+
+--- END ---

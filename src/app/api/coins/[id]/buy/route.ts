@@ -1,297 +1,112 @@
-export const runtime = 'nodejs';
-
-import { NextRequest, NextResponse } from 'next/server';
-import { supabase, supabaseAdmin } from '@/lib/db';
-import { quoteTokensUi } from '@/lib/curve';
-import { buildFeeTransfers, type Phase } from '@/lib/fees';
-
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import {
   Connection,
   PublicKey,
-  Keypair,
-  LAMPORTS_PER_SOL,
-  Transaction,
   SystemProgram,
-  ComputeBudgetProgram,
-} from '@solana/web3.js';
+  TransactionInstruction,
+  TransactionMessage,
+  VersionedTransaction,
+} from "@solana/web3.js";
+import { PROGRAM_ID, RPC_URL } from "@/lib/config";
 
-import {
-  getMint,
-  createMintToInstruction,
-  createAssociatedTokenAccountIdempotentInstruction,
-  getAssociatedTokenAddressSync,
-  TOKEN_PROGRAM_ID,
-  TOKEN_2022_PROGRAM_ID,
-  ASSOCIATED_TOKEN_PROGRAM_ID,
-} from '@solana/spl-token';
+// PDA must match your on-chain program (same as init/sell)
+function curveStatePda(mint: PublicKey) {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("curve"), mint.toBuffer()],
+    PROGRAM_ID
+  )[0];
+}
 
-/** Small helpers */
-function bad(msg: string, code = 400) {
-  return NextResponse.json({ error: msg }, { status: code });
+// helpers
+function bad(msg: string, code = 400, extra: any = {}) {
+  return NextResponse.json({ error: msg, ...extra }, { status: code });
 }
-function uiToAmount(ui: number, decimals: number): bigint {
-  const [i, f = ''] = String(ui).split('.');
-  const frac = (f + '0'.repeat(decimals)).slice(0, decimals);
-  return BigInt(i || '0') * (10n ** BigInt(decimals)) + BigInt(frac || '0');
+function ok(data: any, code = 200) {
+  return NextResponse.json(data, { status: code });
 }
-function requireJsonKeypair(name: string): Keypair {
-  const raw = (process.env[name] || '').trim();
-  if (!raw) throw new Error(`Server missing ${name}`);
-  let arr: number[];
-  try {
-    arr = JSON.parse(raw);
-  } catch {
-    throw new Error(`${name} is not valid JSON`);
-  }
-  if (!Array.isArray(arr) || arr.length !== 64 || !arr.every(n => Number.isInteger(n))) {
-    throw new Error(`${name} must be a 64-int JSON array`);
-  }
-  return Keypair.fromSecretKey(Uint8Array.from(arr));
+function u64(n: number | bigint) {
+  const v = BigInt(Math.floor(Number(n)));
+  const a = new Uint8Array(8);
+  new DataView(a.buffer).setBigUint64(0, v, true);
+  return Buffer.from(a);
 }
+
+// discriminator for trade_buy
+const DISC_BUY = Buffer.from([173, 172, 52, 244, 61, 65, 216, 118]);
 
 export async function POST(
-  req: NextRequest,
-  context: { params: Promise<{ id: string }> }
+  req: Request,
+  ctx: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = await context.params;
-    const body = await req.json().catch(() => ({} as any));
+    const { id } = await ctx.params;
 
-    const buyerStr: string | undefined = body?.buyer;
-    const amountSol: number = Number(body?.amountSol);
+    let body: any = {};
+    try { body = await req.json(); } catch {}
+    const buyerStr  = (body.buyer ?? "").trim();
+    const amountSol = Number(body.amountSol ?? 0);
 
-    if (!buyerStr) return bad('Missing buyer');
-    if (!Number.isFinite(amountSol) || amountSol <= 0) return bad('Invalid amount');
+    if (!buyerStr) return bad("Missing buyer");
+    if (!Number.isFinite(amountSol) || amountSol <= 0) return bad("Invalid amount");
 
-    // --- RPC ---
-    const rpc =
-      process.env.NEXT_PUBLIC_HELIUS_RPC ||
-      process.env.NEXT_PUBLIC_RPC ||
-      'https://api.devnet.solana.com';
-    const conn = new Connection(rpc, 'confirmed');
-
-    // --- Resolve treasury from secret (source of truth) ---
-    // IMPORTANT: derive the public key from the server secret to avoid env drift
-    const platformTreasuryKp = requireJsonKeypair('PLATFORM_TREASURY_KEYPAIR');
-    const platformTreasury = platformTreasuryKp.publicKey;
-
-    // Optional but recommended: assert it matches the public env (fail fast if Vercel/client is stale)
-    const trePub = process.env.NEXT_PUBLIC_TREASURY;
-    if (!trePub) return bad('Server missing NEXT_PUBLIC_TREASURY', 500);
-    if (trePub !== platformTreasury.toBase58()) {
-      // Hard fail so we don’t silently send intake to the wrong account
-      return bad(
-        `TREASURY drift: NEXT_PUBLIC_TREASURY=${trePub} != PLATFORM_TREASURY_KEYPAIR pubkey=${platformTreasury.toBase58()}`,
-        500
-      );
+    // Resolve mint (id can be mint or UUID)
+    let mintPk: PublicKey | null = null;
+    if (id.length >= 32 && id.length <= 44) {
+      try { mintPk = new PublicKey(id); } catch {}
+    }
+    if (!mintPk) {
+      const { data, error } = await supabaseAdmin
+        .from("coins")
+        .select("mint")
+        .eq("id", id)
+        .maybeSingle();
+      if (error) return bad(error.message, 500);
+      if (!data?.mint) return bad("Coin not found for this id");
+      try { mintPk = new PublicKey(data.mint); } catch { return bad("Stored mint is not a valid public key"); }
     }
 
     const buyer = new PublicKey(buyerStr);
+    const state = curveStatePda(mintPk);
+    const lamports = Math.floor(amountSol * 1e9);
 
-    // --- Load coin row (include migrated so we can choose fee phase) ---
-    const { data: coin, error: coinErr } = await supabase
-      .from('coins')
-      .select(
-        'mint, curve, strength, start_price, creator, fee_bps, creator_fee_bps, migrated'
-      )
-      .eq('id', id)
-      .single();
+    const connection = new Connection(RPC_URL, "confirmed");
 
-    if (coinErr || !coin) return bad('Coin not found', 404);
-
-    // Fee phase (fallback to pre if column missing/falsey)
-    const migrated = (coin as any)?.migrated === true;
-    const phase: Phase = migrated ? 'post' : 'pre';
-
-    // --- Ensure mint exists (fallback create) ---
-    let mintPk: PublicKey;
-    if (!coin.mint) {
-      const mintAuthorityForCreate = requireJsonKeypair('MINT_AUTHORITY_KEYPAIR');
-      const { Keypair: KP } = await import('@solana/web3.js');
-      const newMint = KP.generate();
-
-      const { createMint } = await import('@solana/spl-token');
-      await createMint(conn, mintAuthorityForCreate, mintAuthorityForCreate.publicKey, null, 6, newMint);
-      mintPk = newMint.publicKey;
-
-      await supabaseAdmin
-        .from('coins')
-        .update({ mint: mintPk.toBase58() })
-        .eq('id', id)
-        .is('mint', null);
-    } else {
-      mintPk = new PublicKey(coin.mint);
-    }
-
-    // --- Mint program & decimals (wait for mint just in case it was freshly created) ---
-    async function waitForMint(acc: PublicKey, tries = 20, delayMs = 500) {
-      for (let i = 0; i < tries; i++) {
-        const info = await conn.getAccountInfo(acc, 'processed');
-        if (info) return info;
-        await new Promise((r) => setTimeout(r, delayMs));
-      }
-      return null;
-    }
-
-    const mintAcc = await waitForMint(mintPk);
-    if (!mintAcc) return bad('Mint account not found', 400);
-
-    const TOKEN_PID = mintAcc.owner.equals(TOKEN_2022_PROGRAM_ID)
-      ? TOKEN_2022_PROGRAM_ID
-      : TOKEN_PROGRAM_ID;
-
-    const mintInfo = await getMint(conn, mintPk, 'confirmed', TOKEN_PID);
-    const decimals = mintInfo.decimals;
-
-    // ---- Best-effort finalize metadata in background (non-blocking) ----
-    const siteBase =
-      process.env.SITE_BASE ||
-      (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
-
-    (async () => {
-      try {
-        await fetch(`${siteBase}/api/finalize/${mintPk.toBase58()}`, { method: 'POST' });
-      } catch {
-        /* ignore */
-      }
-    })();
-
-    // --- Quote how many tokens to mint for this SOL size ---
-    const tokensUi = quoteTokensUi(
-      amountSol,
-      (coin.curve || 'linear') as 'linear' | 'degen' | 'random',
-      Number(coin.strength ?? 2),
-      Number(coin.start_price ?? 0)
-    );
-
-    // --- Mint authority (server signer to mint tokens) ---
-    const mintAuthority = requireJsonKeypair('MINT_AUTHORITY_KEYPAIR');
-
-    // --- Derive buyer ATA + idempotent-creation ix (buyer pays rent) ---
-    const ataAddr = getAssociatedTokenAddressSync(
-      mintPk,
-      buyer,
-      false,
-      TOKEN_PID,
-      ASSOCIATED_TOKEN_PROGRAM_ID
-    );
-
-    const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
-      buyer,        // payer = buyer (inside user's tx)
-      ataAddr,      // ATA address
-      buyer,        // token account owner
-      mintPk,
-      TOKEN_PID,
-      ASSOCIATED_TOKEN_PROGRAM_ID
-    );
-
-    // ---------------- Fees (buyer pays) ----------------
-    let creatorAddr: PublicKey | null = null;
-    if (coin?.creator) {
-      try {
-        creatorAddr = new PublicKey(coin.creator);
-      } catch {
-        /* ignore bad key */
-      }
-    }
-
-    const feeTreasuryStr =
-      process.env.NEXT_PUBLIC_FEE_TREASURY || process.env.NEXT_PUBLIC_TREASURY!;
-    if (!feeTreasuryStr) {
-      return bad('Missing NEXT_PUBLIC_FEE_TREASURY or NEXT_PUBLIC_TREASURY', 500);
-    }
-    const feeTreasury = new PublicKey(feeTreasuryStr);
-
-    const { ixs: feeIxs /*, detail: feeDetail */ } = buildFeeTransfers({
-      feePayer: buyer,
-      tradeSol: amountSol,
-      phase,
-      protocolTreasury: feeTreasury,
-      creatorAddress: creatorAddr ?? null,
-    });
-
-    // ---------------- Build mint-to + transfers in ONE tx ----------------
-    const priority = process.env.PRIORITY_FEES === 'true';
-    const cuIxs = priority
-      ? [
-          ComputeBudgetProgram.setComputeUnitPrice({
-            microLamports: Number(process.env.PRIORITY_MICROLAMPORTS ?? 2000),
-          }),
-          ComputeBudgetProgram.setComputeUnitLimit({
-            units: Number(process.env.COMPUTE_UNIT_LIMIT ?? 200000),
-          }),
-        ]
-      : [];
-
-    // Buyer → platform SOL intake (treasury/pool intake)
-    // USE the derived platformTreasury from the secret to avoid drift
-    const lamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
-    const intakeIx = SystemProgram.transfer({
+    // Build EXACT instruction order your program expects:
+    // 1) native SOL transfer buyer -> state
+    const transferIx = SystemProgram.transfer({
       fromPubkey: buyer,
-      toPubkey: platformTreasury,
+      toPubkey: state,
       lamports,
     });
 
-    // Mint to buyer ATA (server is mint authority)
-    const mintIx = createMintToInstruction(
-      mintPk,
-      ataAddr,
-      mintAuthority.publicKey,
-      uiToAmount(tokensUi, decimals),
-      [],
-      TOKEN_PID
-    );
+    // 2) program ix: trade_buy(buyer, mint, state, system_program) + [amount u64]
+    const data = Buffer.concat([DISC_BUY, u64(lamports)]);
+    const keys = [
+      { pubkey: buyer,                 isSigner: true,  isWritable: true  },
+      { pubkey: mintPk,                isSigner: false, isWritable: false },
+      { pubkey: state,                 isSigner: false, isWritable: true  },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ];
+    const buyIx = new TransactionInstruction({ programId: PROGRAM_ID, keys, data });
 
-    // Optional memo to tag buys for chain forensics
-    const memoIx = {
-      programId: new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'),
-      keys: [],
-      data: Buffer.from(`BUY:${id}`),
-    } as any;
+    // Compile as a versioned tx (v0)
+    const { blockhash, lastValidBlockHeight } =
+      await connection.getLatestBlockhash("confirmed");
 
-    const latest = await conn.getLatestBlockhash('confirmed');
-    const tx = new Transaction({
-      feePayer: buyer, // buyer pays network fee
-      recentBlockhash: latest.blockhash,
-    }).add(
-      ...cuIxs,
-      createAtaIx, // ensure buyer ATA exists (no-op if already created)
-      intakeIx,    // intake into platform treasury / pool
-      ...feeIxs,   // protocol + creator fees
-      mintIx,      // mint tokens to buyer ATA
-      memoIx
-    );
+    const msg = new TransactionMessage({
+      payerKey: buyer,
+      recentBlockhash: blockhash,
+      instructions: [transferIx, buyIx],
+    }).compileToV0Message();
 
-    // server partial-signs as mint authority only
-    tx.partialSign(mintAuthority);
+    const vtx = new VersionedTransaction(msg);
+    const txB64 = Buffer.from(vtx.serialize()).toString("base64");
 
-    // Log once for sanity (shows exactly where intake is headed)
-    console.log('[BUY build]', {
-      id,
-      rpc,
-      buyer: buyer.toBase58(),
-      toTreasury: platformTreasury.toBase58(),
-      lamports,
-      tokenMint: mintPk.toBase58(),
-      decimals,
-      tokensUi,
-      feeTreasury: feeTreasury.toBase58(),
-    });
-
-    const b64 = Buffer.from(
-      tx.serialize({ requireAllSignatures: false })
-    ).toString('base64');
-
-    return NextResponse.json({
-      ok: true,
-      tokensUi,
-      minted: uiToAmount(tokensUi, decimals).toString(),
-      ata: ataAddr.toBase58(),
-      txB64: b64,
-    });
+    return ok({ txB64, state: state.toBase58(), blockhash, lastValidBlockHeight, version: 0 });
   } catch (e: any) {
-    console.error('[BUY] error:', e);
-    return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
+    console.error("[/api/coins/[id]/buy] error:", e);
+    return NextResponse.json({ error: e?.message || "Buy route failed" }, { status: 500 });
   }
 }
 

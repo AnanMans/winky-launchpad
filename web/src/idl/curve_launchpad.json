@@ -1,0 +1,345 @@
+{
+  "address": "CvwMz6fbxqGNKAY9XmVABaGk3X3ZPSEncoChXr7eK1sQ",
+  "metadata": {
+    "name": "curve_launchpad",
+    "version": "0.1.0",
+    "spec": "0.1.0"
+  },
+  "instructions": [
+    {
+      "name": "create_curve",
+      "discriminator": [
+        169,
+        235,
+        221,
+        223,
+        65,
+        109,
+        120,
+        183
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "docs": [
+            "Payer of rent/fees"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "creator"
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "curve_pda",
+          "writable": true
+        },
+        {
+          "name": "vault_sol_pda",
+          "writable": true
+        },
+        {
+          "name": "reserve_token_ata",
+          "writable": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "_args",
+          "type": {
+            "defined": {
+              "name": "CreateArgs"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "graduate",
+      "discriminator": [
+        45,
+        235,
+        225,
+        181,
+        17,
+        218,
+        64,
+        130
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "docs": [
+            "Anyone can trigger when threshold reached"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "curve_pda",
+          "writable": true
+        },
+        {
+          "name": "vault_sol_pda",
+          "writable": true
+        },
+        {
+          "name": "reserve_token_ata",
+          "writable": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "trade_buy",
+      "discriminator": [
+        173,
+        172,
+        52,
+        244,
+        61,
+        65,
+        216,
+        118
+      ],
+      "accounts": [
+        {
+          "name": "user",
+          "docs": [
+            "User paying SOL"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "curve_pda"
+        },
+        {
+          "name": "vault_sol_pda",
+          "writable": true
+        },
+        {
+          "name": "reserve_token_ata",
+          "writable": true
+        },
+        {
+          "name": "buyer_ata",
+          "writable": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "_args",
+          "type": {
+            "defined": {
+              "name": "TradeBuyArgs"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "trade_sell",
+      "discriminator": [
+        59,
+        162,
+        77,
+        109,
+        9,
+        82,
+        216,
+        160
+      ],
+      "accounts": [
+        {
+          "name": "user",
+          "docs": [
+            "User selling tokens"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "curve_pda"
+        },
+        {
+          "name": "vault_sol_pda",
+          "writable": true
+        },
+        {
+          "name": "reserve_token_ata",
+          "writable": true
+        },
+        {
+          "name": "seller_ata",
+          "writable": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "_args",
+          "type": {
+            "defined": {
+              "name": "TradeSellArgs"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "EventCurveCreated",
+      "discriminator": [
+        206,
+        209,
+        198,
+        233,
+        136,
+        122,
+        134,
+        1
+      ]
+    },
+    {
+      "name": "EventGraduated",
+      "discriminator": [
+        135,
+        158,
+        132,
+        6,
+        81,
+        205,
+        174,
+        195
+      ]
+    },
+    {
+      "name": "EventTrade",
+      "discriminator": [
+        183,
+        212,
+        34,
+        229,
+        129,
+        48,
+        37,
+        229
+      ]
+    }
+  ],
+  "types": [
+    {
+      "name": "CreateArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "curve_type",
+            "type": "u8"
+          },
+          {
+            "name": "decimals",
+            "type": "u8"
+          },
+          {
+            "name": "params",
+            "type": "bytes"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EventCurveCreated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mint",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EventGraduated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mint",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EventTrade",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "side",
+            "type": "u8"
+          },
+          {
+            "name": "user",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TradeBuyArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "lamports_in",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TradeSellArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "tokens_in",
+            "type": "u64"
+          }
+        ]
+      }
+    }
+  ]
+}

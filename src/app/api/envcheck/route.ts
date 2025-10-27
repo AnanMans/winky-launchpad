@@ -1,4 +1,5 @@
 export const runtime = 'nodejs';
+import { TREASURY_PK } from "@/lib/config";
 
 import { NextResponse } from 'next/server';
 
@@ -54,7 +55,8 @@ export async function GET() {
       keypairLen,
       hasNEXT_PUBLIC_SUPABASE_URL: Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL),
       hasNEXT_PUBLIC_SUPABASE_ANON_KEY: Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
-      hasNEXT_PUBLIC_TREASURY: Boolean(process.env.NEXT_PUBLIC_TREASURY),
+hasNEXT_PUBLIC_TREASURY: Boolean(TREASURY_PK),
+
       siteBase: process.env.SITE_BASE || 'http://localhost:3000',
       rpc: rpc || null,
       blockhash,

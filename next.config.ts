@@ -1,19 +1,24 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  eslint: {
-    // Let the build succeed even if ESLint finds issues
-    ignoreDuringBuilds: true,
+  images: {
+    remotePatterns: [
+      {
+        protocol: "https",
+        hostname: "pvscebzckhtrbhvaxcbj.supabase.co",
+        pathname: "/storage/v1/object/public/**",
+      },
+    ],
   },
-  turbopack: {
-    // Silence the "inferred workspace root" warning and point to this app
-    root: __dirname,
+  env: {
+    NEXT_PUBLIC_SOLANA_RPC: process.env.NEXT_PUBLIC_SOLANA_RPC,
+    NEXT_PUBLIC_HELIUS_RPC: process.env.NEXT_PUBLIC_HELIUS_RPC,
+    RPC_URL: process.env.RPC_URL,
+    NEXT_PUBLIC_PROGRAM_ID: process.env.NEXT_PUBLIC_PROGRAM_ID,
+    NEXT_PUBLIC_TREASURY: process.env.NEXT_PUBLIC_TREASURY,
+    NEXT_PUBLIC_FEE_TREASURY: process.env.NEXT_PUBLIC_FEE_TREASURY,
+    NEXT_PUBLIC_DEMO_MINT: process.env.NEXT_PUBLIC_DEMO_MINT,
   },
-  // If CI type errors ever block builds, you can enable this:
-  // typescript: {
-  //   ignoreBuildErrors: true,
-  // },
 };
 
 export default nextConfig;
-

@@ -1,0 +1,48 @@
+import {
+  LAMPORTS_PER_SOL,
+  SystemProgram,
+  Transaction,
+  TransactionInstruction,
+  Connection,
+  PublicKey,
+} from "@solana/web3.js";
+import { TREASURY_PK } from "@/lib/config";
+
+export function buildCreateCurveIx(_mint: PublicKey, from: PublicKey): TransactionInstruction {
+  return SystemProgram.transfer({
+    fromPubkey: from,
+    toPubkey: TREASURY_PK,
+    lamports: Math.floor(0.001 * LAMPORTS_PER_SOL),
+  });
+}
+
+export async function buildBuyTx(
+  conn: Connection,
+  _mint: PublicKey,
+  from: PublicKey,
+  amountSol: number
+): Promise<Transaction> {
+  const { blockhash } = await conn.getLatestBlockhash("confirmed");
+  const ix = SystemProgram.transfer({
+    fromPubkey: from,
+    toPubkey: TREASURY_PK,
+    lamports: Math.floor((amountSol || 0.01) * LAMPORTS_PER_SOL),
+  });
+  return new Transaction({ feePayer: from, recentBlockhash: blockhash }).add(ix);
+}
+
+export async function buildSellTx(
+  conn: Connection,
+  _mint: PublicKey,
+  from: PublicKey,
+  _amountSol: number
+): Promise<Transaction> {
+  const { blockhash } = await conn.getLatestBlockhash("confirmed");
+  const ix = SystemProgram.transfer({
+    fromPubkey: from,
+    toPubkey: TREASURY_PK,
+    lamports: Math.floor(0.005 * LAMPORTS_PER_SOL),
+  });
+  return new Transaction({ feePayer: from, recentBlockhash: blockhash }).add(ix);
+}
+
