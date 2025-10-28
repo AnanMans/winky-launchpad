@@ -6,26 +6,10 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import {
+  PublicKey,
   Transaction,
   VersionedTransaction,
 } from '@solana/web3.js';
-
-async function sendB64Tx(
-  txB64: string,
-  connection: ReturnType<typeof useConnection>['connection'],
-  sendTransaction: ReturnType<typeof useWallet>['sendTransaction']
-) {
-  const raw = Uint8Array.from(atob(txB64), (c) => c.charCodeAt(0));
-  let tx: Transaction | VersionedTransaction;
-  try {
-    tx = VersionedTransaction.deserialize(raw);
-  } catch {
-    tx = Transaction.from(raw);
-  }
-  const sig = await sendTransaction(tx, connection, { skipPreflight: true });
-  await connection.confirmTransaction(sig, 'confirmed');
-  return sig;
-}
 
 function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(' ');
@@ -46,7 +30,6 @@ function SimpleUploader({
   const [fileName, setFileName] = useState<string | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const { publicKey } = useWallet();
 
   async function handlePick(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
@@ -81,7 +64,6 @@ function SimpleUploader({
       const res = await fetch('/api/upload', { method: 'POST', body: fd });
       if (!res.ok) throw new Error((await res.text()) || 'Upload failed');
       const j = await res.json();
-
       if (!j?.url) throw new Error('Upload failed (no URL returned)');
       onUploaded(j.url);
     } catch (e: any) {
@@ -97,6 +79,7 @@ function SimpleUploader({
       <label className="text-sm font-medium">Select image or video to upload</label>
 
       <div className="flex items-center gap-3">
+        {/* Hidden input + styled label as button */}
         <label
           className={cx(
             'px-4 py-1.5 rounded-lg text-sm cursor-pointer',
@@ -137,13 +120,6 @@ function SimpleUploader({
         </div>
       )}
 
-      {/* Optional: show connected creator wallet */}
-      {publicKey && (
-        <p className="text-xs text-white/50 mt-1">
-          Creator wallet: <span className="text-white/80">{publicKey.toBase58()}</span>
-        </p>
-      )}
-
       {err && <p className="text-xs text-red-400 break-all">{err}</p>}
     </div>
   );
@@ -180,13 +156,7 @@ export default function CreatePage() {
       alert('Please fill required fields and upload an image/video.');
       return;
     }
-    if (!publicKey) {
-      alert('Connect wallet first');
-      return;
-    }
-
     try {
-      // 1) Tell backend who pays for on-chain mint creation
       const res = await fetch('/api/coins', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -198,38 +168,20 @@ export default function CreatePage() {
           socials: { website, x: xUrl, telegram: tg },
           curve,
           strength,
-          // IMPORTANT: creatorAddress = connected wallet (fee payer for mint account)
-          creatorAddress: publicKey.toBase58(),
-          // Optional: per-coin overrides if you want to expose them later
-          // feeBps,
-          // creatorFeeBps: 30,
-          // migrated: false,
         }),
       });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || 'Create failed');
 
-      const out = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(out?.error || 'Create failed');
-
-      const { txB64, coin } = out || {};
-      if (!txB64 || typeof txB64 !== 'string') {
-        throw new Error('Server did not return txB64');
-      }
-
-      // 2) Creator wallet signs + sends the mint-creation tx
-      await sendB64Tx(txB64, connection, sendTransaction);
-
-      // 3) Tiny wait so RPC sees the new account
-      await new Promise((r) => setTimeout(r, 500));
-
-      // 4) Save id & show first-buy modal
-      setCreatedId(coin?.id || null);
+      // Save id and show first-buy modal
+      setCreatedId(j.coin.id);
       setShowBuy(true);
 
-      // 5) Best-effort finalize metadata (icon/name in wallets)
-      if (coin?.mint) {
-        setCreatedMint(coin.mint);
+      // Auto-finalize so wallets show name/icon instantly (if mint is already known)
+      if (j.coin.mint) {
+        setCreatedMint(j.coin.mint);
         try {
-          const finRes = await fetch(`/api/finalize/${coin.mint}`, { method: 'POST' });
+          const finRes = await fetch(`/api/finalize/${j.coin.mint}`, { method: 'POST' });
           const finJson = await finRes.json().catch(() => ({}));
           if (!finRes.ok) console.warn('Finalize failed:', finJson?.error);
         } catch (err) {
@@ -263,7 +215,7 @@ export default function CreatePage() {
     }
 
     try {
-      // Ask server for a buy tx; user signs it
+      // 2) Tell server to mint to creator (buyer pays if txB64 present)
       const res = await fetch(`/api/coins/${createdId}/buy`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -277,9 +229,25 @@ export default function CreatePage() {
       if (!res.ok) throw new Error(j?.error || 'Server buy failed');
 
       if (j.txB64) {
-        await sendB64Tx(j.txB64, connection, sendTransaction);
+        // New path: server returned a partially-signed transaction.
+        const raw = Uint8Array.from(atob(j.txB64 as string), (c) =>
+          c.charCodeAt(0)
+        );
+
+        let tx: Transaction | VersionedTransaction;
+        try {
+          tx = VersionedTransaction.deserialize(raw);
+        } catch {
+          tx = Transaction.from(raw);
+        }
+
+        const sig2 = await sendTransaction(tx, connection, {
+          skipPreflight: true,
+        });
+        await connection.confirmTransaction(sig2, 'confirmed');
       }
 
+      // Navigate with banner
       pushWithBanner();
     } catch (e: any) {
       console.error('first-buy error', e);
@@ -441,9 +409,8 @@ export default function CreatePage() {
               <button
                 onClick={() => {
                   if (createdId) {
-                    const banner = `${(name || 'Your coin').toUpperCase()} • ${String(
-                      curve || 'linear'
-                    ).toUpperCase()} • Strength ${strength ?? 2} — LET’S TRADE ON CURVE 🚀`;
+                    // Skip → still show banner on coin page
+                    const banner = `${(name || 'Your coin').toUpperCase()} • ${String(curve || 'linear').toUpperCase()} • Strength ${strength ?? 2} — LET’S TRADE ON CURVE 🚀`;
                     router.push(`/coin/${createdId}?flash=${encodeURIComponent(banner)}`);
                   }
                 }}
