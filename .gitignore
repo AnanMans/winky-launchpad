@@ -40,3 +40,13 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 secrets/
+
+__snapshot__/
+__backup__/
+.next/
+node_modules/
+
+__snapshot__/
+__backup__/
+.next/
+node_modules/
