@@ -1,4 +1,6 @@
 // src/app/api/coins/[id]/buy/route.ts
+export const runtime = "nodejs";
+
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import {
@@ -30,15 +32,35 @@ import {
 // Discriminator for `trade_buy` (you already confirmed this from Anchor)
 const DISC_BUY = Buffer.from([173, 172, 52, 244, 61, 65, 216, 118]);
 
-function bad(msg: string, code = 400, extra: any = {}) {
+type BuyBody = {
+  buyer?: string;
+  lamports?: string | number;
+  amountSol?: string | number;
+};
+
+type CoinRow = {
+  id: string;
+  mint: string;
+  creator: string;
+};
+
+function bad(
+  msg: string,
+  code = 400,
+  extra: Record<string, unknown> = {}
+): NextResponse {
   return NextResponse.json({ error: msg, ...extra }, { status: code });
 }
-function ok(data: any, code = 200) {
+
+function ok<T>(data: T, code = 200): NextResponse {
   return NextResponse.json(data, { status: code });
 }
 
 // Optional: rent helper (just logs if PDA is under-funded)
-async function ensureStateRentExempt(conn: Connection, state: PublicKey) {
+async function ensureStateRentExempt(
+  conn: Connection,
+  state: PublicKey
+): Promise<void> {
   const info = await conn.getAccountInfo(state, { commitment: "confirmed" });
   if (!info) throw new Error("State PDA does not exist yet");
 
@@ -68,9 +90,12 @@ export async function POST(
     if (!idStr) return bad("Missing id param");
 
     // ---------- body ----------
-    let body: any = {};
+    let body: BuyBody = {};
     try {
-      body = await req.json();
+      const json = (await req.json()) as unknown;
+      if (json && typeof json === "object") {
+        body = json as BuyBody;
+      }
     } catch {
       body = {};
     }
@@ -81,13 +106,13 @@ export async function POST(
     // lamports or amountSol
     let lamports: bigint | null = null;
 
-    if (body?.lamports != null && String(body.lamports).trim() !== "") {
+    if (body.lamports != null && String(body.lamports).trim() !== "") {
       try {
         lamports = BigInt(String(body.lamports).trim());
       } catch {
         return bad("Invalid lamports string");
       }
-    } else if (body?.amountSol != null) {
+    } else if (body.amountSol != null) {
       const sol = Number(body.amountSol);
       if (!Number.isFinite(sol) || sol <= 0) {
         return bad("amountSol must be > 0");
@@ -95,10 +120,10 @@ export async function POST(
       lamports = BigInt(Math.round(sol * 1e9));
     }
 
-    if (!lamports || lamports <= 0n) {
+    if (lamports === null || lamports <= 0n) {
       return bad("lamports must be > 0");
     }
-    const lamportsBig = lamports as bigint;
+    const lamportsBig: bigint = lamports;
 
     // ---------- resolve coin + mint ----------
     const conn = new Connection(RPC_URL, "confirmed");
@@ -111,7 +136,7 @@ export async function POST(
       mintPk = null;
     }
 
-    let coinRow: { id: string; mint: string; creator: string } | null = null;
+    let coinRow: CoinRow | null = null;
 
     if (mintPk) {
       const { data, error } = await supabaseAdmin
@@ -124,7 +149,7 @@ export async function POST(
       if (!data) return bad("No coin row found for this mint", 404);
       if (!data.mint) return bad("Coin has no mint configured yet", 400);
 
-      coinRow = data as any;
+      coinRow = data as CoinRow;
       mintPk = new PublicKey(data.mint);
     } else {
       const { data, error } = await supabaseAdmin
@@ -137,7 +162,7 @@ export async function POST(
       if (!data) return bad("Coin not found", 404);
       if (!data.mint) return bad("Coin has no mint configured yet", 400);
 
-      coinRow = data as any;
+      coinRow = data as CoinRow;
       mintPk = new PublicKey(data.mint);
     }
 
@@ -191,27 +216,17 @@ export async function POST(
     // Create ATA if missing
     if (!buyerAtaInfo) {
       const createAtaIx = createAssociatedTokenAccountInstruction(
-        buyer,          // payer
-        buyerAta,       // ATA
-        buyer,          // owner
-        mintPk,         // mint
+        buyer, // payer
+        buyerAta, // ATA
+        buyer, // owner
+        mintPk, // mint
         TOKEN_PROGRAM_ID,
         ASSOCIATED_TOKEN_PROGRAM_ID
       );
       ixs.push(createAtaIx);
     }
 
-    // ---------- NEW: move SOL into curve PDA (liquidity) ----------
-    // This is the missing piece: deposit lamports from buyer → state PDA
-    ixs.push(
-      SystemProgram.transfer({
-        fromPubkey: buyer,
-        toPubkey: state,
-        lamports: Number(lamportsBig), // safe for small SOL amounts
-      })
-    );
-
-    // ---------- build TradeBuy instruction ----------
+    // ---------- trade_buy instruction data ----------
     if (DISC_BUY.length !== 8) {
       console.error("[BUY] DISC_BUY incorrect length");
       return bad("Server: DISC_BUY misconfigured", 500);
@@ -222,24 +237,25 @@ export async function POST(
     const data = Buffer.concat([DISC_BUY, lamLE]);
 
     const keys = [
-      { pubkey: buyer, isSigner: true, isWritable: true },             // payer
-      { pubkey: mintPk, isSigner: false, isWritable: true },           // mint
-      { pubkey: state, isSigner: false, isWritable: true },            // curve state
-      { pubkey: mAuth, isSigner: false, isWritable: false },           // mint auth PDA
-      { pubkey: buyerAta, isSigner: false, isWritable: true },         // buyer ATA
+      { pubkey: buyer, isSigner: true, isWritable: true }, // payer
+      { pubkey: mintPk, isSigner: false, isWritable: true }, // mint
+      { pubkey: state, isSigner: false, isWritable: true }, // curve state
+      { pubkey: mAuth, isSigner: false, isWritable: false }, // mint auth PDA
+      { pubkey: buyerAta, isSigner: false, isWritable: true }, // buyer ATA
       { pubkey: protocolTreasury, isSigner: false, isWritable: true }, // protocol treasury
-      { pubkey: creatorPk, isSigner: false, isWritable: true },        // creator wallet
+      { pubkey: creatorPk, isSigner: false, isWritable: true }, // creator wallet
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ];
 
-    const ix = new TransactionInstruction({
+    const tradeIx = new TransactionInstruction({
       programId: PROGRAM_ID,
       keys,
       data,
     });
 
-    ixs.push(ix); // ATA create (maybe) + SOL transfer + TradeBuy
+    // ATA create (maybe) + TradeBuy
+    ixs.push(tradeIx);
 
     // ---------- build final tx ----------
     const { blockhash, lastValidBlockHeight } =
@@ -262,13 +278,22 @@ export async function POST(
       "state:",
       state.toBase58(),
       "buyer:",
-      buyer.toBase58()
+      buyer.toBase58(),
+      "lamports:",
+      lamportsBig.toString()
     );
 
-    return ok({ txB64, blockhash, lastValidBlockHeight, version: 0 });
-  } catch (e: any) {
+    return ok({
+      txB64,
+      blockhash,
+      lastValidBlockHeight,
+      version: 0,
+    });
+  } catch (e: unknown) {
     console.error("[/api/coins/[id]/buy] error:", e);
-    return bad(e?.message || "Buy route failed", 500);
+    const msg =
+      e instanceof Error ? e.message : typeof e === "string" ? e : "Buy route failed";
+    return bad(msg, 500);
   }
 }
 
