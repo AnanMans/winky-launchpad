@@ -1,5 +1,7 @@
-// src/app/api/coins/[id]/mint/route.ts
-import { NextResponse } from 'next/server';
+// /src/app/api/coins/[id]/mint/route.ts
+export const runtime = "nodejs";
+
+import { NextResponse } from "next/server";
 
 import {
   Connection,
@@ -8,7 +10,7 @@ import {
   SystemProgram,
   Transaction,
   sendAndConfirmTransaction,
-} from '@solana/web3.js';
+} from "@solana/web3.js";
 
 import {
   MINT_SIZE,
@@ -17,45 +19,33 @@ import {
   getMinimumBalanceForRentExemptMint,
   createInitializeMintInstruction,
   setAuthority,
-} from '@solana/spl-token';
+  getMint,
+} from "@solana/spl-token";
 
-import { createCreateMetadataAccountV3Instruction } from '@metaplex-foundation/mpl-token-metadata';
+import { createCreateMetadataAccountV3Instruction } from "@metaplex-foundation/mpl-token-metadata";
 
-// Force Node runtime (we use Node APIs)
-export const runtime = 'nodejs';
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { PROGRAM_ID, RPC_URL, mintAuthPda } from "@/lib/config";
 
-// === Program + RPC ===
-const CURVE_PROGRAM_ID = new PublicKey(
-  'EkJrguu21gnyEo35FjjaUAtT46ZjkPB8NuM9SpGWPbDF'
-);
-
-const RPC_URL =
-  process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
-
-// Metaplex Token Metadata program ID
+// Metaplex Token Metadata program ID (same on devnet/mainnet)
 const TOKEN_METADATA_PROGRAM_ID = new PublicKey(
-  'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s'
+  "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
 );
 
-// === Supabase REST ===
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+// OPTIONAL: base for metadata URI (when we later add /api/metadata/[mint])
+const METADATA_BASE =
+  (process.env.NEXT_PUBLIC_METADATA_BASE_URL || "").replace(/\/$/, "");
 
-// Metadata base (for /api/metadata/[mint])
-const METADATA_BASE = (process.env.NEXT_PUBLIC_METADATA_BASE_URL || '').replace(
-  /\/$/,
-  ''
-);
-
-// ---------- helpers ----------
-
-// 1) Mint authority from env (SAME as /api/meta/[mint])
+/**
+ * Load mint authority keypair from env.
+ * It must be a 64-byte JSON array: [12,34,...]
+ */
 function loadMintAuthority(): Keypair {
-  const raw = (process.env.MINT_AUTHORITY_KEYPAIR || '').trim();
+  const raw = (process.env.MINT_AUTHORITY_KEYPAIR || "").trim();
 
   if (!raw) {
     throw new Error(
-      'MINT_AUTHORITY_KEYPAIR is missing. Set it in .env.local as a JSON array (e.g. [12,34,...]).'
+      "MINT_AUTHORITY_KEYPAIR is missing. Set it in env as a JSON array (e.g. [12,34,...])."
     );
   }
 
@@ -70,8 +60,8 @@ function loadMintAuthority(): Keypair {
 
   if (!Array.isArray(arr) || arr.length !== 64) {
     throw new Error(
-      `MINT_AUTHORITY_KEYPAIR must be a 64-element JSON array of bytes. Got length=${
-        Array.isArray(arr) ? arr.length : 'not array'
+      `MINT_AUTHORITY_KEYPAIR must be a 64-element JSON array. Got length=${
+        Array.isArray(arr) ? arr.length : "not array"
       }.`
     );
   }
@@ -80,68 +70,6 @@ function loadMintAuthority(): Keypair {
   return Keypair.fromSecretKey(bytes);
 }
 
-// 2) Load coin row from Supabase by id
-async function fetchCoinById(id: string): Promise<{
-  id: string;
-  name: string;
-  symbol: string;
-  mint?: string | null;
-}> {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
-  }
-
-  const url = `${SUPABASE_URL}/rest/v1/coins?id=eq.${encodeURIComponent(
-    id
-  )}&select=id,name,symbol,mint`;
-
-  const res = await fetch(url, {
-    headers: {
-      apikey: SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-    },
-  });
-
-  if (!res.ok) {
-    const txt = await res.text();
-    console.error('Supabase coins fetch failed:', txt);
-    throw new Error('Failed to load coin from Supabase');
-  }
-
-  const rows = (await res.json()) as any[];
-  const coin = rows[0];
-  if (!coin) throw new Error('Coin not found');
-  return coin;
-}
-
-// 3) Update coin.mint in Supabase
-async function updateCoinMint(id: string, mint: string) {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
-  }
-
-  const url = `${SUPABASE_URL}/rest/v1/coins?id=eq.${encodeURIComponent(id)}`;
-
-  const res = await fetch(url, {
-    method: 'PATCH',
-    headers: {
-      apikey: SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-      'Content-Type': 'application/json',
-      Prefer: 'return=minimal',
-    },
-    body: JSON.stringify({ mint }),
-  });
-
-  if (!res.ok) {
-    const txt = await res.text();
-    console.error('Supabase coins update failed:', txt);
-    throw new Error('Failed to update coin mint in Supabase');
-  }
-}
-
-// ---------- handler ----------
-
 export async function POST(
   req: Request,
   { params }: { params: { id: string } }
@@ -149,16 +77,33 @@ export async function POST(
   try {
     const coinId = params.id;
 
-    // 1) Load coin from DB
-    const coin = await fetchCoinById(coinId);
+    // 1) Load coin from Supabase
+    const { data: coin, error } = await supabaseAdmin
+      .from("coins")
+      .select("id,name,symbol,mint")
+      .eq("id", coinId)
+      .maybeSingle();
 
-    // If it already has a mint, just return it (for old coins)
+    if (error) {
+      console.error("[mint] Supabase error:", error);
+      return NextResponse.json(
+        { error: "Failed to load coin from Supabase" },
+        { status: 500 }
+      );
+    }
+    if (!coin) {
+      return NextResponse.json({ error: "Coin not found" }, { status: 404 });
+    }
+
+    // If it already has a mint, just return it
     if (coin.mint) {
       return NextResponse.json({ mint: coin.mint });
     }
 
     // 2) Setup Solana connection + signers
-    const connection = new Connection(RPC_URL, 'confirmed');
+    const connection = new Connection(RPC_URL, "confirmed");
+    console.log("[mint] RPC_URL =", RPC_URL);
+
     const mintAuthority = loadMintAuthority();
     const mintKeypair = Keypair.generate();
 
@@ -181,28 +126,40 @@ export async function POST(
       )
     );
 
-    await sendAndConfirmTransaction(connection, tx1, [
+    const sig1 = await sendAndConfirmTransaction(connection, tx1, [
       mintAuthority,
       mintKeypair,
     ]);
+    console.log(
+      "[mint] created mint account",
+      mintKeypair.publicKey.toBase58(),
+      "sig:",
+      sig1
+    );
 
-    // 4) Create Metaplex metadata (minimal; Phantom will read it)
+    // 3.5) DOUBLE-CHECK mint really exists on-chain
+    const mintInfo = await getMint(connection, mintKeypair.publicKey);
+    console.log("[mint] on-chain mint info decimals =", mintInfo.decimals);
+
+    // 4) Create Metaplex metadata (name + symbol; URI points to our API)
     const [metadataPda] = PublicKey.findProgramAddressSync(
       [
-        Buffer.from('metadata'),
+        Buffer.from("metadata"),
         TOKEN_METADATA_PROGRAM_ID.toBuffer(),
         mintKeypair.publicKey.toBuffer(),
       ],
       TOKEN_METADATA_PROGRAM_ID
     );
 
-    const name = String(coin.name || '').slice(0, 32);
-    const symbol = String(coin.symbol || '').slice(0, 10).toUpperCase();
+    const name = String(coin.name || "").slice(0, 32);
+    const symbol = String(coin.symbol || "").slice(0, 10).toUpperCase();
 
     const uri = (
       METADATA_BASE
-        ? `${METADATA_BASE}/api/metadata/${mintKeypair.publicKey.toBase58()}`
-        : 'https://example.com/metadata-placeholder.json'
+        ? `${METADATA_BASE}/api/metadata/${mintKeypair
+            .publicKey.toBase58()
+            .toString()}`
+        : "https://example.com/metadata-placeholder.json"
     ).slice(0, 200);
 
     const ixMeta = createCreateMetadataAccountV3Instruction(
@@ -231,13 +188,13 @@ export async function POST(
     );
 
     const tx2 = new Transaction().add(ixMeta);
-    await sendAndConfirmTransaction(connection, tx2, [mintAuthority]);
+    const sig2 = await sendAndConfirmTransaction(connection, tx2, [
+      mintAuthority,
+    ]);
+    console.log("[mint] metadata created, sig:", sig2);
 
     // 5) Hand mint authority over to the curve PDA: ["mint_auth", mint]
-    const [mintAuthPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from('mint_auth'), mintKeypair.publicKey.toBuffer()],
-      CURVE_PROGRAM_ID
-    );
+    const [mintAuthPdaPk] = mintAuthPda(mintKeypair.publicKey);
 
     await setAuthority(
       connection,
@@ -245,17 +202,32 @@ export async function POST(
       mintKeypair.publicKey,
       mintAuthority.publicKey, // current authority
       AuthorityType.MintTokens,
-      mintAuthPda // new authority (PDA)
+      mintAuthPdaPk // new authority (PDA)
+    );
+    console.log(
+      "[mint] setAuthority → new mint authority PDA:",
+      mintAuthPdaPk.toBase58()
     );
 
     // 6) Store mint on the coin row
-    await updateCoinMint(coinId, mintKeypair.publicKey.toBase58());
+    const { error: updErr } = await supabaseAdmin
+      .from("coins")
+      .update({ mint: mintKeypair.publicKey.toBase58() })
+      .eq("id", coinId);
+
+    if (updErr) {
+      console.error("[mint] Supabase update error:", updErr);
+      return NextResponse.json(
+        { error: "Mint created but failed to update Supabase" },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json({ mint: mintKeypair.publicKey.toBase58() });
   } catch (e: any) {
-    console.error('[coins/[id]/mint] error:', e);
+    console.error("[coins/[id]/mint] error:", e);
     return NextResponse.json(
-      { error: e?.message || 'Internal error in mint route' },
+      { error: e?.message || "Internal error in mint route" },
       { status: 500 }
     );
   }
