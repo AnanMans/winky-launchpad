@@ -1,14 +1,13 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   eslint: {
-    // 🚫 Don't fail the production build because of ESLint errors
+    // Do NOT fail production builds because of ESLint errors
     ignoreDuringBuilds: true,
   },
   typescript: {
-    // 🚫 Don't fail the production build because of TS type errors
+    // Do NOT fail production builds because of TS errors
     ignoreBuildErrors: true,
   },
 };
 
 export default nextConfig;
-
