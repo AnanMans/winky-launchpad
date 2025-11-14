@@ -1,17 +1,19 @@
+export const runtime = "nodejs";
+
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import {
   Connection,
+  Keypair,
   PublicKey,
   SystemProgram,
+  Transaction,
   TransactionInstruction,
-  TransactionMessage,
-  VersionedTransaction,
 } from "@solana/web3.js";
-import { PROGRAM_ID, RPC_URL } from "@/lib/config";
+import { PROGRAM_ID, RPC_URL, curvePda, mintAuthPda } from "@/lib/config";
 
-// same discriminators you used on the client for create_curve
-const DISC_CREATE = Buffer.from([169, 235, 221, 223, 65, 109, 120, 183]); // create_curve
+// Discriminator for global `create_curve`: sha256("global:create_curve").slice(0, 8)
+const DISC_CREATE = Buffer.from([169, 235, 221, 223, 65, 109, 120, 183]);
 
 function bad(msg: string, code = 400, extra: any = {}) {
   return NextResponse.json({ error: msg, ...extra }, { status: code });
@@ -20,121 +22,118 @@ function ok(data: any, code = 200) {
   return NextResponse.json(data, { status: code });
 }
 
-// PDA helpers – must match on-chain program
-function curveStatePda(mint: PublicKey) {
-  return PublicKey.findProgramAddressSync(
-    [Buffer.from("curve"), mint.toBuffer()],
-    PROGRAM_ID
-  )[0];
-}
-function mintAuthPda(mint: PublicKey) {
-  // if your program really expects "mint_auth_pda", change the seed below to "mint_auth_pda"
-  return PublicKey.findProgramAddressSync(
-    [Buffer.from("mint_auth"), mint.toBuffer()],
-    PROGRAM_ID
-  )[0];
-}
-
-// Next 15 dynamic API requires awaiting params
 export async function POST(
   req: Request,
   ctx: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id } = await ctx.params;
+    const idStr = (id || "").trim();
+    if (!idStr) return bad("Missing id segment in route");
 
-    // body: optional payer pubkey – we’re returning an unsigned tx either way
-    let body: any = {};
+    // 1) Load coin row from Supabase
+    const { data, error } = await supabaseAdmin
+      .from("coins")
+      .select("id,mint,creator")
+      .eq("id", idStr)
+      .maybeSingle();
+
+    if (error) return bad(error.message, 500);
+    if (!data) return bad("Coin not found", 404);
+    if (!data.mint) return bad("Coin has no mint configured yet", 400);
+
+    const mintPk = new PublicKey(data.mint as string);
+
+    // 2) Load backend payer keypair (server wallet)
+    const raw =
+      (process.env.PLATFORM_TREASURY_KEYPAIR || "").trim() ||
+      (process.env.MINT_AUTHORITY_KEYPAIR || "").trim();
+    if (!raw) {
+      return bad(
+        "Server missing PLATFORM_TREASURY_KEYPAIR or MINT_AUTHORITY_KEYPAIR",
+        500
+      );
+    }
+
+    let payer: Keypair;
     try {
-      body = await req.json();
-    } catch {}
-    const payerStr = (body.payer ?? "").trim();
-
-    // find the mint: if `id` looks like base58 pubkey, use it;
-    // else fetch from Supabase by UUID id
-    let mintPk: PublicKey | null = null;
-    if (id.length >= 32 && id.length <= 44) {
-      try {
-        mintPk = new PublicKey(id);
-      } catch {}
+      const secret = Uint8Array.from(JSON.parse(raw));
+      payer = Keypair.fromSecretKey(secret);
+    } catch (e: any) {
+      return bad("Invalid keypair JSON in env", 500, {
+        env: "PLATFORM_TREASURY_KEYPAIR / MINT_AUTHORITY_KEYPAIR",
+      });
     }
 
-    if (!mintPk) {
-      const { data, error } = await supabaseAdmin
-        .from("coins")
-        .select("mint")
-        .eq("id", id)
-        .maybeSingle();
-      if (error) return bad(error.message, 500);
-      if (!data?.mint) return bad("Coin not found for this id");
-      try {
-        mintPk = new PublicKey(data.mint);
-      } catch {
-        return bad("Stored mint is not a valid public key");
-      }
-    }
+    const conn = new Connection(RPC_URL, "confirmed");
+    console.log("[INIT] RPC_URL =", RPC_URL);
 
-    // payer: if provided use it, else the tx will still be unsigned & sent back
-    let payer: PublicKey;
-    try {
-      payer = new PublicKey(payerStr || "11111111111111111111111111111111");
-    } catch {
-      return bad("Invalid payer pubkey");
-    }
-
-    // PDAs
-    const state = curveStatePda(mintPk);
+    // 3) Derive PDAs (must match on-chain seeds)
+    const state = curvePda(mintPk);
     const mintAuth = mintAuthPda(mintPk);
 
-    // if already initialized, no need to return a tx
-    const connection = new Connection(RPC_URL, "confirmed");
-    const existing = await connection.getAccountInfo(state, { commitment: "confirmed" });
+    // If state already exists, nothing to do
+    const existing = await conn.getAccountInfo(state, { commitment: "confirmed" });
     if (existing) {
+      console.log("[INIT] state PDA already exists:", state.toBase58());
       return ok({
-        alreadyInitialized: true,
+        reused: true,
         state: state.toBase58(),
         mintAuth: mintAuth.toBase58(),
       });
     }
 
-    // build instruction: accounts = payer, mint, state, mint_auth_pda, system_program
+    // 4) Build create_curve instruction
     const keys = [
-      { pubkey: payer,                   isSigner: true,  isWritable: true  },
-      { pubkey: mintPk,                  isSigner: false, isWritable: true  },
-      { pubkey: state,                   isSigner: false, isWritable: true  },
-      { pubkey: mintAuth,                isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: payer.publicKey, isSigner: true, isWritable: true }, // payer
+      { pubkey: mintPk, isSigner: false, isWritable: false },        // mint
+      { pubkey: state, isSigner: false, isWritable: true },          // state PDA
+      { pubkey: mintAuth, isSigner: false, isWritable: false },      // mint_auth_pda
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
     ];
 
-    // data: discriminator + curve_type(u8=0) + decimals(u8=6)
-    const data = Buffer.concat([DISC_CREATE, Buffer.from([0]), Buffer.from([6])]);
-    const ix = new TransactionInstruction({ programId: PROGRAM_ID, keys, data });
+    const dataBuf = DISC_CREATE; // no args, just discriminator
 
-    // versioned (v0) transaction with recent blockhash in the message
+    const ix = new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys,
+      data: dataBuf,
+    });
+
     const { blockhash, lastValidBlockHeight } =
-      await connection.getLatestBlockhash("confirmed");
+      await conn.getLatestBlockhash("confirmed");
 
-    const msg = new TransactionMessage({
-      payerKey: payer,
-      recentBlockhash: blockhash,
-      instructions: [ix],
-    }).compileToV0Message();
+    const tx = new Transaction().add(ix);
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = payer.publicKey;
 
-    const vtx = new VersionedTransaction(msg);
+    const sig = await conn.sendTransaction(tx, [payer], {
+      skipPreflight: false,
+      maxRetries: 5,
+    });
 
-    // return unsigned v0 tx (wallet will sign & send)
-    const txB64 = Buffer.from(vtx.serialize()).toString("base64");
+    await conn.confirmTransaction(
+      { signature: sig, blockhash, lastValidBlockHeight },
+      "confirmed"
+    );
+
+    console.log(
+      "[INIT] created state",
+      state.toBase58(),
+      "for mint",
+      mintPk.toBase58(),
+      "sig",
+      sig
+    );
+
     return ok({
-      txB64,
+      reused: false,
+      tx: sig,
       state: state.toBase58(),
       mintAuth: mintAuth.toBase58(),
-      blockhash,
-      lastValidBlockHeight,
-      version: 0,
     });
   } catch (e: any) {
     console.error("[/api/coins/[id]/init] error:", e);
     return bad(e?.message || "Init route failed", 500);
   }
 }
-

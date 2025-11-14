@@ -1,24 +1,32 @@
 // src/lib/config.ts
 import { PublicKey } from "@solana/web3.js";
 
-/** Read an env var or return empty */
+/** Env helper */
 const env = (k: string) => process.env[k] ?? "";
 
-/** ------- RPC (non-fatal) ------- */
-const RPC_FALLBACK = "https://api.devnet.solana.com"; // safe default if nothing is set
+/** ---- Canonical Program IDs ---- */
+export const TOKEN_PROGRAM_ID = new PublicKey(
+  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+);
+
+// NEW: correct Associated Token Program ID (v8)
+export const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
+  "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+);
+
+/** ---- RPC (safe default if none set) ---- */
+const RPC_FALLBACK = "https://api.devnet.solana.com";
 export const RPC_URL =
   env("NEXT_PUBLIC_SOLANA_RPC") ||
   env("NEXT_PUBLIC_HELIUS_RPC") ||
   env("RPC_URL") ||
   RPC_FALLBACK;
 
-/** ------- REQUIRED IDs (with DEV defaults so localhost boots) -------
- * NOTE: These defaults are YOUR real values from the .env you sent.
- * Once /api/debug/env shows your envs, you can delete the `|| "<value>"` parts.
- */
+/** ---- REQUIRED IDs ---- */
 const PROGRAM_ID_STR =
   env("NEXT_PUBLIC_PROGRAM_ID") ||
-  "AfQmD1aufqxQCrctzoJSzDxtHz9C3ig2NYtmK42tACk6";
+  // Deployed curve_launchpad program on devnet:
+  "EkJrguu21gnyEo35FjjaUAtT46ZjkPB8NuM9SpGWPbDF";
 
 const TREASURY_STR =
   env("NEXT_PUBLIC_TREASURY") ||
@@ -31,7 +39,7 @@ const DEMO_MINT_STR =
 /** Optional fee treasury (falls back to TREASURY if missing) */
 const FEE_TREASURY_STR = env("NEXT_PUBLIC_FEE_TREASURY");
 
-/** ------- PublicKeys ------- */
+/** ---- PublicKeys ---- */
 export const PROGRAM_ID = new PublicKey(PROGRAM_ID_STR);
 export const TREASURY_PK = new PublicKey(TREASURY_STR);
 export const FEE_TREASURY_PK = FEE_TREASURY_STR
@@ -39,20 +47,22 @@ export const FEE_TREASURY_PK = FEE_TREASURY_STR
   : null;
 export const DEMO_MINT = new PublicKey(DEMO_MINT_STR);
 
+/** Network hint for clients */
 export const NETWORK = "devnet";
 
-// --- PDA helper: must match your program's #[account(seeds=...)] exactly ---
+/**
+ * PDA helpers — must match on-chain seeds
+ */
 export function curvePda(mint: PublicKey): PublicKey {
   return PublicKey.findProgramAddressSync(
-    [Buffer.from("state"), mint.toBuffer()], // ← change "state" if your program uses a different seed
-    PROGRAM_ID
-  )[0];
-}
-// Derive the mint authority PDA exactly as the program expects.
-export function mintAuthPda(mint: PublicKey): PublicKey {
-  return PublicKey.findProgramAddressSync(
-    [Buffer.from("mint_auth_pda"), mint.toBuffer()], // common Anchor seed
+    [Buffer.from("curve"), mint.toBuffer()],
     PROGRAM_ID
   )[0];
 }
 
+export function mintAuthPda(mint: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("mint_auth"), mint.toBuffer()],
+    PROGRAM_ID
+  )[0];
+}

@@ -1,69 +1,84 @@
-// src/app/api/metadata/[mint]/route.ts
-export const runtime = 'nodejs';
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/db";
 
-import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+const FALLBACK_IMG = "/token.png"; // optional fallback from /public
 
 export async function GET(
-  req: Request,
-  ctx: { params: Promise<{ mint: string }> } // Next 15: params is async
+  _req: Request,
+  ctx:
+    | { params: { mint: string } }              // Next 13/14 style
+    | { params: Promise<{ mint: string }> }    // Next 15 style
 ) {
-  const { mint: rawMint } = await ctx.params;
-  const mint = rawMint.replace(/\.json$/i, ''); // supports .../[mint].json
+  // Support both: params can be object or Promise
+  const params =
+    (ctx as any).params?.then
+      ? await (ctx as any).params
+      : (ctx as any).params;
 
-  const url = new URL(req.url);
-  const v = url.searchParams.get('v') || '1';
+  let mint: string = params.mint;
 
-  const SUPABASE_URL =
-    process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const SUPABASE_KEY =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (!SUPABASE_URL || !SUPABASE_KEY) {
-    return NextResponse.json(
-      { error: 'Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY' },
-      { status: 500 }
-    );
+  // If someone calls /api/metadata/<mint>.json, strip ".json"
+  if (mint.endsWith(".json")) {
+    mint = mint.slice(0, -5);
   }
 
-  const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+  const sqlMint = mint.trim();
 
-  // Pull exactly the fields we need, including logo_url
-  const { data, error } = await supabase
-    .from('coins')               // public.coins
-    .select('name,symbol,description,logo_url,mint')
-    .eq('mint', mint)
+  const { data: coin, error } = await supabaseAdmin
+    .from("coins")
+    .select("id, name, symbol, description, mint, logo_url, socials")
+    .eq("mint", sqlMint)
     .maybeSingle();
 
-  if (error || !data) {
+  if (error) {
+    console.error("[/api/metadata/[mint]] supabase error:", error.message);
+  }
+
+  if (!coin) {
+    // include some debug info so we see exactly what it tried to match
     return NextResponse.json(
-      { error: 'Mint not found', reason: error?.message ?? 'no row' },
+      {
+        error: "Mint not found",
+        reason: "no row",
+        mintTried: sqlMint,
+        length: sqlMint.length,
+      },
       { status: 404 }
     );
   }
 
-  if (!data.logo_url) {
-    return NextResponse.json(
-      { error: 'logo_url is empty for this mint' },
-      { status: 500 }
-    );
-  }
+  const name = (coin.name ?? "Winky Coin").slice(0, 32);
+  const symbol = ((coin.symbol ?? "WINKY").toUpperCase()).slice(0, 10);
+  const description = coin.description ?? "";
+
+  const rawImg = (coin as any).logo_url ?? FALLBACK_IMG;
+
+  const base = process.env.NEXT_PUBLIC_SITE_URL ?? "";
+  const image = rawImg.startsWith("http") ? rawImg : `${base}${rawImg}`;
 
   const json = {
-    name: data.name ?? 'Unnamed',
-    symbol: data.symbol ?? '',
-    description: data.description ?? '',
-    image: data.logo_url, // <- directly use your column
+    name,
+    symbol,
+    description,
+    image,
+    extensions: {
+      website: (coin.socials as any)?.website ?? (base || undefined),
+      twitter: (coin.socials as any)?.x ?? undefined,
+      telegram: (coin.socials as any)?.telegram ?? undefined,
+    },
     attributes: [],
+    properties: {
+      files: [{ uri: image, type: "image/png" }],
+      category: "image",
+    },
   };
 
   return new NextResponse(JSON.stringify(json), {
     status: 200,
     headers: {
-      'Content-Type': 'application/json',
-      'Cache-Control': v
-        ? 'public, max-age=31536000, immutable'
-        : 'public, s-maxage=3600, stale-while-revalidate=86400',
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "public, max-age=31536000, immutable",
+      "access-control-allow-origin": "*",
     },
   });
 }

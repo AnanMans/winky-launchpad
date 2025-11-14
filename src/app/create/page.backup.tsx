@@ -6,18 +6,6 @@ import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import { VersionedTransaction } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 
-async function fetchCoinByIdClient(id: string) {
-  const res = await fetch(`/api/coins/${encodeURIComponent(id)}`, {
-    cache: 'no-store',
-  });
-
-  const j = await res.json().catch(() => ({}));
-  if (!res.ok || !j?.coin) {
-    throw new Error(j?.error || 'Failed to load coin');
-  }
-  return j.coin;
-}
-
 function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(' ');
 }
@@ -287,13 +275,16 @@ export default function CreatePage() {
       //
       try {
         if (logoUrl.trim()) {
-          // 🔥 FIXED: call /api/meta/[mint] (server builds metadata from Supabase)
-          const metaRes = await fetch(
-            `/api/meta/${encodeURIComponent(mint)}`,
-            {
-              method: 'POST',
-            }
-          );
+          const metaRes = await fetch('/api/metadata', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              mint,
+              name: nameTrim,
+              symbol: symbolTrim,
+              logoUrl: logoUrl.trim(),
+            }),
+          });
 
           if (!metaRes.ok) {
             const j = await metaRes.json().catch(() => ({}));
@@ -303,12 +294,10 @@ export default function CreatePage() {
             console.log('[metadata] created:', j);
           }
         } else {
-          console.log(
-            '[metadata] no logoUrl provided, skipping on-chain metadata'
-          );
+          console.log('[metadata] no logoUrl provided, skipping on-chain metadata');
         }
       } catch (metaErr) {
-        console.warn('[metadata] error calling /api/meta/[mint]:', metaErr);
+        console.warn('[metadata] error calling /api/metadata:', metaErr);
       }
 
       //
