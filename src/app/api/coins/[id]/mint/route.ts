@@ -24,11 +24,7 @@ import {
 
 import { createCreateMetadataAccountV3Instruction } from "@metaplex-foundation/mpl-token-metadata";
 
-import {
-  RPC_URL,
-  PROGRAM_ID,      // your curve program
-  mintAuthPda,      // helper from config
-} from "@/lib/config";
+import { RPC_URL, PROGRAM_ID, mintAuthPda } from "@/lib/config";
 
 // Metaplex metadata program (same on devnet/mainnet)
 const TOKEN_METADATA_PROGRAM_ID = new PublicKey(
@@ -122,6 +118,7 @@ export async function POST(
 
     const mintAuthority = loadMintAuthority();
     const mintKeypair = Keypair.generate();
+    const mintPubkey = mintKeypair.publicKey;
 
     const lamports = await getMinimumBalanceForRentExemptMint(connection);
 
@@ -129,13 +126,13 @@ export async function POST(
     const tx1 = new Transaction().add(
       SystemProgram.createAccount({
         fromPubkey: mintAuthority.publicKey,
-        newAccountPubkey: mintKeypair.publicKey,
+        newAccountPubkey: mintPubkey,
         space: MINT_SIZE,
         lamports,
         programId: TOKEN_PROGRAM_ID,
       }),
       createInitializeMintInstruction(
-        mintKeypair.publicKey,
+        mintPubkey,
         6, // decimals
         mintAuthority.publicKey, // mint authority
         null // no freeze authority
@@ -146,14 +143,19 @@ export async function POST(
       mintAuthority,
       mintKeypair,
     ]);
-    console.log("[MINT] created mint account:", mintKeypair.toBase58(), "sig:", sig1);
+    console.log(
+      "[MINT] created mint account:",
+      mintPubkey.toBase58(),
+      "sig:",
+      sig1
+    );
 
     // 4) Metaplex metadata account
     const [metadataPda] = PublicKey.findProgramAddressSync(
       [
         Buffer.from("metadata"),
         TOKEN_METADATA_PROGRAM_ID.toBuffer(),
-        mintKeypair.publicKey.toBuffer(),
+        mintPubkey.toBuffer(),
       ],
       TOKEN_METADATA_PROGRAM_ID
     );
@@ -168,14 +170,14 @@ export async function POST(
 
     const uri = (
       base
-        ? `${base}/api/metadata/${mintKeypair.toBase58()}`
+        ? `${base}/api/metadata/${mintPubkey.toBase58()}`
         : "https://example.com/metadata-placeholder.json"
     ).slice(0, 200);
 
     const ixMeta = createCreateMetadataAccountV3Instruction(
       {
         metadata: metadataPda,
-        mint: mintKeypair.publicKey,
+        mint: mintPubkey,
         mintAuthority: mintAuthority.publicKey,
         payer: mintAuthority.publicKey,
         updateAuthority: mintAuthority.publicKey,
@@ -202,12 +204,12 @@ export async function POST(
     console.log("[MINT] created metadata account, sig:", sig2);
 
     // 5) Hand mint authority to curve PDA
-    const mintAuth = mintAuthPda(mintKeypair.publicKey);
+    const mintAuth = mintAuthPda(mintPubkey);
 
     await setAuthority(
       connection,
       mintAuthority, // payer
-      mintKeypair.publicKey,
+      mintPubkey,
       mintAuthority.publicKey, // current authority
       AuthorityType.MintTokens,
       mintAuth // new authority (PDA owned by PROGRAM_ID)
@@ -217,20 +219,22 @@ export async function POST(
       "[MINT] set mint authority to PDA",
       mintAuth.toBase58(),
       "for mint",
-      mintKeypair.toBase58()
+      mintPubkey.toBase58()
     );
 
     // 6) Save mint in Supabase
+    const mintStr = mintPubkey.toBase58();
+
     const { error: updError } = await supabaseAdmin
       .from("coins")
-      .update({ mint: mintKeypair.toBase58() })
+      .update({ mint: mintStr })
       .eq("id", coinId);
 
     if (updError) {
       throw new Error(`Failed to update coin mint in Supabase: ${updError.message}`);
     }
 
-    return ok({ mint: mintKeypair.toBase58() });
+    return ok({ mint: mintStr });
   } catch (e: any) {
     console.error("[/api/coins/[id]/mint] error:", e);
     const msg =
