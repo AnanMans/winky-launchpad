@@ -17,8 +17,8 @@ export const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
 /** ---- RPC (safe default if none set) ---- */
 const RPC_FALLBACK = "https://api.devnet.solana.com";
 export const RPC_URL =
-  env("NEXT_PUBLIC_SOLANA_RPC") ||
   env("NEXT_PUBLIC_HELIUS_RPC") ||
+  env("NEXT_PUBLIC_SOLANA_RPC") ||
   env("RPC_URL") ||
   RPC_FALLBACK;
 
