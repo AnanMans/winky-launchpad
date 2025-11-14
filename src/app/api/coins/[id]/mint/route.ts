@@ -23,7 +23,7 @@ import {
 } from "@solana/spl-token";
 
 import { createCreateMetadataAccountV3Instruction } from "@metaplex-foundation/mpl-token-metadata";
-import { PROGRAM_ID, RPC_URL, curvePda, mintAuthPda } from "@/lib/config";
+import { PROGRAM_ID, RPC_URL, mintAuthPda as deriveMintAuthPda } from "@/lib/config";
 
 // Metaplex Token Metadata program
 const TOKEN_METADATA_PROGRAM_ID = new PublicKey(
@@ -165,7 +165,6 @@ export async function POST(
       const name = String(coin.name || "").slice(0, 32);
       const symbol = String(coin.symbol || "").slice(0, 10).toUpperCase();
 
-      // You already have /api/metadata/[mint] that returns JSON with image, etc.
       const base = (process.env.NEXT_PUBLIC_METADATA_BASE_URL || "").replace(
         /\/$/,
         ""
@@ -217,7 +216,7 @@ export async function POST(
     }
 
     // 5) Hand mint authority over to the curve PDA: ["mint_auth", mint]
-    const mintAuthPda = mintAuthPda(mintKeypair.publicKey);
+    const mintAuth = deriveMintAuthPda(mintKeypair.publicKey);
 
     await setAuthority(
       connection,
@@ -225,12 +224,12 @@ export async function POST(
       mintKeypair.publicKey,
       mintAuthority.publicKey, // current authority
       AuthorityType.MintTokens,
-      mintAuthPda // new authority (PDA)
+      mintAuth // new authority (PDA)
     );
 
     console.log(
       "[MINT] set mint authority to PDA",
-      mintAuthPda.toBase58(),
+      mintAuth.toBase58(),
       "for",
       mintKeypair.publicKey.toBase58()
     );
