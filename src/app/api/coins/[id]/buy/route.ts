@@ -2,13 +2,15 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import {
+  AddressLookupTableAccount,
   Connection,
+  Keypair,
   LAMPORTS_PER_SOL,
   PublicKey,
   SystemProgram,
-  Transaction,
   TransactionInstruction,
-  Keypair,
+  TransactionMessage,
+  VersionedTransaction,
 } from "@solana/web3.js";
 
 import {
@@ -28,7 +30,7 @@ import {
   createMintToInstruction,
 } from "@solana/spl-token";
 
-// Discriminator for `trade_buy` (Anchor)
+// Discriminator for `trade_buy`
 const DISC_BUY = Buffer.from([173, 172, 52, 244, 61, 65, 216, 118]);
 
 function bad(msg: string, code = 400, extra: any = {}) {
@@ -36,6 +38,31 @@ function bad(msg: string, code = 400, extra: any = {}) {
 }
 function ok(data: any, code = 200) {
   return NextResponse.json(data, { status: code });
+}
+
+function loadMintAuthority(): Keypair {
+  const raw = (process.env.MINT_AUTHORITY_KEYPAIR || "").trim();
+  if (!raw) {
+    throw new Error(
+      "MINT_AUTHORITY_KEYPAIR is missing. Set it in env as a JSON array."
+    );
+  }
+
+  let arr: number[];
+  try {
+    arr = JSON.parse(raw);
+  } catch (e: any) {
+    throw new Error(
+      `Failed to parse MINT_AUTHORITY_KEYPAIR as JSON: ${e?.message || e}`
+    );
+  }
+
+  if (!Array.isArray(arr)) {
+    throw new Error("MINT_AUTHORITY_KEYPAIR must be a JSON array of bytes.");
+  }
+
+  const bytes = Uint8Array.from(arr);
+  return Keypair.fromSecretKey(bytes);
 }
 
 // Optional: rent helper (just logs if PDA is under-funded)
@@ -48,7 +75,7 @@ async function ensureStateRentExempt(conn: Connection, state: PublicKey) {
     "confirmed"
   );
   const delta = needed - info.lamports;
-  if (delta <= 0) return; // already rent-exempt
+  if (delta <= 0) return;
 
   console.log(
     "[BUY] state PDA rent below floor, needs top-up of",
@@ -56,39 +83,6 @@ async function ensureStateRentExempt(conn: Connection, state: PublicKey) {
     "lamports for",
     state.toBase58()
   );
-}
-
-// --- server mint authority (same as in mint route) ---
-function loadMintAuthority(): Keypair {
-  const raw = (process.env.MINT_AUTHORITY_KEYPAIR || "").trim();
-  if (!raw) {
-    throw new Error("MINT_AUTHORITY_KEYPAIR missing in env");
-  }
-  let arr: number[];
-  try {
-    arr = JSON.parse(raw);
-  } catch (e: any) {
-    throw new Error(
-      `Failed to parse MINT_AUTHORITY_KEYPAIR as JSON: ${e?.message || e}`
-    );
-  }
-  if (!Array.isArray(arr)) {
-    throw new Error("MINT_AUTHORITY_KEYPAIR must be a JSON array of bytes");
-  }
-  const bytes = Uint8Array.from(arr);
-  return Keypair.fromSecretKey(bytes);
-}
-
-// simple temp pricing: 1 SOL => 1,000,000 tokens (human)
-// with 6 decimals this is 1e12 raw units per SOL
-const TOKENS_PER_SOL = 1_000_000n;
-const DECIMALS = 6n;
-
-function calcMintAmount(lamports: bigint): bigint {
-  const lamportsPerSol = BigInt(LAMPORTS_PER_SOL);
-  const humanTokens = (lamports * TOKENS_PER_SOL) / lamportsPerSol;
-  const factor = 10n ** DECIMALS;
-  return humanTokens * factor;
 }
 
 export async function POST(
@@ -111,27 +105,26 @@ export async function POST(
     const buyerStr = String(body?.buyer ?? "").trim();
     if (!buyerStr) return bad("buyer is required");
 
-    // lamports or amountSol
-    let lamports: bigint | null = null;
+    // lamports or amountSol (as NUMBER)
+    let lamportsNum: number | null = null;
 
     if (body?.lamports != null && String(body.lamports).trim() !== "") {
-      try {
-        lamports = BigInt(String(body.lamports).trim());
-      } catch {
-        return bad("Invalid lamports string");
+      const val = Number(body.lamports);
+      if (!Number.isFinite(val) || val <= 0) {
+        return bad("lamports must be > 0");
       }
+      lamportsNum = Math.round(val);
     } else if (body?.amountSol != null) {
       const sol = Number(body.amountSol);
       if (!Number.isFinite(sol) || sol <= 0) {
         return bad("amountSol must be > 0");
       }
-      lamports = BigInt(Math.round(sol * 1e9));
+      lamportsNum = Math.round(sol * LAMPORTS_PER_SOL);
     }
 
-    if (!lamports || lamports <= 0n) {
+    if (!lamportsNum || lamportsNum <= 0) {
       return bad("lamports must be > 0");
     }
-    const lamportsBig = lamports as bigint;
 
     // ---------- resolve coin + mint ----------
     const conn = new Connection(RPC_URL, "confirmed");
@@ -224,7 +217,7 @@ export async function POST(
     // Create ATA if missing
     if (!buyerAtaInfo) {
       const createAtaIx = createAssociatedTokenAccountInstruction(
-        buyer,
+        buyer, // payer
         buyerAta,
         buyer,
         mintPk,
@@ -234,38 +227,42 @@ export async function POST(
       ixs.push(createAtaIx);
     }
 
+    // ---------- mint real tokens into buyer ATA ----------
+    const mintAuthority = loadMintAuthority();
+
+    const TOKENS_PER_SOL = 1_000_000; // number
+    const tokensToMint = Math.floor(
+      (lamportsNum * TOKENS_PER_SOL) / LAMPORTS_PER_SOL
+    );
+
+    if (!Number.isFinite(tokensToMint) || tokensToMint <= 0) {
+      return bad("Calculated 0 tokens to mint");
+    }
+
+    const mintToIx = createMintToInstruction(
+      mintPk,
+      buyerAta,
+      mintAuthority.publicKey,
+      tokensToMint
+    );
+    ixs.push(mintToIx);
+
     // ---------- move SOL into curve PDA (liquidity) ----------
     ixs.push(
       SystemProgram.transfer({
         fromPubkey: buyer,
         toPubkey: state,
-        lamports: Number(lamportsBig),
+        lamports: lamportsNum,
       })
     );
 
-    // ---------- mint real SPL tokens to buyer ATA ----------
-    const mintAmount = calcMintAmount(lamportsBig);
-    if (mintAmount <= 0n) {
-      return bad("Internal: mintAmount computed as zero", 500);
-    }
-
-    const mintAuthority = loadMintAuthority();
-
-    ixs.push(
-      createMintToInstruction(
-        mintPk,
-        buyerAta,
-        mintAuthority.publicKey,
-        Number(mintAmount)
-      )
-    );
-
-    // ---------- trade_buy instruction (for logs / future math) ----------
+    // ---------- build TradeBuy instruction ----------
     if (DISC_BUY.length !== 8) {
       console.error("[BUY] DISC_BUY incorrect length");
       return bad("Server: DISC_BUY misconfigured", 500);
     }
 
+    const lamportsBig = BigInt(lamportsNum); // only BigInt usage
     const lamLE = Buffer.alloc(8);
     lamLE.writeBigUInt64LE(lamportsBig, 0);
     const data = Buffer.concat([DISC_BUY, lamLE]);
@@ -274,10 +271,10 @@ export async function POST(
       { pubkey: buyer, isSigner: true, isWritable: true }, // payer
       { pubkey: mintPk, isSigner: false, isWritable: true }, // mint
       { pubkey: state, isSigner: false, isWritable: true }, // curve state
-      { pubkey: mAuth, isSigner: false, isWritable: false }, // mint auth PDA (future)
+      { pubkey: mAuth, isSigner: false, isWritable: false }, // mint auth PDA
       { pubkey: buyerAta, isSigner: false, isWritable: true }, // buyer ATA
-      { pubkey: protocolTreasury, isSigner: false, isWritable: true }, // protocol treasury
-      { pubkey: creatorPk, isSigner: false, isWritable: true }, // creator wallet
+      { pubkey: protocolTreasury, isSigner: false, isWritable: true }, // protocol treasury (future)
+      { pubkey: creatorPk, isSigner: false, isWritable: true }, // creator wallet (future)
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ];
@@ -288,23 +285,24 @@ export async function POST(
       data,
     });
 
-    ixs.push(ix);
+    ixs.push(ix); // ATA create (maybe) + mintTo + SOL transfer + TradeBuy
 
-    // ---------- build final tx (legacy) ----------
+    // ---------- build final tx ----------
     const { blockhash, lastValidBlockHeight } =
       await conn.getLatestBlockhash("confirmed");
 
-    const tx = new Transaction({
-      feePayer: buyer,
+    const msg = new TransactionMessage({
+      payerKey: buyer,
       recentBlockhash: blockhash,
-    }).add(...ixs);
+      instructions: ixs,
+    }).compileToV0Message([] as AddressLookupTableAccount[]);
 
-    // backend signs as mint authority so mintTo is valid
-    tx.partialSign(mintAuthority);
+    const vtx = new VersionedTransaction(msg);
 
-    const txB64 = tx
-      .serialize({ requireAllSignatures: false })
-      .toString("base64");
+    // Partial sign with mint authority so Phantom only signs as buyer
+    vtx.sign([mintAuthority]);
+
+    const txB64 = Buffer.from(vtx.serialize()).toString("base64");
 
     console.log(
       "[BUY] prog:",
@@ -315,8 +313,8 @@ export async function POST(
       state.toBase58(),
       "buyer:",
       buyer.toBase58(),
-      "mintAmount(raw):",
-      mintAmount.toString()
+      "tokensToMint:",
+      tokensToMint
     );
 
     return ok({ txB64, blockhash, lastValidBlockHeight, version: 0 });
