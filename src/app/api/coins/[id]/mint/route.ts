@@ -7,6 +7,7 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import {
   Connection,
   Keypair,
+  PublicKey,
   SystemProgram,
   Transaction,
   sendAndConfirmTransaction,
@@ -15,22 +16,17 @@ import {
 import {
   MINT_SIZE,
   TOKEN_PROGRAM_ID,
-  AuthorityType,
   getMinimumBalanceForRentExemptMint,
   createInitializeMintInstruction,
-  setAuthority,
 } from "@solana/spl-token";
 
-import { RPC_URL, mintAuthPda } from "@/lib/config";
+import { createCreateMetadataAccountV3Instruction } from "@metaplex-foundation/mpl-token-metadata";
 
-function bad(
-  msg: string,
-  code = 400,
-  extra: Record<string, unknown> = {}
-) {
+import { RPC_URL } from "@/lib/config";
+
+function bad(msg: string, code = 400, extra: Record<string, unknown> = {}) {
   return NextResponse.json({ error: msg, ...extra }, { status: code });
 }
-
 function ok(data: unknown, code = 200) {
   return NextResponse.json(data, { status: code });
 }
@@ -39,7 +35,7 @@ function loadMintAuthority(): Keypair {
   const raw = (process.env.MINT_AUTHORITY_KEYPAIR || "").trim();
   if (!raw) {
     throw new Error(
-      "MINT_AUTHORITY_KEYPAIR is missing. Set it in .env.local as a JSON array."
+      "MINT_AUTHORITY_KEYPAIR is missing. Set it in .env.local / Vercel as a JSON array."
     );
   }
 
@@ -93,8 +89,8 @@ export async function POST(
 
     const lamports = await getMinimumBalanceForRentExemptMint(connection);
 
-    // 3) Create & initialize the mint (mintAuthority is the authority for now)
-    const tx = new Transaction().add(
+    // 3) Create & initialize the mint (mintAuthority is the authority)
+    const tx1 = new Transaction().add(
       SystemProgram.createAccount({
         fromPubkey: mintAuthority.publicKey,
         newAccountPubkey: mintKeypair.publicKey,
@@ -105,12 +101,12 @@ export async function POST(
       createInitializeMintInstruction(
         mintKeypair.publicKey,
         6, // decimals
-        mintAuthority.publicKey, // mint authority (will be changed to PDA)
+        mintAuthority.publicKey, // mint authority (we KEEP this)
         null // no freeze authority
       )
     );
 
-    await sendAndConfirmTransaction(connection, tx, [
+    await sendAndConfirmTransaction(connection, tx1, [
       mintAuthority,
       mintKeypair,
     ]);
@@ -122,28 +118,56 @@ export async function POST(
       coinId
     );
 
-    // 4) (TEMP) Skip Metaplex metadata to avoid panics.
-    // Wallets will still be able to use this mint, but without nice name/icon
-    // until you add metadata via a separate script or route.
+    // 4) Create minimal Metaplex metadata
+    const name = String(coin.name || "").slice(0, 32);
+    const symbol = String(coin.symbol || "").slice(0, 10).toUpperCase();
 
-    // 5) Transfer mint authority to the curve PDA: ["mint_auth", mint]
-    const mintAuth = mintAuthPda(mintKeypair.publicKey);
-
-    await setAuthority(
-      connection,
-      mintAuthority, // payer
-      mintKeypair.publicKey,
-      mintAuthority, // current authority (signer)
-      AuthorityType.MintTokens,
-      mintAuth // new authority (PDA)
+    const TOKEN_METADATA_PROGRAM_ID = new PublicKey(
+      "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
     );
 
-    console.log(
-      "[MINT] authority moved to mint_auth PDA",
-      mintAuth.toBase58()
+    const [metadataPda] = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("metadata"),
+        TOKEN_METADATA_PROGRAM_ID.toBuffer(),
+        mintKeypair.publicKey.toBuffer(),
+      ],
+      TOKEN_METADATA_PROGRAM_ID
     );
 
-    // 6) Save mint address on coin row
+    const uri = "https://example.com/placeholder.json";
+
+    const ixMeta = createCreateMetadataAccountV3Instruction(
+      {
+        metadata: metadataPda,
+        mint: mintKeypair.publicKey,
+        mintAuthority: mintAuthority.publicKey,
+        payer: mintAuthority.publicKey,
+        updateAuthority: mintAuthority.publicKey,
+      },
+      {
+        createMetadataAccountArgsV3: {
+          data: {
+            name,
+            symbol,
+            uri,
+            sellerFeeBasisPoints: 0,
+            creators: null,
+            collection: null,
+            uses: null,
+          },
+          isMutable: true,
+          collectionDetails: null,
+        },
+      }
+    );
+
+    const tx2 = new Transaction().add(ixMeta);
+    await sendAndConfirmTransaction(connection, tx2, [mintAuthority]);
+
+    console.log("[MINT] metadata created for", mintKeypair.publicKey.toBase58());
+
+    // 5) Save mint address on coin row
     const { error: upErr } = await supabaseAdmin
       .from("coins")
       .update({ mint: mintKeypair.publicKey.toBase58() })
@@ -160,4 +184,3 @@ export async function POST(
     return bad(e?.message || "Internal error in mint route", 500);
   }
 }
-

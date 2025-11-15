@@ -1,24 +1,21 @@
 // src/app/api/coins/[id]/buy/route.ts
-
-export const runtime = "nodejs";
-
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-
 import {
   Connection,
+  LAMPORTS_PER_SOL,
   PublicKey,
   SystemProgram,
+  Transaction,
   TransactionInstruction,
-  TransactionMessage,
-  VersionedTransaction,
+  Keypair,
 } from "@solana/web3.js";
 
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
-  TOKEN_PROGRAM_ID,
   PROGRAM_ID,
   RPC_URL,
+  TOKEN_PROGRAM_ID,
   TREASURY_PK,
   FEE_TREASURY_PK,
   curvePda,
@@ -28,17 +25,70 @@ import {
 import {
   getAssociatedTokenAddressSync,
   createAssociatedTokenAccountInstruction,
+  createMintToInstruction,
 } from "@solana/spl-token";
 
-// Discriminator for trade_buy (8 bytes)
+// Discriminator for `trade_buy` (Anchor)
 const DISC_BUY = Buffer.from([173, 172, 52, 244, 61, 65, 216, 118]);
 
-function bad(msg: string, code = 400, extra: Record<string, unknown> = {}) {
+function bad(msg: string, code = 400, extra: any = {}) {
   return NextResponse.json({ error: msg, ...extra }, { status: code });
 }
-
-function ok(data: unknown, code = 200) {
+function ok(data: any, code = 200) {
   return NextResponse.json(data, { status: code });
+}
+
+// Optional: rent helper (just logs if PDA is under-funded)
+async function ensureStateRentExempt(conn: Connection, state: PublicKey) {
+  const info = await conn.getAccountInfo(state, { commitment: "confirmed" });
+  if (!info) throw new Error("State PDA does not exist yet");
+
+  const needed = await conn.getMinimumBalanceForRentExemption(
+    info.data.length,
+    "confirmed"
+  );
+  const delta = needed - info.lamports;
+  if (delta <= 0) return; // already rent-exempt
+
+  console.log(
+    "[BUY] state PDA rent below floor, needs top-up of",
+    delta,
+    "lamports for",
+    state.toBase58()
+  );
+}
+
+// --- server mint authority (same as in mint route) ---
+function loadMintAuthority(): Keypair {
+  const raw = (process.env.MINT_AUTHORITY_KEYPAIR || "").trim();
+  if (!raw) {
+    throw new Error("MINT_AUTHORITY_KEYPAIR missing in env");
+  }
+  let arr: number[];
+  try {
+    arr = JSON.parse(raw);
+  } catch (e: any) {
+    throw new Error(
+      `Failed to parse MINT_AUTHORITY_KEYPAIR as JSON: ${e?.message || e}`
+    );
+  }
+  if (!Array.isArray(arr)) {
+    throw new Error("MINT_AUTHORITY_KEYPAIR must be a JSON array of bytes");
+  }
+  const bytes = Uint8Array.from(arr);
+  return Keypair.fromSecretKey(bytes);
+}
+
+// simple temp pricing: 1 SOL => 1,000,000 tokens (human)
+// with 6 decimals this is 1e12 raw units per SOL
+const TOKENS_PER_SOL = 1_000_000n;
+const DECIMALS = 6n;
+
+function calcMintAmount(lamports: bigint): bigint {
+  const lamportsPerSol = BigInt(LAMPORTS_PER_SOL);
+  const humanTokens = (lamports * TOKENS_PER_SOL) / lamportsPerSol;
+  const factor = 10n ** DECIMALS;
+  return humanTokens * factor;
 }
 
 export async function POST(
@@ -47,11 +97,17 @@ export async function POST(
 ) {
   try {
     const { id } = await ctx.params;
-    const coinId = (id || "").trim();
-    if (!coinId) return bad("Missing id param");
+    const idStr = (id || "").trim();
+    if (!idStr) return bad("Missing id param");
 
     // ---------- body ----------
-    const body = (await req.json().catch(() => ({}))) as any;
+    let body: any = {};
+    try {
+      body = await req.json();
+    } catch {
+      body = {};
+    }
+
     const buyerStr = String(body?.buyer ?? "").trim();
     if (!buyerStr) return bad("buyer is required");
 
@@ -75,24 +131,53 @@ export async function POST(
     if (!lamports || lamports <= 0n) {
       return bad("lamports must be > 0");
     }
+    const lamportsBig = lamports as bigint;
 
-    // ---------- load coin from Supabase ----------
+    // ---------- resolve coin + mint ----------
     const conn = new Connection(RPC_URL, "confirmed");
+    console.log("[BUY] RPC_URL =", RPC_URL);
 
-    const { data: coin, error } = await supabaseAdmin
-      .from("coins")
-      .select("id,mint,creator")
-      .eq("id", coinId)
-      .maybeSingle();
+    let mintPk: PublicKey | null = null;
+    try {
+      mintPk = new PublicKey(idStr);
+    } catch {
+      mintPk = null;
+    }
 
-    if (error) return bad(error.message, 500);
-    if (!coin) return bad("Coin not found", 404);
-    if (!coin.mint) return bad("Coin has no mint configured yet", 400);
-    if (!coin.creator) return bad("Coin row missing creator", 500);
+    let coinRow: { id: string; mint: string; creator: string } | null = null;
 
-    const mintPk = new PublicKey(coin.mint as string);
+    if (mintPk) {
+      const { data, error } = await supabaseAdmin
+        .from("coins")
+        .select("id,mint,creator")
+        .eq("mint", mintPk.toBase58())
+        .maybeSingle();
+
+      if (error) return bad(error.message, 500);
+      if (!data) return bad("No coin row found for this mint", 404);
+      if (!data.mint) return bad("Coin has no mint configured yet", 400);
+
+      coinRow = data as any;
+      mintPk = new PublicKey(data.mint);
+    } else {
+      const { data, error } = await supabaseAdmin
+        .from("coins")
+        .select("id,mint,creator")
+        .eq("id", idStr)
+        .maybeSingle();
+
+      if (error) return bad(error.message, 500);
+      if (!data) return bad("Coin not found", 404);
+      if (!data.mint) return bad("Coin has no mint configured yet", 400);
+
+      coinRow = data as any;
+      mintPk = new PublicKey(data.mint);
+    }
+
+    if (!coinRow?.creator) return bad("Coin row missing creator");
+
     const buyer = new PublicKey(buyerStr);
-    const creatorPk = new PublicKey(coin.creator as string);
+    const creatorPk = new PublicKey(coinRow.creator);
 
     const state = curvePda(mintPk);
     const mAuth = mintAuthPda(mintPk);
@@ -103,7 +188,8 @@ export async function POST(
       commitment: "confirmed",
     });
     if (!progInfo?.executable) {
-      return bad("Program not executable on RPC cluster", 500, {
+      console.error("[BUY] Program not executable");
+      return bad("Server: program not executable on RPC cluster", 500, {
         programId: PROGRAM_ID.toBase58(),
         rpc: RPC_URL,
       });
@@ -113,8 +199,12 @@ export async function POST(
       commitment: "confirmed",
     });
     if (!stateInfo) {
-      return bad("State PDA not found. Run /init for this coin first.", 400);
+      console.error("[BUY] State PDA missing. Run /init first.");
+      return bad("Server: state PDA not found. Run /init for this mint.", 400);
     }
+
+    // Ensure rent (optional)
+    await ensureStateRentExempt(conn, state);
 
     // ---------- ensure buyer ATA ----------
     const buyerAta = getAssociatedTokenAddressSync(
@@ -131,67 +221,103 @@ export async function POST(
 
     const ixs: TransactionInstruction[] = [];
 
+    // Create ATA if missing
     if (!buyerAtaInfo) {
-      ixs.push(
-        createAssociatedTokenAccountInstruction(
-          buyer,          // payer
-          buyerAta,       // ATA
-          buyer,          // owner
-          mintPk,         // mint
-          TOKEN_PROGRAM_ID,
-          ASSOCIATED_TOKEN_PROGRAM_ID
-        )
+      const createAtaIx = createAssociatedTokenAccountInstruction(
+        buyer,
+        buyerAta,
+        buyer,
+        mintPk,
+        TOKEN_PROGRAM_ID,
+        ASSOCIATED_TOKEN_PROGRAM_ID
       );
+      ixs.push(createAtaIx);
     }
 
-    // ---------- trade_buy instruction ----------
+    // ---------- move SOL into curve PDA (liquidity) ----------
+    ixs.push(
+      SystemProgram.transfer({
+        fromPubkey: buyer,
+        toPubkey: state,
+        lamports: Number(lamportsBig),
+      })
+    );
+
+    // ---------- mint real SPL tokens to buyer ATA ----------
+    const mintAmount = calcMintAmount(lamportsBig);
+    if (mintAmount <= 0n) {
+      return bad("Internal: mintAmount computed as zero", 500);
+    }
+
+    const mintAuthority = loadMintAuthority();
+
+    ixs.push(
+      createMintToInstruction(
+        mintPk,
+        buyerAta,
+        mintAuthority.publicKey,
+        Number(mintAmount)
+      )
+    );
+
+    // ---------- trade_buy instruction (for logs / future math) ----------
     if (DISC_BUY.length !== 8) {
+      console.error("[BUY] DISC_BUY incorrect length");
       return bad("Server: DISC_BUY misconfigured", 500);
     }
 
     const lamLE = Buffer.alloc(8);
-    lamLE.writeBigUInt64LE(lamports, 0);
-    const dataBuf = Buffer.concat([DISC_BUY, lamLE]);
+    lamLE.writeBigUInt64LE(lamportsBig, 0);
+    const data = Buffer.concat([DISC_BUY, lamLE]);
 
     const keys = [
-      { pubkey: buyer, isSigner: true, isWritable: true },             // payer
-      { pubkey: mintPk, isSigner: false, isWritable: true },           // mint
-      { pubkey: state, isSigner: false, isWritable: true },            // curve state
-      { pubkey: mAuth, isSigner: false, isWritable: false },           // mint auth PDA
-      { pubkey: buyerAta, isSigner: false, isWritable: true },         // buyer ATA
+      { pubkey: buyer, isSigner: true, isWritable: true }, // payer
+      { pubkey: mintPk, isSigner: false, isWritable: true }, // mint
+      { pubkey: state, isSigner: false, isWritable: true }, // curve state
+      { pubkey: mAuth, isSigner: false, isWritable: false }, // mint auth PDA (future)
+      { pubkey: buyerAta, isSigner: false, isWritable: true }, // buyer ATA
       { pubkey: protocolTreasury, isSigner: false, isWritable: true }, // protocol treasury
-      { pubkey: creatorPk, isSigner: false, isWritable: true },        // creator wallet
+      { pubkey: creatorPk, isSigner: false, isWritable: true }, // creator wallet
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ];
 
-    ixs.push(
-      new TransactionInstruction({
-        programId: PROGRAM_ID,
-        keys,
-        data: dataBuf,
-      })
-    );
+    const ix = new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys,
+      data,
+    });
 
-    // ---------- build v0 tx ----------
+    ixs.push(ix);
+
+    // ---------- build final tx (legacy) ----------
     const { blockhash, lastValidBlockHeight } =
       await conn.getLatestBlockhash("confirmed");
 
-    const msg = new TransactionMessage({
-      payerKey: buyer,
+    const tx = new Transaction({
+      feePayer: buyer,
       recentBlockhash: blockhash,
-      instructions: ixs,
-    }).compileToV0Message(); // no lookup tables
+    }).add(...ixs);
 
-    const vtx = new VersionedTransaction(msg);
-    const txB64 = Buffer.from(vtx.serialize()).toString("base64");
+    // backend signs as mint authority so mintTo is valid
+    tx.partialSign(mintAuthority);
 
-    console.log("[BUY] tx built", {
-      coinId,
-      mint: mintPk.toBase58(),
-      buyer: buyer.toBase58(),
-      lamports: lamports.toString(),
-    });
+    const txB64 = tx
+      .serialize({ requireAllSignatures: false })
+      .toString("base64");
+
+    console.log(
+      "[BUY] prog:",
+      PROGRAM_ID.toBase58(),
+      "mint:",
+      mintPk.toBase58(),
+      "state:",
+      state.toBase58(),
+      "buyer:",
+      buyer.toBase58(),
+      "mintAmount(raw):",
+      mintAmount.toString()
+    );
 
     return ok({ txB64, blockhash, lastValidBlockHeight, version: 0 });
   } catch (e: any) {
