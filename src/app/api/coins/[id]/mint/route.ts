@@ -101,7 +101,7 @@ export async function POST(
       createInitializeMintInstruction(
         mintKeypair.publicKey,
         6, // decimals
-        mintAuthority.publicKey, // mint authority (we KEEP this)
+        mintAuthority.publicKey, // mint authority (STAYS this key)
         null // no freeze authority
       )
     );
@@ -135,6 +135,7 @@ export async function POST(
       TOKEN_METADATA_PROGRAM_ID
     );
 
+    // Basic placeholder URI – your /api/metadata route can overwrite later
     const uri = "https://example.com/placeholder.json";
 
     const ixMeta = createCreateMetadataAccountV3Instruction(
