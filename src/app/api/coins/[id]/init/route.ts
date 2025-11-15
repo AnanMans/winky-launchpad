@@ -11,6 +11,7 @@ import {
   TransactionInstruction,
 } from "@solana/web3.js";
 import { PROGRAM_ID, RPC_URL, curvePda, mintAuthPda } from "@/lib/config";
+import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 
 // Discriminator for global `create_curve`: sha256("global:create_curve").slice(0, 8)
 const DISC_CREATE = Buffer.from([169, 235, 221, 223, 65, 109, 120, 183]);
@@ -73,7 +74,9 @@ export async function POST(
     const mintAuth = mintAuthPda(mintPk);
 
     // If state already exists, nothing to do
-    const existing = await conn.getAccountInfo(state, { commitment: "confirmed" });
+    const existing = await conn.getAccountInfo(state, {
+      commitment: "confirmed",
+    });
     if (existing) {
       console.log("[INIT] state PDA already exists:", state.toBase58());
       return ok({
@@ -86,10 +89,11 @@ export async function POST(
     // 4) Build create_curve instruction
     const keys = [
       { pubkey: payer.publicKey, isSigner: true, isWritable: true }, // payer
-      { pubkey: mintPk, isSigner: false, isWritable: false },        // mint
-      { pubkey: state, isSigner: false, isWritable: true },          // state PDA
-      { pubkey: mintAuth, isSigner: false, isWritable: false },      // mint_auth_pda
+      { pubkey: mintPk, isSigner: false, isWritable: false }, // mint
+      { pubkey: state, isSigner: false, isWritable: true }, // state PDA
+      { pubkey: mintAuth, isSigner: false, isWritable: false }, // mint_auth_pda
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // token_program (required by Anchor)
     ];
 
     const dataBuf = DISC_CREATE; // no args, just discriminator
