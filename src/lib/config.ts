@@ -26,7 +26,7 @@ export const RPC_URL =
 const PROGRAM_ID_STR =
   env("NEXT_PUBLIC_PROGRAM_ID") ||
   // Deployed curve_launchpad program on devnet:
-  "EkJrguu21gnyEo35FjjaUAtT46ZjkPB8NuM9SpGWPbDF";
+  "JCFJPbZCjEMDVqU3MbM9Cst8ZEdScskr4Vb3TDT79jQ4";
 
 const TREASURY_STR =
   env("NEXT_PUBLIC_TREASURY") ||
