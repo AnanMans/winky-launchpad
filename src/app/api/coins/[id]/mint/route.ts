@@ -22,7 +22,7 @@ import {
 
 import { createCreateMetadataAccountV3Instruction } from "@metaplex-foundation/mpl-token-metadata";
 
-import { RPC_URL } from "@/lib/config";
+import { RPC_URL, PROGRAM_ID, mintAuthPda } from "@/lib/config";
 
 function bad(msg: string, code = 400, extra: Record<string, unknown> = {}) {
   return NextResponse.json({ error: msg, ...extra }, { status: code });
@@ -31,7 +31,7 @@ function ok(data: unknown, code = 200) {
   return NextResponse.json(data, { status: code });
 }
 
-function loadMintAuthority(): Keypair {
+function loadPayer(): Keypair {
   const raw = (process.env.MINT_AUTHORITY_KEYPAIR || "").trim();
   if (!raw) {
     throw new Error(
@@ -84,15 +84,18 @@ export async function POST(
     const connection = new Connection(RPC_URL, "confirmed");
     console.log("[MINT] RPC_URL =", RPC_URL);
 
-    const mintAuthority = loadMintAuthority();
+    const payer = loadPayer();
     const mintKeypair = Keypair.generate();
 
     const lamports = await getMinimumBalanceForRentExemptMint(connection);
 
+    // SPL mint authority will be our PDA: [b"mint_auth", mint]
+    const mintAuthPdaPk = mintAuthPda(mintKeypair.publicKey);
+
     // 3) Create & initialize the mint
     const tx1 = new Transaction().add(
       SystemProgram.createAccount({
-        fromPubkey: mintAuthority.publicKey,
+        fromPubkey: payer.publicKey,
         newAccountPubkey: mintKeypair.publicKey,
         space: MINT_SIZE,
         lamports,
@@ -101,15 +104,12 @@ export async function POST(
       createInitializeMintInstruction(
         mintKeypair.publicKey,
         6, // decimals
-        mintAuthority.publicKey, // mint authority STAYS on this keypair
+        mintAuthPdaPk, // SPL mint authority = PDA used by on-chain program
         null // no freeze authority
       )
     );
 
-    await sendAndConfirmTransaction(connection, tx1, [
-      mintAuthority,
-      mintKeypair,
-    ]);
+    await sendAndConfirmTransaction(connection, tx1, [payer, mintKeypair]);
 
     console.log(
       "[MINT] created mint",
@@ -142,9 +142,9 @@ export async function POST(
       {
         metadata: metadataPda,
         mint: mintKeypair.publicKey,
-        mintAuthority: mintAuthority.publicKey,
-        payer: mintAuthority.publicKey,
-        updateAuthority: mintAuthority.publicKey,
+        mintAuthority: payer.publicKey, // metadata "mint authority" (not SPL)
+        payer: payer.publicKey,
+        updateAuthority: payer.publicKey,
       },
       {
         createMetadataAccountArgsV3: {
@@ -164,7 +164,7 @@ export async function POST(
     );
 
     const tx2 = new Transaction().add(ixMeta);
-    await sendAndConfirmTransaction(connection, tx2, [mintAuthority]);
+    await sendAndConfirmTransaction(connection, tx2, [payer]);
 
     console.log("[MINT] metadata created for", mintKeypair.publicKey.toBase58());
 

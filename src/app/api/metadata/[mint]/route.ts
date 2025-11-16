@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/db";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 const FALLBACK_IMG = "/token.png"; // optional fallback from /public
 

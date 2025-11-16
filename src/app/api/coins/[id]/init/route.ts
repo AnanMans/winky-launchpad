@@ -89,7 +89,7 @@ export async function POST(
     // 4) Build create_curve instruction
     const keys = [
       { pubkey: payer.publicKey, isSigner: true, isWritable: true }, // payer
-      { pubkey: mintPk, isSigner: false, isWritable: false }, // mint
+  { pubkey: mintPk, isSigner: false, isWritable: true },
       { pubkey: state, isSigner: false, isWritable: true }, // state PDA
       { pubkey: mintAuth, isSigner: false, isWritable: false }, // mint_auth_pda
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program

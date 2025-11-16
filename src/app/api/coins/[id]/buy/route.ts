@@ -24,7 +24,7 @@ import {
   createAssociatedTokenAccountInstruction,
 } from "@solana/spl-token";
 
-// Discriminator for `trade_buy`
+// Discriminator for `trade_buy` (global:trade_buy)
 const DISC_BUY = Buffer.from([173, 172, 52, 244, 61, 65, 216, 118]);
 
 function bad(msg: string, code = 400, extra: any = {}) {
@@ -36,7 +36,7 @@ function ok(data: any, code = 200) {
 
 // 1e9 lamports = 1 SOL
 const LAMPORTS_PER_SOL = 1_000_000_000;
-// We keep it simple: 1 SOL => 1,000,000 tokens (decimals = 6)
+// Simple flat mapping: 1 SOL -> 1,000,000 tokens (decimals = 6)
 const TOKENS_PER_SOL = 1_000_000;
 
 export async function POST(
@@ -69,8 +69,8 @@ export async function POST(
       return bad("Failed to compute lamports");
     }
 
-    // Simple linear pricing: 1 SOL => 1,000,000 tokens (human)
-    const tokensToMint = Math.floor((lamports / 1000)); // 1e9/1e6 = 1e3
+    // Simple flat pricing: 1 SOL => 1,000,000 tokens (human)
+    const tokensToMint = Math.floor((lamports / 1_000)); // 1e9 / 1e6 = 1e3
     if (!Number.isFinite(tokensToMint) || tokensToMint <= 0) {
       return bad("Failed to compute tokensToMint");
     }
@@ -186,6 +186,7 @@ export async function POST(
       return bad("Server: DISC_BUY misconfigured", 500);
     }
 
+    // Pass lamports and tokensToMint to the program
     const buf = Buffer.alloc(16);
     buf.writeBigUInt64LE(BigInt(lamports), 0);
     buf.writeBigUInt64LE(BigInt(tokensToMint), 8);
