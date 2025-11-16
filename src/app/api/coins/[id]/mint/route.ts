@@ -35,7 +35,7 @@ function loadMintAuthority(): Keypair {
   const raw = (process.env.MINT_AUTHORITY_KEYPAIR || "").trim();
   if (!raw) {
     throw new Error(
-      "MINT_AUTHORITY_KEYPAIR is missing. Set it in .env.local / Vercel as a JSON array."
+      "MINT_AUTHORITY_KEYPAIR is missing. Set it in .env.local as a JSON array."
     );
   }
 
@@ -89,7 +89,7 @@ export async function POST(
 
     const lamports = await getMinimumBalanceForRentExemptMint(connection);
 
-    // 3) Create & initialize the mint (mintAuthority is the authority)
+    // 3) Create & initialize the mint
     const tx1 = new Transaction().add(
       SystemProgram.createAccount({
         fromPubkey: mintAuthority.publicKey,
@@ -101,7 +101,7 @@ export async function POST(
       createInitializeMintInstruction(
         mintKeypair.publicKey,
         6, // decimals
-        mintAuthority.publicKey, // mint authority (STAYS this key)
+        mintAuthority.publicKey, // mint authority STAYS on this keypair
         null // no freeze authority
       )
     );
@@ -135,7 +135,7 @@ export async function POST(
       TOKEN_METADATA_PROGRAM_ID
     );
 
-    // Basic placeholder URI – your /api/metadata route can overwrite later
+    // Basic placeholder URI – can be replaced by /api/metadata later
     const uri = "https://example.com/placeholder.json";
 
     const ixMeta = createCreateMetadataAccountV3Instruction(

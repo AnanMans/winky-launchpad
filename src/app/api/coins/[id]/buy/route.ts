@@ -1,11 +1,8 @@
-// src/app/api/coins/[id]/buy/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import {
   AddressLookupTableAccount,
   Connection,
-  Keypair,
-  LAMPORTS_PER_SOL,
   PublicKey,
   SystemProgram,
   TransactionInstruction,
@@ -18,8 +15,6 @@ import {
   PROGRAM_ID,
   RPC_URL,
   TOKEN_PROGRAM_ID,
-  TREASURY_PK,
-  FEE_TREASURY_PK,
   curvePda,
   mintAuthPda,
 } from "@/lib/config";
@@ -27,7 +22,6 @@ import {
 import {
   getAssociatedTokenAddressSync,
   createAssociatedTokenAccountInstruction,
-  createMintToInstruction,
 } from "@solana/spl-token";
 
 // Discriminator for `trade_buy`
@@ -40,50 +34,10 @@ function ok(data: any, code = 200) {
   return NextResponse.json(data, { status: code });
 }
 
-function loadMintAuthority(): Keypair {
-  const raw = (process.env.MINT_AUTHORITY_KEYPAIR || "").trim();
-  if (!raw) {
-    throw new Error(
-      "MINT_AUTHORITY_KEYPAIR is missing. Set it in env as a JSON array."
-    );
-  }
-
-  let arr: number[];
-  try {
-    arr = JSON.parse(raw);
-  } catch (e: any) {
-    throw new Error(
-      `Failed to parse MINT_AUTHORITY_KEYPAIR as JSON: ${e?.message || e}`
-    );
-  }
-
-  if (!Array.isArray(arr)) {
-    throw new Error("MINT_AUTHORITY_KEYPAIR must be a JSON array of bytes.");
-  }
-
-  const bytes = Uint8Array.from(arr);
-  return Keypair.fromSecretKey(bytes);
-}
-
-// Optional: rent helper (just logs if PDA is under-funded)
-async function ensureStateRentExempt(conn: Connection, state: PublicKey) {
-  const info = await conn.getAccountInfo(state, { commitment: "confirmed" });
-  if (!info) throw new Error("State PDA does not exist yet");
-
-  const needed = await conn.getMinimumBalanceForRentExemption(
-    info.data.length,
-    "confirmed"
-  );
-  const delta = needed - info.lamports;
-  if (delta <= 0) return;
-
-  console.log(
-    "[BUY] state PDA rent below floor, needs top-up of",
-    delta,
-    "lamports for",
-    state.toBase58()
-  );
-}
+// 1e9 lamports = 1 SOL
+const LAMPORTS_PER_SOL = 1_000_000_000;
+// We keep it simple: 1 SOL => 1,000,000 tokens (decimals = 6)
+const TOKENS_PER_SOL = 1_000_000;
 
 export async function POST(
   req: Request,
@@ -105,25 +59,20 @@ export async function POST(
     const buyerStr = String(body?.buyer ?? "").trim();
     if (!buyerStr) return bad("buyer is required");
 
-    // lamports or amountSol (as NUMBER)
-    let lamportsNum: number | null = null;
-
-    if (body?.lamports != null && String(body.lamports).trim() !== "") {
-      const val = Number(body.lamports);
-      if (!Number.isFinite(val) || val <= 0) {
-        return bad("lamports must be > 0");
-      }
-      lamportsNum = Math.round(val);
-    } else if (body?.amountSol != null) {
-      const sol = Number(body.amountSol);
-      if (!Number.isFinite(sol) || sol <= 0) {
-        return bad("amountSol must be > 0");
-      }
-      lamportsNum = Math.round(sol * LAMPORTS_PER_SOL);
+    const amountSol = Number(body?.amountSol);
+    if (!Number.isFinite(amountSol) || amountSol <= 0) {
+      return bad("amountSol must be > 0");
     }
 
-    if (!lamportsNum || lamportsNum <= 0) {
-      return bad("lamports must be > 0");
+    const lamports = Math.round(amountSol * LAMPORTS_PER_SOL);
+    if (!Number.isFinite(lamports) || lamports <= 0) {
+      return bad("Failed to compute lamports");
+    }
+
+    // Simple linear pricing: 1 SOL => 1,000,000 tokens (human)
+    const tokensToMint = Math.floor((lamports / 1000)); // 1e9/1e6 = 1e3
+    if (!Number.isFinite(tokensToMint) || tokensToMint <= 0) {
+      return bad("Failed to compute tokensToMint");
     }
 
     // ---------- resolve coin + mint ----------
@@ -170,11 +119,9 @@ export async function POST(
     if (!coinRow?.creator) return bad("Coin row missing creator");
 
     const buyer = new PublicKey(buyerStr);
-    const creatorPk = new PublicKey(coinRow.creator);
 
     const state = curvePda(mintPk);
     const mAuth = mintAuthPda(mintPk);
-    const protocolTreasury = FEE_TREASURY_PK || TREASURY_PK;
 
     // ---------- sanity checks ----------
     const progInfo = await conn.getAccountInfo(PROGRAM_ID, {
@@ -195,9 +142,6 @@ export async function POST(
       console.error("[BUY] State PDA missing. Run /init first.");
       return bad("Server: state PDA not found. Run /init for this mint.", 400);
     }
-
-    // Ensure rent (optional)
-    await ensureStateRentExempt(conn, state);
 
     // ---------- ensure buyer ATA ----------
     const buyerAta = getAssociatedTokenAddressSync(
@@ -227,32 +171,12 @@ export async function POST(
       ixs.push(createAtaIx);
     }
 
-    // ---------- mint real tokens into buyer ATA ----------
-    const mintAuthority = loadMintAuthority();
-
-    const TOKENS_PER_SOL = 1_000_000; // number
-    const tokensToMint = Math.floor(
-      (lamportsNum * TOKENS_PER_SOL) / LAMPORTS_PER_SOL
-    );
-
-    if (!Number.isFinite(tokensToMint) || tokensToMint <= 0) {
-      return bad("Calculated 0 tokens to mint");
-    }
-
-    const mintToIx = createMintToInstruction(
-      mintPk,
-      buyerAta,
-      mintAuthority.publicKey,
-      tokensToMint
-    );
-    ixs.push(mintToIx);
-
-    // ---------- move SOL into curve PDA (liquidity) ----------
+    // Move SOL into curve PDA (liquidity)
     ixs.push(
       SystemProgram.transfer({
         fromPubkey: buyer,
         toPubkey: state,
-        lamports: lamportsNum,
+        lamports,
       })
     );
 
@@ -262,10 +186,10 @@ export async function POST(
       return bad("Server: DISC_BUY misconfigured", 500);
     }
 
-    const lamportsBig = BigInt(lamportsNum); // only BigInt usage
-    const lamLE = Buffer.alloc(8);
-    lamLE.writeBigUInt64LE(lamportsBig, 0);
-    const data = Buffer.concat([DISC_BUY, lamLE]);
+    const buf = Buffer.alloc(16);
+    buf.writeBigUInt64LE(BigInt(lamports), 0);
+    buf.writeBigUInt64LE(BigInt(tokensToMint), 8);
+    const data = Buffer.concat([DISC_BUY, buf]);
 
     const keys = [
       { pubkey: buyer, isSigner: true, isWritable: true }, // payer
@@ -273,8 +197,6 @@ export async function POST(
       { pubkey: state, isSigner: false, isWritable: true }, // curve state
       { pubkey: mAuth, isSigner: false, isWritable: false }, // mint auth PDA
       { pubkey: buyerAta, isSigner: false, isWritable: true }, // buyer ATA
-      { pubkey: protocolTreasury, isSigner: false, isWritable: true }, // protocol treasury (future)
-      { pubkey: creatorPk, isSigner: false, isWritable: true }, // creator wallet (future)
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ];
@@ -285,7 +207,7 @@ export async function POST(
       data,
     });
 
-    ixs.push(ix); // ATA create (maybe) + mintTo + SOL transfer + TradeBuy
+    ixs.push(ix); // [maybe] ATA create + SOL transfer + TradeBuy
 
     // ---------- build final tx ----------
     const { blockhash, lastValidBlockHeight } =
@@ -298,10 +220,6 @@ export async function POST(
     }).compileToV0Message([] as AddressLookupTableAccount[]);
 
     const vtx = new VersionedTransaction(msg);
-
-    // Partial sign with mint authority so Phantom only signs as buyer
-    vtx.sign([mintAuthority]);
-
     const txB64 = Buffer.from(vtx.serialize()).toString("base64");
 
     console.log(
@@ -313,7 +231,9 @@ export async function POST(
       state.toBase58(),
       "buyer:",
       buyer.toBase58(),
-      "tokensToMint:",
+      "lamports:",
+      lamports,
+      "tokens:",
       tokensToMint
     );
 
