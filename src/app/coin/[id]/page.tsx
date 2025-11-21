@@ -40,8 +40,10 @@ type CurveStats = {
   totalSupplyTokens: number;
   fdvSol: number;
   priceTokensPerSol: number;
-  soldDisplay?: number;   // optional from /stats
-  isMigrated?: boolean;   // optional from /stats
+  soldDisplay?: number;
+  isMigrated?: boolean;
+  migrationThresholdTokens?: number;
+  migrationPercent?: number;
 };
 
 function cx(...xs: Array<string | false | null | undefined>) {
@@ -49,8 +51,8 @@ function cx(...xs: Array<string | false | null | undefined>) {
 }
 
 // ---- MIGRATION HELPERS (UI) ----
-// Keep this in sync with your program + stats route
-const MIGRATE_SOLD_DISPLAY = 1_000_000; // test threshold you set on-chain
+// Fallback threshold if API doesn't send one
+const MIGRATE_SOLD_DISPLAY_FALLBACK = 1_000_000;
 function clamp01(x: number) { return Math.max(0, Math.min(1, x)); }
 
 // Normalize Supabase row → Coin
@@ -98,16 +100,18 @@ export default function CoinPage() {
 
   // ---- MIGRATION DERIVED (from stats) ----
   const soldDisplay = Number((stats?.soldDisplay ?? stats?.soldTokens ?? 0) || 0);
+  const migrateThreshold = stats?.migrationThresholdTokens ?? MIGRATE_SOLD_DISPLAY_FALLBACK;
 
   const migrateProgress = useMemo(() => {
-    const pct = clamp01(soldDisplay / MIGRATE_SOLD_DISPLAY);
+    const ratio = migrateThreshold > 0 ? soldDisplay / migrateThreshold : 0;
+    const pct = clamp01(ratio);
     return Math.round(pct * 100);
-  }, [soldDisplay]);
+  }, [soldDisplay, migrateThreshold]);
 
   const isMigrated = Boolean(
-    (stats && typeof (stats as any).isMigrated === 'boolean'
-      ? (stats as any).isMigrated
-      : soldDisplay >= MIGRATE_SOLD_DISPLAY)
+    stats && typeof stats.isMigrated === 'boolean'
+      ? stats.isMigrated
+      : soldDisplay >= migrateThreshold
   );
 
   // How many tokens you must burn to receive 1 SOL when selling (flat for now)
@@ -192,6 +196,8 @@ export default function CoinPage() {
         priceTokensPerSol: Number(j.priceTokensPerSol ?? 0),
         soldDisplay: Number(j.soldDisplay ?? j.soldTokens ?? 0),
         isMigrated: Boolean(j.isMigrated ?? false),
+        migrationThresholdTokens: Number(j.migrationThresholdTokens ?? 0) || undefined,
+        migrationPercent: Number(j.migrationPercent ?? 0) || undefined,
       };
       setStats(s);
     } catch (e) {
@@ -463,18 +469,18 @@ export default function CoinPage() {
 
   return (
     <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto grid gap-8">
-<header className="flex items-center justify-between">
-  <Link href="/" className="flex items-center gap-2 font-semibold">
-    <Image src="/logo.svg" alt="logo" width={28} height={28} />
-    <span>Winky Launchpad</span>
-  </Link>
-  <nav className="flex items-center gap-3">
-    <Link className="underline" href="/coins">
-      Coins
-    </Link>
-    {/* WalletButton removed here; it already appears in your layout nav */}
-  </nav>
-</header>
+      <header className="flex items-center justify-between">
+        <Link href="/" className="flex items-center gap-2 font-semibold">
+          <Image src="/logo.svg" alt="logo" width={28} height={28} />
+          <span>Winky Launchpad</span>
+        </Link>
+        <nav className="flex items-center gap-3">
+          <Link className="underline" href="/coins">
+            Coins
+          </Link>
+          {/* WalletButton removed here; it already appears in your layout nav */}
+        </nav>
+      </header>
 
       {flash && (
         <div className="mb-3 rounded-md border px-3 py-2 text-sm panel">
@@ -537,7 +543,7 @@ export default function CoinPage() {
         {stats && (
           <div className="mt-2 space-y-1 text-sm text-white/70">
             <div>
-              Pool: <span className="font-mono">{stats.poolSol.toFixed(4)} SOL</span> · Sold:{' '}
+              Pool: <span className="font-mono">{stats.poolSol.toFixed(4)} SOL</span> · Sold{' '}
               <span className="font-mono">
                 {stats.soldTokens.toLocaleString()} / {stats.totalSupplyTokens.toLocaleString()} {coin.symbol}
               </span>{' '}
@@ -556,7 +562,7 @@ export default function CoinPage() {
       <section className="rounded-xl border bg-black/20 p-4 grid gap-2">
         <div className="flex items-center justify-between text-sm">
           <span className="text-white/70">
-            Migration threshold: {MIGRATE_SOLD_DISPLAY.toLocaleString()} sold
+            Migration threshold: {migrateThreshold.toLocaleString()} sold
           </span>
           <span className="font-mono">{migrateProgress}%</span>
         </div>
@@ -570,7 +576,7 @@ export default function CoinPage() {
           </div>
         ) : (
           <div className="mt-2 text-xs text-white/60">
-            {soldDisplay.toLocaleString()} sold / {MIGRATE_SOLD_DISPLAY.toLocaleString()} target
+            {soldDisplay.toLocaleString()} sold / {migrateThreshold.toLocaleString()} target
           </div>
         )}
       </section>
@@ -584,7 +590,7 @@ export default function CoinPage() {
           <button
             type="button"
             className="px-4 py-2 rounded-lg bg-white/10 border border-white/20 text-sm text-white hover:bg-white/20 disabled:opacity-50"
-            onClick={doInit}
+            // onClick={doInit}
             disabled={!connected}
             title={connected ? 'Initialize' : 'Connect wallet first'}
           >
@@ -621,16 +627,15 @@ export default function CoinPage() {
             You’ll get ~ <span className="font-mono">{buyTokens.toLocaleString()}</span> {coin.symbol}
           </p>
 
-<button
-  type="button"
-  className="px-4 py-2 rounded-lg bg-green-500 text-black font-medium cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-green-500"
-  onClick={doBuy}
-  disabled={!connected || !tradable || isMigrated || pending}
-  title={isMigrated ? 'Curve migrated (trading locked)' : undefined}
->
-  Buy {coin.symbol}
-</button>
-
+          <button
+            type="button"
+            className="px-4 py-2 rounded-lg bg-green-500 text-black font-medium cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-green-500"
+            onClick={doBuy}
+            disabled={!connected || !tradable || isMigrated || pending}
+            title={isMigrated ? 'Curve migrated (trading locked)' : undefined}
+          >
+            Buy {coin.symbol}
+          </button>
         </div>
 
         {/* SELL */}
@@ -685,16 +690,15 @@ export default function CoinPage() {
             <span className="font-mono">{sellTokens.toLocaleString()}</span> {coin.symbol}
           </p>
 
-<button
-  type="button"
-  className="px-4 py-2 rounded-lg bg-red-500 text-white font-medium cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-red-500"
-  onClick={doSell}
-  disabled={!connected || !tradable || isMigrated || maxSellSol <= 0 || pending}
-  title={isMigrated ? 'Curve migrated (trading locked)' : undefined}
->
-  Sell {coin.symbol}
-</button>
-
+          <button
+            type="button"
+            className="px-4 py-2 rounded-lg bg-red-500 text-white font-medium cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-red-500"
+            onClick={doSell}
+            disabled={!connected || !tradable || isMigrated || maxSellSol <= 0 || pending}
+            title={isMigrated ? 'Curve migrated (trading locked)' : undefined}
+          >
+            Sell {coin.symbol}
+          </button>
         </div>
       </section>
     </main>

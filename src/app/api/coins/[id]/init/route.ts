@@ -1,20 +1,28 @@
+// src/app/api/coins/[id]/init/route.ts
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
 import {
   Connection,
-  Keypair,
   PublicKey,
   SystemProgram,
   Transaction,
   TransactionInstruction,
+  sendAndConfirmTransaction,
+  Keypair,
 } from "@solana/web3.js";
-import { PROGRAM_ID, RPC_URL, curvePda, mintAuthPda } from "@/lib/config";
-import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 
-// Discriminator for global `create_curve`: sha256("global:create_curve").slice(0, 8)
-const DISC_CREATE = Buffer.from([169, 235, 221, 223, 65, 109, 120, 183]);
+import {
+  PROGRAM_ID,
+  RPC_URL,
+  TOKEN_PROGRAM_ID,
+  curvePda,
+  mintAuthPda
+} from "@/lib/config";
+
+import crypto from "crypto";
 
 function bad(msg: string, code = 400, extra: any = {}) {
   return NextResponse.json({ error: msg, ...extra }, { status: code });
@@ -23,121 +31,130 @@ function ok(data: any, code = 200) {
   return NextResponse.json(data, { status: code });
 }
 
+// ---- correct discriminator for: global:create_curve ----
+const DISC_CREATE = crypto
+  .createHash("sha256")
+  .update("global:create_curve")
+  .digest()
+  .subarray(0, 8);
+
+// Load payer (server signer)
+function loadPayerFromEnv(): Keypair {
+  const raw = (process.env.MINT_AUTHORITY_KEYPAIR || "").trim();
+  if (!raw) throw new Error("MINT_AUTHORITY_KEYPAIR missing");
+
+  let arr: number[];
+  try {
+    arr = JSON.parse(raw);
+  } catch (e: any) {
+    throw new Error("Failed to parse MINT_AUTHORITY_KEYPAIR JSON");
+  }
+
+  return Keypair.fromSecretKey(Uint8Array.from(arr));
+}
+
 export async function POST(
-  req: Request,
+  _req: Request,
   ctx: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id } = await ctx.params;
-    const idStr = (id || "").trim();
-    if (!idStr) return bad("Missing id segment in route");
+    const coinId = (id || "").trim();
+    if (!coinId) return bad("Missing id");
 
-    // 1) Load coin row from Supabase
-    const { data, error } = await supabaseAdmin
+    // Fetch coin
+    const { data: coin, error } = await supabaseAdmin
       .from("coins")
-      .select("id,mint,creator")
-      .eq("id", idStr)
+      .select("id, mint")
+      .eq("id", coinId)
       .maybeSingle();
 
     if (error) return bad(error.message, 500);
-    if (!data) return bad("Coin not found", 404);
-    if (!data.mint) return bad("Coin has no mint configured yet", 400);
+    if (!coin) return bad("Coin not found", 404);
+    if (!coin.mint) return bad("Coin has no mint", 400);
 
-    const mintPk = new PublicKey(data.mint as string);
+    const mintPk = new PublicKey(coin.mint);
 
-    // 2) Load backend payer keypair (server wallet)
-    const raw =
-      (process.env.PLATFORM_TREASURY_KEYPAIR || "").trim() ||
-      (process.env.MINT_AUTHORITY_KEYPAIR || "").trim();
-    if (!raw) {
-      return bad(
-        "Server missing PLATFORM_TREASURY_KEYPAIR or MINT_AUTHORITY_KEYPAIR",
-        500
-      );
-    }
-
-    let payer: Keypair;
-    try {
-      const secret = Uint8Array.from(JSON.parse(raw));
-      payer = Keypair.fromSecretKey(secret);
-    } catch (e: any) {
-      return bad("Invalid keypair JSON in env", 500, {
-        env: "PLATFORM_TREASURY_KEYPAIR / MINT_AUTHORITY_KEYPAIR",
-      });
-    }
-
-    const conn = new Connection(RPC_URL, "confirmed");
-    console.log("[INIT] RPC_URL =", RPC_URL);
-
-    // 3) Derive PDAs (must match on-chain seeds)
-    const state = curvePda(mintPk);
+    // Derive PDAs
+    const statePda = curvePda(mintPk);
     const mintAuth = mintAuthPda(mintPk);
 
-    // If state already exists, nothing to do
-    const existing = await conn.getAccountInfo(state, {
-      commitment: "confirmed",
-    });
-    if (existing) {
-      console.log("[INIT] state PDA already exists:", state.toBase58());
-      return ok({
-        reused: true,
-        state: state.toBase58(),
-        mintAuth: mintAuth.toBase58(),
-      });
-    }
+    const connection = new Connection(RPC_URL, "confirmed");
 
-    // 4) Build create_curve instruction
+    console.log("[INIT] RPC_URL =", RPC_URL);
+    console.log("[INIT] PROGRAM_ID =", PROGRAM_ID.toBase58());
+    console.log("[INIT] mint =", mintPk.toBase58());
+    console.log("[INIT] statePda =", statePda.toBase58());
+    console.log("[INIT] mintAuth =", mintAuth.toBase58());
+
+    const payer = loadPayerFromEnv();
+
+    // instruction data
+    const data = Buffer.from(DISC_CREATE);
+
+    //
+    // ⚠ MUST MATCH Rust `CreateCurveAcct` EXACTLY:
+    //
+    // #[derive(Accounts)]
+    // pub struct CreateCurveAcct<'info> {
+    //   payer,
+    //   mint,
+    //   state,
+    //   mint_auth_pda,
+    //   system_program,
+    //   token_program
+    // }
+    //
     const keys = [
-      { pubkey: payer.publicKey, isSigner: true, isWritable: true }, // payer
-  { pubkey: mintPk, isSigner: false, isWritable: true },
-      { pubkey: state, isSigner: false, isWritable: true }, // state PDA
-      { pubkey: mintAuth, isSigner: false, isWritable: false }, // mint_auth_pda
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
-      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // token_program (required by Anchor)
+      // payer (signer, mut)
+      { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+
+      // mint (mut)
+      { pubkey: mintPk, isSigner: false, isWritable: true },
+
+      // state PDA (init, mut)
+      { pubkey: statePda, isSigner: false, isWritable: true },
+
+      // mint_auth_pda (PDA; not created here, not writable)
+      { pubkey: mintAuth, isSigner: false, isWritable: false },
+
+      // system program
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+
+      // token program
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
     ];
 
-    const dataBuf = DISC_CREATE; // no args, just discriminator
+    console.log("[INIT] keys =", keys.map(k => k.pubkey.toBase58()));
 
     const ix = new TransactionInstruction({
       programId: PROGRAM_ID,
       keys,
-      data: dataBuf,
+      data,
     });
 
-    const { blockhash, lastValidBlockHeight } =
-      await conn.getLatestBlockhash("confirmed");
+    const { blockhash } = await connection.getLatestBlockhash("finalized");
 
     const tx = new Transaction().add(ix);
-    tx.recentBlockhash = blockhash;
     tx.feePayer = payer.publicKey;
+    tx.recentBlockhash = blockhash;
 
-    const sig = await conn.sendTransaction(tx, [payer], {
+    const sig = await sendAndConfirmTransaction(connection, tx, [payer], {
       skipPreflight: false,
-      maxRetries: 5,
+      commitment: "confirmed",
+      maxRetries: 3,
     });
 
-    await conn.confirmTransaction(
-      { signature: sig, blockhash, lastValidBlockHeight },
-      "confirmed"
-    );
-
-    console.log(
-      "[INIT] created state",
-      state.toBase58(),
-      "for mint",
-      mintPk.toBase58(),
-      "sig",
-      sig
-    );
+    console.log("[INIT] create_curve sig =", sig);
 
     return ok({
-      reused: false,
-      tx: sig,
-      state: state.toBase58(),
-      mintAuth: mintAuth.toBase58(),
+      signature: sig,
+      state: statePda.toBase58(),
+      mint: mintPk.toBase58(),
     });
   } catch (e: any) {
     console.error("[/api/coins/[id]/init] error:", e);
     return bad(e?.message || "Init route failed", 500);
   }
 }
+

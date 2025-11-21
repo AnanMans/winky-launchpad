@@ -9,6 +9,14 @@ export const TOKEN_PROGRAM_ID = new PublicKey(
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 );
 
+
+// Base URL used for token metadata (must be public, not localhost)
+export const SITE_BASE =
+  process.env.NEXT_PUBLIC_METADATA_BASE_URL ||
+  process.env.SITE_BASE ||
+  "https://winky-launchpad.vercel.app";
+
+
 // NEW: correct Associated Token Program ID (v8)
 export const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
   "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
@@ -16,10 +24,10 @@ export const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
 
 /** ---- RPC (safe default if none set) ---- */
 const RPC_FALLBACK = "https://api.devnet.solana.com";
+
 export const RPC_URL =
-  env("NEXT_PUBLIC_HELIUS_RPC") ||
+  env("RPC") ||
   env("NEXT_PUBLIC_SOLANA_RPC") ||
-  env("RPC_URL") ||
   RPC_FALLBACK;
 
 /** ---- REQUIRED IDs ---- */

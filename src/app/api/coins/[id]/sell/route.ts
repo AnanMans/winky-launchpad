@@ -22,9 +22,9 @@ import {
   mintAuthPda,
 } from "@/lib/config";
 
-import { getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { getAccount, getAssociatedTokenAddressSync } from "@solana/spl-token";
 
-// 8-byte discriminator for trade_sell (you already set this correctly)
+// 8-byte discriminator for trade_sell
 const DISC_SELL = Buffer.from([
   59, 162, 77, 109,
    9,  82,216,160,
@@ -158,8 +158,17 @@ export async function POST(
     });
 
     if (!sellerAtaInfo) {
-      // No token account → user owns 0 tokens, just error
       return bad("No token account for this mint; nothing to sell", 400);
+    }
+
+    // Optional: check they actually have tokens, otherwise they'll just fail on-chain
+    try {
+      const ataParsed = await getAccount(conn, sellerAta, "confirmed", TOKEN_PROGRAM_ID);
+      if (ataParsed.amount === 0n) {
+        return bad("ATA has 0 tokens; nothing to sell", 400);
+      }
+    } catch (e) {
+      console.warn("[SELL] failed to parse ATA:", e);
     }
 
     // ---------- build sell instruction ----------
@@ -169,21 +178,24 @@ export async function POST(
     }
 
     const lamLE = Buffer.alloc(8);
+    // 🔥 FIX: offset must be a number, NOT bigint
     lamLE.writeBigUInt64LE(lamports, 0);
     const dataSell = Buffer.concat([DISC_SELL, lamLE]);
 
+    // MUST match TradeSellAcct in the Anchor program:
+    // payer, mint, state, mint_auth_pda, seller_ata, protocol_treasury, creator, token_program, system_program
     const keys: Array<{
       pubkey: PublicKey;
       isSigner: boolean;
       isWritable: boolean;
     }> = [
-      { pubkey: seller, isSigner: true, isWritable: true }, // payer
-      { pubkey: mintPk, isSigner: false, isWritable: true }, // mint
-      { pubkey: state, isSigner: false, isWritable: true }, // curve state
-      { pubkey: mAuth, isSigner: false, isWritable: false }, // mint auth PDA
-      { pubkey: sellerAta, isSigner: false, isWritable: true }, // seller ATA
+      { pubkey: seller, isSigner: true, isWritable: true },          // payer
+      { pubkey: mintPk, isSigner: false, isWritable: true },         // mint
+      { pubkey: state, isSigner: false, isWritable: true },          // curve state
+      { pubkey: mAuth, isSigner: false, isWritable: false },         // mint auth PDA
+      { pubkey: sellerAta, isSigner: false, isWritable: true },      // seller ATA
       { pubkey: protocolTreasury, isSigner: false, isWritable: true }, // protocol treasury
-      { pubkey: creatorPk, isSigner: false, isWritable: true }, // creator wallet
+      { pubkey: creatorPk, isSigner: false, isWritable: true },      // creator wallet
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ];
@@ -215,7 +227,9 @@ export async function POST(
       "state:",
       state.toBase58(),
       "seller:",
-      seller.toBase58()
+      seller.toBase58(),
+      "lamports:",
+      lamports.toString()
     );
 
     return ok({ txB64, blockhash, lastValidBlockHeight, version: 0 });

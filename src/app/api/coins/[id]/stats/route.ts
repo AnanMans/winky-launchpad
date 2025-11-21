@@ -1,110 +1,155 @@
-// src/app/api/coins/[id]/stats/route.ts
+// /src/app/api/coins/[id]/stats/route.ts
+export const runtime = "nodejs";
+
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { Connection, PublicKey } from "@solana/web3.js";
+
+import {
+  Connection,
+  PublicKey,
+  LAMPORTS_PER_SOL,
+} from "@solana/web3.js";
+
 import { RPC_URL, curvePda } from "@/lib/config";
 
-const LAMPORTS_PER_SOL = 1_000_000_000;
-// Program currently mints with decimals = 6
-const TOKEN_DECIMALS = 6;
-
-// Keep this in sync with your program + UI
-const MIGRATE_SOLD_DISPLAY = 1_000_000;
-
-function bad(msg: string, code = 400, extra: any = {}) {
+function bad(msg: string, code = 400, extra: Record<string, unknown> = {}) {
   return NextResponse.json({ error: msg, ...extra }, { status: code });
 }
-function ok(data: any, code = 200) {
+function ok(data: unknown, code = 200) {
   return NextResponse.json(data, { status: code });
+}
+
+// Layout of CurveState (Anchor / Borsh):
+// 8 bytes discriminator
+// 32 creator
+// 32 mint
+// 1 bump_curve
+// 1 bump_mint_auth
+// 8 total_supply_raw (u64, LE)
+// 8 sold_raw (u64, LE)
+function decodeCurveState(buf: Buffer) {
+  if (buf.length < 8 + 32 + 32 + 1 + 1 + 8 + 8) {
+    throw new Error("CurveState buffer too small");
+  }
+
+  const dv = new DataView(
+    buf.buffer,
+    buf.byteOffset,
+    buf.byteLength,
+  );
+
+  const offsetTotalSupply = 8 + 32 + 32 + 1 + 1; // 74
+  const offsetSold = offsetTotalSupply + 8;       // 82
+
+  const total_supply_raw =
+    Number(dv.getBigUint64(offsetTotalSupply, true)); // LE
+  const sold_raw = Number(dv.getBigUint64(offsetSold, true));
+
+  return { total_supply_raw, sold_raw };
 }
 
 export async function GET(
   _req: Request,
   ctx: { params: Promise<{ id: string }> }
 ) {
+  const baseDefaults = {
+    poolSol: 0,
+    soldRaw: 0,
+    soldTokens: 0,
+    totalSupplyTokens: 0,
+    priceTokensPerSol: 1_000_000, // UI hint
+    fdvSol: 0,
+    soldDisplay: 0,
+    migrationThresholdTokens: 1_000_000,
+    migrationPercent: 0,
+    isMigrated: false,
+  };
+
   try {
     const { id } = await ctx.params;
-    const idStr = (id || "").trim();
-    if (!idStr) return bad("Missing id segment in route");
+    const coinId = (id || "").trim();
+    if (!coinId) return bad("Missing id param");
 
-    // ---- load coin row to get the mint ----
+    // 1) Load coin to get mint
     const { data: coin, error } = await supabaseAdmin
       .from("coins")
-      .select("id,mint")
-      .eq("id", idStr)
+      .select("id, mint")
+      .eq("id", coinId)
       .maybeSingle();
 
     if (error) return bad(error.message, 500);
-
-    // Common default payload when mint/state missing
-    const baseDefaults = {
-      poolSol: 0,
-      soldTokens: 0,
-      totalSupplyTokens: 0,
-      fdvSol: 0,
-      priceTokensPerSol: Math.pow(10, TOKEN_DECIMALS), // flat, matches on-chain sell math
-      decimals: TOKEN_DECIMALS,
-      soldDisplay: 0,
-      isMigrated: false,
-    };
-
-    if (!coin?.mint) {
-      return ok(baseDefaults);
-    }
+    if (!coin || !coin.mint) return ok(baseDefaults);
 
     const mintPk = new PublicKey(coin.mint);
     const statePk = curvePda(mintPk);
 
     const conn = new Connection(RPC_URL, "confirmed");
-    const info = await conn.getAccountInfo(statePk, "confirmed");
+    console.log("[STATS] RPC_URL =", RPC_URL);
+    console.log("[STATS] statePk =", statePk.toBase58());
 
+    let info;
+    try {
+      info = await conn.getAccountInfo(statePk, "confirmed");
+    } catch (e) {
+      console.error("[STATS] getAccountInfo failed:", e);
+      return ok(baseDefaults);
+    }
+
+    // Curve not initialized yet → zeros
     if (!info) {
       return ok(baseDefaults);
     }
 
-    const poolSol = info.lamports / LAMPORTS_PER_SOL;
-    const data = info.data;
-
-    if (!data || data.length < 16) {
-      return ok({
-        ...baseDefaults,
-        poolSol,
-      });
+    let total_supply_raw = 0;
+    let sold_raw = 0;
+    try {
+      const decoded = decodeCurveState(info.data as Buffer);
+      total_supply_raw = decoded.total_supply_raw;
+      sold_raw = decoded.sold_raw;
+    } catch (e) {
+      console.error("[STATS] decodeCurveState failed:", e);
+      return ok(baseDefaults);
     }
 
-    // We only need the last two u64 fields: total_supply_raw, sold_raw
-    const totalSupplyRaw = Number(data.readBigUInt64LE(data.length - 16));
-    const soldRaw = Number(data.readBigUInt64LE(data.length - 8));
+    // --- HERE is the important part: 6-decimals token ---
+    const TOKEN_DECIMALS = 6;
+    const DEC_FACTOR = Math.pow(10, TOKEN_DECIMALS);
 
-    const factor = Math.pow(10, TOKEN_DECIMALS);
-    const totalSupplyTokens = totalSupplyRaw / factor;
-    const soldTokens = soldRaw / factor;
+    const soldTokens = sold_raw / DEC_FACTOR;
+    const totalSupplyTokens = total_supply_raw / DEC_FACTOR;
 
-    // ---- price + FDV ----
-    // Flat SELL quote (matches on-chain lamports_to_tokens_raw): 1 SOL -> 10^dec tokens
-    const priceTokensPerSol = Math.pow(10, TOKEN_DECIMALS);
+    // How much SOL is sitting in the curve PDA
+    const poolLamports = await conn.getBalance(statePk, "confirmed");
+    const poolSol = poolLamports / LAMPORTS_PER_SOL;
 
-    // FDV[ SOL ] ~= total_supply_tokens / (tokens per SOL)
-    // Example: 1,000,000,000 / 1,000,000 = 1000 SOL
-    const fdvSol = totalSupplyTokens / priceTokensPerSol;
+    const priceTokensPerSol = 1_000_000; // simple for now
+    const fdvSol = 0;                     // wire real FDV later
 
-    // NEW: expose soldDisplay + isMigrated for the UI
+    // Migration logic (UI)
+    const migrationThresholdTokens = 1_000_000;
     const soldDisplay = soldTokens;
-    const isMigrated = soldDisplay >= MIGRATE_SOLD_DISPLAY;
+    const migrationPercent =
+      migrationThresholdTokens > 0
+        ? Math.min(100, (soldDisplay * 100) / migrationThresholdTokens)
+        : 0;
+    const isMigrated = soldDisplay >= migrationThresholdTokens;
 
     return ok({
+      poolLamports,
       poolSol,
+      soldRaw: sold_raw,
       soldTokens,
       totalSupplyTokens,
-      fdvSol,
       priceTokensPerSol,
-      decimals: TOKEN_DECIMALS,
+      fdvSol,
       soldDisplay,
+      migrationThresholdTokens,
+      migrationPercent,
       isMigrated,
     });
   } catch (e: any) {
     console.error("[/api/coins/[id]/stats] error:", e);
-    return bad(e?.message || "Stats route failed", 500);
+    return ok(baseDefaults);
   }
 }
 

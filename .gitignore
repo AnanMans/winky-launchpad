@@ -50,3 +50,6 @@ __snapshot__/
 __backup__/
 .next/
 node_modules/
+.env
+.env.local
+.env.*.local

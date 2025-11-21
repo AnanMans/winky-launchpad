@@ -1,3 +1,4 @@
+// src/app/api/coins/[id]/buy/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import {
@@ -36,7 +37,7 @@ function ok(data: any, code = 200) {
 
 // 1e9 lamports = 1 SOL
 const LAMPORTS_PER_SOL = 1_000_000_000;
-// Simple flat mapping: 1 SOL -> 1,000,000 tokens (decimals = 6)
+// Just for UI estimate: 1 SOL ≈ 1,000,000 tokens (human units, decimals = 6)
 const TOKENS_PER_SOL = 1_000_000;
 
 export async function POST(
@@ -69,11 +70,8 @@ export async function POST(
       return bad("Failed to compute lamports");
     }
 
-    // Simple flat pricing: 1 SOL => 1,000,000 tokens (human)
-    const tokensToMint = Math.floor((lamports / 1_000)); // 1e9 / 1e6 = 1e3
-    if (!Number.isFinite(tokensToMint) || tokensToMint <= 0) {
-      return bad("Failed to compute tokensToMint");
-    }
+    // UI-only estimate of tokens (this is NOT sent to the program)
+    const estTokensHuman = amountSol * TOKENS_PER_SOL;
 
     // ---------- resolve coin + mint ----------
     const conn = new Connection(RPC_URL, "confirmed");
@@ -158,7 +156,7 @@ export async function POST(
 
     const ixs: TransactionInstruction[] = [];
 
-    // Create ATA if missing
+    // 1) Create ATA if missing
     if (!buyerAtaInfo) {
       const createAtaIx = createAssociatedTokenAccountInstruction(
         buyer, // payer
@@ -171,7 +169,7 @@ export async function POST(
       ixs.push(createAtaIx);
     }
 
-    // Move SOL into curve PDA (liquidity)
+    // 2) Move SOL into curve PDA (liquidity)
     ixs.push(
       SystemProgram.transfer({
         fromPubkey: buyer,
@@ -180,27 +178,28 @@ export async function POST(
       })
     );
 
-    // ---------- build TradeBuy instruction ----------
-    if (DISC_BUY.length !== 8) {
-      console.error("[BUY] DISC_BUY incorrect length");
-      return bad("Server: DISC_BUY misconfigured", 500);
-    }
-
-    // Pass lamports and tokensToMint to the program
-    const buf = Buffer.alloc(16);
+    // 3) TradeBuy instruction
+    //    Program expects: [disc][lamports_in: u64]
+    const buf = Buffer.alloc(8);
     buf.writeBigUInt64LE(BigInt(lamports), 0);
-    buf.writeBigUInt64LE(BigInt(tokensToMint), 8);
     const data = Buffer.concat([DISC_BUY, buf]);
 
+    // MUST match TradeBuy accounts in lib.rs:
+    // payer, mint, state, mint_auth_pda, buyer_ata, system_program, token_program
     const keys = [
       { pubkey: buyer, isSigner: true, isWritable: true }, // payer
       { pubkey: mintPk, isSigner: false, isWritable: true }, // mint
       { pubkey: state, isSigner: false, isWritable: true }, // curve state
       { pubkey: mAuth, isSigner: false, isWritable: false }, // mint auth PDA
       { pubkey: buyerAta, isSigner: false, isWritable: true }, // buyer ATA
-      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // token_program
     ];
+
+    console.log(
+      "[BUY] keys =",
+      keys.map((k) => k.pubkey.toBase58())
+    );
 
     const ix = new TransactionInstruction({
       programId: PROGRAM_ID,
@@ -234,13 +233,20 @@ export async function POST(
       buyer.toBase58(),
       "lamports:",
       lamports,
-      "tokens:",
-      tokensToMint
+      "estTokensHuman:",
+      estTokensHuman
     );
 
-    return ok({ txB64, blockhash, lastValidBlockHeight, version: 0 });
+    return ok({
+      txB64,
+      blockhash,
+      lastValidBlockHeight,
+      version: 0,
+      estTokensHuman,
+    });
   } catch (e: any) {
     console.error("[/api/coins/[id]/buy] error:", e);
     return bad(e?.message || "Buy route failed", 500);
   }
 }
+
