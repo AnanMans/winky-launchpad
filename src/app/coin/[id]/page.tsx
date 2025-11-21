@@ -44,6 +44,9 @@ type CurveStats = {
   isMigrated?: boolean;
   migrationThresholdTokens?: number;
   migrationPercent?: number;
+  // NEW
+  walletSol?: number;
+  walletTokens?: number;
 };
 
 function cx(...xs: Array<string | false | null | undefined>) {
@@ -178,10 +181,14 @@ export default function CoinPage() {
       return;
     }
     try {
-      const res = await fetch(
-        `/api/coins/${encodeURIComponent(coin.id)}/stats`,
-        { cache: 'no-store' }
-      );
+      const walletStr = publicKey?.toBase58() || '';
+
+      let url = `/api/coins/${encodeURIComponent(coin.id)}/stats`;
+      if (walletStr) {
+        url += `?wallet=${encodeURIComponent(walletStr)}`;
+      }
+
+      const res = await fetch(url, { cache: 'no-store' });
       const j = await res.json().catch(() => ({}));
       if (!res.ok) {
         console.warn('[STATS] error payload:', j);
@@ -198,8 +205,20 @@ export default function CoinPage() {
         isMigrated: Boolean(j.isMigrated ?? false),
         migrationThresholdTokens: Number(j.migrationThresholdTokens ?? 0) || undefined,
         migrationPercent: Number(j.migrationPercent ?? 0) || undefined,
+        walletSol: Number(j.walletSol ?? 0),
+        walletTokens: Number(j.walletTokens ?? 0),
       };
       setStats(s);
+
+      // If API returned wallet balances, sync them into local UI state
+      if (walletStr) {
+        if (Number.isFinite(s.walletSol ?? NaN)) {
+          setSolBal(s.walletSol || 0);
+        }
+        if (Number.isFinite(s.walletTokens ?? NaN)) {
+          setTokBal(s.walletTokens || 0);
+        }
+      }
     } catch (e) {
       console.warn('[STATS] fetch error:', e);
     }
@@ -232,7 +251,7 @@ export default function CoinPage() {
     return () => { alive = false; };
   }, [id]);
 
-  // Balances polling (stable scalar deps)
+  // Balances polling (client-side, still fine to keep)
   useEffect(() => {
     if (!connected || !publicKey) {
       setSolBal(0);
@@ -244,7 +263,7 @@ export default function CoinPage() {
     return () => clearInterval(t);
   }, [connected, publicKey?.toBase58(), coin?.mint ?? null]);
 
-  // Stats burst + steady polling (depends ONLY on coin.id)
+  // Stats burst + steady polling (depends on coin.id + wallet)
   useEffect(() => {
     if (!coin?.id) {
       setStats(null);
@@ -271,7 +290,7 @@ export default function CoinPage() {
       if (fastTimer) clearTimeout(fastTimer);
       clearInterval(steady);
     };
-  }, [coin?.id ?? null]);
+  }, [coin?.id ?? null, publicKey?.toBase58() ?? null]);
 
   // Prefill buy from ?buy= once per coin id
   useEffect(() => {

@@ -1,4 +1,3 @@
-// /src/app/api/coins/[id]/stats/route.ts
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
@@ -9,6 +8,8 @@ import {
   PublicKey,
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
+
+import { getAccount, getMint } from "@solana/spl-token";
 
 import { RPC_URL, curvePda } from "@/lib/config";
 
@@ -32,24 +33,19 @@ function decodeCurveState(buf: Buffer) {
     throw new Error("CurveState buffer too small");
   }
 
-  const dv = new DataView(
-    buf.buffer,
-    buf.byteOffset,
-    buf.byteLength,
-  );
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
 
   const offsetTotalSupply = 8 + 32 + 32 + 1 + 1; // 74
-  const offsetSold = offsetTotalSupply + 8;       // 82
+  const offsetSold = offsetTotalSupply + 8;      // 82
 
-  const total_supply_raw =
-    Number(dv.getBigUint64(offsetTotalSupply, true)); // LE
+  const total_supply_raw = Number(dv.getBigUint64(offsetTotalSupply, true)); // LE
   const sold_raw = Number(dv.getBigUint64(offsetSold, true));
 
   return { total_supply_raw, sold_raw };
 }
 
 export async function GET(
-  _req: Request,
+  req: Request,
   ctx: { params: Promise<{ id: string }> }
 ) {
   const baseDefaults = {
@@ -63,6 +59,8 @@ export async function GET(
     migrationThresholdTokens: 1_000_000,
     migrationPercent: 0,
     isMigrated: false,
+    walletSol: 0,
+    walletTokens: 0,
   };
 
   try {
@@ -111,7 +109,7 @@ export async function GET(
       return ok(baseDefaults);
     }
 
-    // --- HERE is the important part: 6-decimals token ---
+    // --- 6-decimals token ---
     const TOKEN_DECIMALS = 6;
     const DEC_FACTOR = Math.pow(10, TOKEN_DECIMALS);
 
@@ -123,7 +121,7 @@ export async function GET(
     const poolSol = poolLamports / LAMPORTS_PER_SOL;
 
     const priceTokensPerSol = 1_000_000; // simple for now
-    const fdvSol = 0;                     // wire real FDV later
+    const fdvSol = 0;                    // wire real FDV later
 
     // Migration logic (UI)
     const migrationThresholdTokens = 1_000_000;
@@ -133,6 +131,44 @@ export async function GET(
         ? Math.min(100, (soldDisplay * 100) / migrationThresholdTokens)
         : 0;
     const isMigrated = soldDisplay >= migrationThresholdTokens;
+
+    // -------- WALLET BALANCES (optional) --------
+    let walletSol = 0;
+    let walletTokens = 0;
+
+    try {
+      const url = new URL(req.url);
+      const qWallet = url.searchParams.get("wallet");
+      const headerWallet =
+        req.headers.get("x-wallet") || req.headers.get("x-wallet-address");
+
+      const walletStr = (qWallet || headerWallet || "").trim();
+
+      if (walletStr) {
+        const walletPk = new PublicKey(walletStr);
+
+        // SOL balance
+        const lamports = await conn.getBalance(walletPk, "confirmed");
+        walletSol = lamports / LAMPORTS_PER_SOL;
+
+        // Token balance
+        const ataRes = await conn.getTokenAccountsByOwner(walletPk, {
+          mint: mintPk,
+        });
+
+        if (ataRes.value.length > 0) {
+          const ataPubkey = ataRes.value[0].pubkey;
+          const ata = await getAccount(conn, ataPubkey);
+          const mintInfo = await getMint(conn, mintPk);
+
+          const raw = Number(ata.amount);
+          const decimals = mintInfo.decimals;
+          walletTokens = raw / Math.pow(10, decimals);
+        }
+      }
+    } catch (e) {
+      console.error("[STATS] wallet balance fetch failed:", e);
+    }
 
     return ok({
       poolLamports,
@@ -146,6 +182,8 @@ export async function GET(
       migrationThresholdTokens,
       migrationPercent,
       isMigrated,
+      walletSol,
+      walletTokens,
     });
   } catch (e: any) {
     console.error("[/api/coins/[id]/stats] error:", e);
