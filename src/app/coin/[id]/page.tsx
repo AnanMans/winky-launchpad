@@ -117,11 +117,24 @@ export default function CoinPage() {
       : soldDisplay >= migrateThreshold
   );
 
-  // How many tokens you must burn to receive 1 SOL when selling (flat for now)
-  const tokensPerSolSell = useMemo(
-    () => quoteSellTokensUi('linear', 2, 0, 1),
-    []
+// How many tokens you must burn to receive 1 SOL when selling (based on curve)
+const tokensPerSolSell = useMemo(() => {
+  if (!coin || !stats) return 0;
+  const sd = Number(stats.soldDisplay ?? stats.soldTokens ?? 0);
+  return quoteSellTokensUi(
+    coin.curve,
+    coin.strength,
+    coin.startPrice,
+    1,    // quote for 1 SOL
+    sd,
   );
+}, [coin, stats]);
+
+// Max SOL you can sell given your token balance
+const maxSellSol = useMemo(() => {
+  if (!tokensPerSolSell || tokensPerSolSell <= 0) return 0;
+  return tokBal / tokensPerSolSell;
+}, [tokBal, tokensPerSolSell]);
 
   // Maximum SOL you can sell based on your current token balance
   const maxSellSol = useMemo(() => {
@@ -309,11 +322,22 @@ export default function CoinPage() {
     return quoteTokensUi(a, coin.curve, coin.strength, sd);
   }, [buySol, coin, stats]);
 
-  const sellTokens = useMemo(() => {
-    const a = Number(sellSol);
-    if (!coin || !Number.isFinite(a) || a <= 0) return 0;
-    return quoteSellTokensUi(coin.curve, coin.strength, coin.startPrice, a);
-  }, [sellSol, coin]);
+const sellTokens = useMemo(() => {
+  const a = Number(sellSol);
+  if (!coin || !Number.isFinite(a) || a <= 0) return 0;
+
+  const sd = stats
+    ? Number(stats.soldDisplay ?? stats.soldTokens ?? 0)
+    : 0;
+
+  return quoteSellTokensUi(
+    coin.curve,
+    coin.strength,
+    coin.startPrice,
+    a,
+    sd,
+  );
+}, [sellSol, coin, stats]);
 
   // ---------- ACTIONS ----------
   async function doBuy() {
