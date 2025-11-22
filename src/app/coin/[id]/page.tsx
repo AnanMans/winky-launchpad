@@ -134,11 +134,11 @@ export default function CoinPage() {
         return;
       }
 
-      // ---- SOL balance ----
+      // --- SOL balance ---
       const lamports = await connection.getBalance(publicKey, "confirmed");
       setSolBal(lamports / LAMPORTS_PER_SOL);
 
-      // ---- Token balance ----
+      // --- Token balance ---
       const mintStr = coin?.mint;
       if (!mintStr) {
         setTokBal(0);
@@ -149,17 +149,21 @@ export default function CoinPage() {
       try {
         mintPk = new PublicKey(mintStr);
       } catch {
-        console.warn("[balances] invalid mint in coin row:", mintStr);
+        console.warn("Invalid mint in coin row:", mintStr);
         setTokBal(0);
         return;
       }
 
-      // Use parsed accounts by owner – more robust than guessing ATA
+      // Use parsed accounts so we don't fight decimals math
       const parsed = await connection.getParsedTokenAccountsByOwner(
         publicKey,
         { mint: mintPk },
         "confirmed"
       );
+
+      console.log("[balances] owner", publicKey.toBase58());
+      console.log("[balances] mint", mintStr);
+      console.log("[balances] parsed accounts", parsed.value);
 
       if (!parsed.value.length) {
         console.log(
@@ -171,22 +175,24 @@ export default function CoinPage() {
         return;
       }
 
-      const info: any = parsed.value[0].account.data;
-      const tokenAmount = info?.parsed?.info?.tokenAmount;
+      const first = parsed.value[0];
+      const tokenAmount =
+        // @ts-ignore – we know this shape from RPC
+        first.account.data.parsed?.info?.tokenAmount;
 
       if (tokenAmount && typeof tokenAmount.uiAmount === "number") {
-        // Directly use uiAmount (already adjusted by decimals)
         setTokBal(tokenAmount.uiAmount);
       } else if (tokenAmount && typeof tokenAmount.amount === "string") {
         const dec = Number(tokenAmount.decimals ?? 6);
         const raw = Number(tokenAmount.amount ?? "0");
         setTokBal(raw / Math.pow(10, dec));
       } else {
-        console.warn("[balances] unexpected tokenAmount structure:", tokenAmount);
+        console.warn("[balances] unexpected tokenAmount shape:", tokenAmount);
         setTokBal(0);
       }
     } catch (e) {
       console.error("refreshBalances error:", e);
+      // don’t blow up UI
       setTokBal(0);
     }
   }
@@ -672,12 +678,12 @@ export default function CoinPage() {
                 <button
                   key={label}
                   type="button"
-                  disabled={!connected || maxSellSol <= 0 || isMigrated}
+                  disabled={!connected || isMigrated}
                   onClick={() => {
-                    if (maxSellSol <= 0) return;
+                    if (!connected || maxSellSol <= 0) return;
                     const effectivePct = p === 1 ? 0.995 : p; // ~99.5% for "100%"
                     const raw = maxSellSol * effectivePct;
-                    const v = raw.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
+                    const v = raw.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
                     setSellSol(v);
                   }}
                   className="rounded-md border border-zinc-600 px-2 py-1 text-xs hover:bg-zinc-800 disabled:opacity-40"
@@ -697,11 +703,12 @@ export default function CoinPage() {
             type="button"
             className="px-4 py-2 rounded-lg bg-red-500 text-white font-medium cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-red-500"
             onClick={doSell}
-            disabled={!connected || !tradable || isMigrated || maxSellSol <= 0 || pending}
-            title={isMigrated ? 'Curve migrated (trading locked)' : undefined}
+            disabled={!connected || !tradable || isMigrated || pending}
+            title={isMigrated ? "Curve migrated (trading locked)" : undefined}
           >
             Sell {coin.symbol}
           </button>
+
         </div>
       </section>
     </main>
