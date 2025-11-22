@@ -138,7 +138,7 @@ export default function CoinPage() {
       const lamports = await connection.getBalance(publicKey, "confirmed");
       setSolBal(lamports / LAMPORTS_PER_SOL);
 
-      // ---- Token balance (match Phantom) ----
+      // ---- TOKEN balance (match Phantom) ----
       const mintStr = coin?.mint;
       if (!mintStr) {
         setTokBal(0);
@@ -148,12 +148,13 @@ export default function CoinPage() {
       let mintPk: PublicKey;
       try {
         mintPk = new PublicKey(mintStr);
-      } catch {
-        console.warn("Invalid mint in coin row:", mintStr);
+      } catch (e) {
+        console.warn("[BAL] invalid mint in coin row:", mintStr, e);
         setTokBal(0);
         return;
       }
 
+      // Do NOT assume ATA – look for *any* token account for this mint+owner
       const parsed = await connection.getParsedTokenAccountsByOwner(
         publicKey,
         { mint: mintPk },
@@ -161,6 +162,7 @@ export default function CoinPage() {
       );
 
       if (!parsed.value.length) {
+        console.log("[BAL] no token accounts for mint", mintPk.toBase58());
         setTokBal(0);
         return;
       }
@@ -170,14 +172,14 @@ export default function CoinPage() {
 
       const uiAmount = tokenAmount.uiAmount as number | null | undefined;
       if (typeof uiAmount === "number") {
-        setTokBal(uiAmount);
+        setTokBal(uiAmount); // already human-readable, same as Phantom
       } else {
         const raw = Number(tokenAmount.amount ?? "0");
         const dec = Number(tokenAmount.decimals ?? 6);
         setTokBal(raw / Math.pow(10, dec));
       }
     } catch (e) {
-      console.error("refreshBalances error:", e);
+      console.error("[BAL] refreshBalances error:", e);
       setTokBal(0);
     }
   }
