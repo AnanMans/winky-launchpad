@@ -138,7 +138,7 @@ export default function CoinPage() {
       const lamports = await connection.getBalance(publicKey, "confirmed");
       setSolBal(lamports / LAMPORTS_PER_SOL);
 
-      // ---- TOKEN balance (match Phantom) ----
+      // ---- Token balance ----
       const mintStr = coin?.mint;
       if (!mintStr) {
         setTokBal(0);
@@ -148,13 +148,13 @@ export default function CoinPage() {
       let mintPk: PublicKey;
       try {
         mintPk = new PublicKey(mintStr);
-      } catch (e) {
-        console.warn("[BAL] invalid mint in coin row:", mintStr, e);
+      } catch {
+        console.warn("[balances] invalid mint in coin row:", mintStr);
         setTokBal(0);
         return;
       }
 
-      // Do NOT assume ATA – look for *any* token account for this mint+owner
+      // Use parsed accounts by owner – more robust than guessing ATA
       const parsed = await connection.getParsedTokenAccountsByOwner(
         publicKey,
         { mint: mintPk },
@@ -162,24 +162,31 @@ export default function CoinPage() {
       );
 
       if (!parsed.value.length) {
-        console.log("[BAL] no token accounts for mint", mintPk.toBase58());
+        console.log(
+          "[balances] no token account found for owner/mint",
+          publicKey.toBase58(),
+          mintStr
+        );
         setTokBal(0);
         return;
       }
 
-      const tokenAmount = (parsed.value[0].account.data as any).parsed.info
-        .tokenAmount;
+      const info: any = parsed.value[0].account.data;
+      const tokenAmount = info?.parsed?.info?.tokenAmount;
 
-      const uiAmount = tokenAmount.uiAmount as number | null | undefined;
-      if (typeof uiAmount === "number") {
-        setTokBal(uiAmount); // already human-readable, same as Phantom
-      } else {
-        const raw = Number(tokenAmount.amount ?? "0");
+      if (tokenAmount && typeof tokenAmount.uiAmount === "number") {
+        // Directly use uiAmount (already adjusted by decimals)
+        setTokBal(tokenAmount.uiAmount);
+      } else if (tokenAmount && typeof tokenAmount.amount === "string") {
         const dec = Number(tokenAmount.decimals ?? 6);
+        const raw = Number(tokenAmount.amount ?? "0");
         setTokBal(raw / Math.pow(10, dec));
+      } else {
+        console.warn("[balances] unexpected tokenAmount structure:", tokenAmount);
+        setTokBal(0);
       }
     } catch (e) {
-      console.error("[BAL] refreshBalances error:", e);
+      console.error("refreshBalances error:", e);
       setTokBal(0);
     }
   }
