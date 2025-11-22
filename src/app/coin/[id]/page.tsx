@@ -134,11 +134,11 @@ export default function CoinPage() {
         return;
       }
 
-      // SOL
+      // ---- SOL BALANCE ----
       const lamports = await connection.getBalance(publicKey, 'confirmed');
       setSolBal(lamports / LAMPORTS_PER_SOL);
 
-      // token
+      // ---- TOKEN BALANCE ----
       const mintStr = coin?.mint;
       if (!mintStr) {
         setTokBal(0);
@@ -154,18 +154,28 @@ export default function CoinPage() {
         return;
       }
 
-      const ata = getAssociatedTokenAddressSync(mintPk, publicKey);
-      const bal = await connection
-        .getTokenAccountBalance(ata, 'confirmed')
-        .catch(() => null);
+      // find token accounts for (wallet, mint)
+      const tokenAccounts = await connection.getTokenAccountsByOwner(
+        publicKey,
+        { mint: mintPk },
+        'confirmed'
+      );
 
-      if (bal?.value) {
-        const dec = Number(bal.value.decimals ?? 6);
-        const raw = Number(bal.value.amount ?? '0');
-        setTokBal(raw / Math.pow(10, dec));
-      } else {
+      if (!tokenAccounts.value.length) {
+        // no ATA or zero balance
         setTokBal(0);
+        return;
       }
+
+      // use uiAmount directly (already decimal-correct)
+      const ataPubkey = tokenAccounts.value[0].pubkey;
+      const balInfo = await connection.getTokenAccountBalance(
+        ataPubkey,
+        'confirmed'
+      );
+
+      const uiAmt = balInfo.value.uiAmount ?? 0;
+      setTokBal(uiAmt);
     } catch (e) {
       console.error('refreshBalances error:', e);
     }
