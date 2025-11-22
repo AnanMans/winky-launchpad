@@ -134,52 +134,48 @@ async function refreshBalances() {
       return;
     }
 
-    // 1) SOL balance
-    const lamports = await connection.getBalance(publicKey, "confirmed");
-    setSolBal(lamports / LAMPORTS_PER_SOL);
+    // 1) SOL balance (still via web3.js)
+    try {
+      const lamports = await connection.getBalance(publicKey, "confirmed");
+      setSolBal(lamports / LAMPORTS_PER_SOL);
+    } catch (e) {
+      console.warn("[BALANCES] getBalance failed:", e);
+      setSolBal(0);
+    }
 
-    // 2) Token balance (same view as Phantom)
+    // 2) Token balance — use our debug API (same numbers as Phantom)
     const mintStr = coin?.mint;
     if (!mintStr) {
       setTokBal(0);
       return;
     }
 
-    let mintPk: PublicKey;
-    try {
-      mintPk = new PublicKey(mintStr);
-    } catch {
-      console.warn("[BALANCES] invalid mint in coin row:", mintStr);
-      setTokBal(0);
+    const url = `/api/debug/wallet-balances?wallet=${encodeURIComponent(
+      publicKey.toBase58()
+    )}&mint=${encodeURIComponent(mintStr)}`;
+
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) {
+      console.warn("[BALANCES] wallet-balances API error:", res.status);
       return;
     }
 
-    // Ask RPC: "give me parsed token accounts for this wallet+mint"
-    const parsed = await connection.getParsedTokenAccountsByOwner(
-      publicKey,
-      { mint: mintPk },
-      "confirmed"
-    );
-
-    if (!parsed.value.length) {
-      console.log("[BALANCES] no token account for", mintPk.toBase58());
-      setTokBal(0);
+    const j = await res.json().catch(() => null);
+    if (!j) {
+      console.warn("[BALANCES] wallet-balances JSON parse error");
       return;
     }
 
-    const tokenAmount =
-      (parsed.value[0].account.data as any).parsed.info.tokenAmount;
+    const uiAmount =
+      typeof j.uiAmount === "number"
+        ? j.uiAmount
+        : Number(j.uiAmountString ?? "0");
 
-    const uiAmount: number =
-      typeof tokenAmount.uiAmount === "number"
-        ? tokenAmount.uiAmount
-        : Number(tokenAmount.uiAmountString ?? "0");
-
-    console.log("[BALANCES] uiAmount for", mintPk.toBase58(), "=", uiAmount);
+    console.log("[BALANCES] API uiAmount =", uiAmount);
 
     setTokBal(Number.isFinite(uiAmount) ? uiAmount : 0);
   } catch (e) {
-    console.error("[BALANCES] refreshBalances error:", e);
+    console.error("[BALANCES] refreshBalances fatal error:", e);
   }
 }
 
