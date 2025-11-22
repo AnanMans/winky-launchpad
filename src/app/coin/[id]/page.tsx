@@ -44,9 +44,6 @@ type CurveStats = {
   isMigrated?: boolean;
   migrationThresholdTokens?: number;
   migrationPercent?: number;
-  // NEW
-  walletSol?: number;
-  walletTokens?: number;
 };
 
 function cx(...xs: Array<string | false | null | undefined>) {
@@ -54,7 +51,6 @@ function cx(...xs: Array<string | false | null | undefined>) {
 }
 
 // ---- MIGRATION HELPERS (UI) ----
-// Fallback threshold if API doesn't send one
 const MIGRATE_SOLD_DISPLAY_FALLBACK = 1_000_000;
 function clamp01(x: number) { return Math.max(0, Math.min(1, x)); }
 
@@ -117,17 +113,12 @@ export default function CoinPage() {
       : soldDisplay >= migrateThreshold
   );
 
-// How many tokens you must burn to receive 1 SOL when selling (based on curve)
- const tokensPerSolSell = useMemo(
+  // How many tokens you must burn to receive 1 SOL when selling (flat for now)
+  const tokensPerSolSell = useMemo(
     () => quoteSellTokensUi('linear', 2, 0, 1),
     []
   );
 
-  // Maximum SOL you can sell based on your current token balance
-  const maxSellSol = useMemo(() => {
-    if (!tokensPerSolSell || tokensPerSolSell <= 0) return 0;
-    return tokBal / tokensPerSolSell;
-  }, [tokBal, tokensPerSolSell]);
   // Maximum SOL you can sell based on your current token balance
   const maxSellSol = useMemo(() => {
     if (!tokensPerSolSell || tokensPerSolSell <= 0) return 0;
@@ -186,14 +177,10 @@ export default function CoinPage() {
       return;
     }
     try {
-      const walletStr = publicKey?.toBase58() || '';
-
-      let url = `/api/coins/${encodeURIComponent(coin.id)}/stats`;
-      if (walletStr) {
-        url += `?wallet=${encodeURIComponent(walletStr)}`;
-      }
-
-      const res = await fetch(url, { cache: 'no-store' });
+      const res = await fetch(
+        `/api/coins/${encodeURIComponent(coin.id)}/stats`,
+        { cache: 'no-store' }
+      );
       const j = await res.json().catch(() => ({}));
       if (!res.ok) {
         console.warn('[STATS] error payload:', j);
@@ -210,20 +197,8 @@ export default function CoinPage() {
         isMigrated: Boolean(j.isMigrated ?? false),
         migrationThresholdTokens: Number(j.migrationThresholdTokens ?? 0) || undefined,
         migrationPercent: Number(j.migrationPercent ?? 0) || undefined,
-        walletSol: Number(j.walletSol ?? 0),
-        walletTokens: Number(j.walletTokens ?? 0),
       };
       setStats(s);
-
-      // If API returned wallet balances, sync them into local UI state
-      if (walletStr) {
-        if (Number.isFinite(s.walletSol ?? NaN)) {
-          setSolBal(s.walletSol || 0);
-        }
-        if (Number.isFinite(s.walletTokens ?? NaN)) {
-          setTokBal(s.walletTokens || 0);
-        }
-      }
     } catch (e) {
       console.warn('[STATS] fetch error:', e);
     }
@@ -256,7 +231,7 @@ export default function CoinPage() {
     return () => { alive = false; };
   }, [id]);
 
-  // Balances polling (client-side, still fine to keep)
+  // Balances polling (stable scalar deps)
   useEffect(() => {
     if (!connected || !publicKey) {
       setSolBal(0);
@@ -266,9 +241,10 @@ export default function CoinPage() {
     refreshBalances();
     const t = setInterval(refreshBalances, 8000);
     return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected, publicKey?.toBase58(), coin?.mint ?? null]);
 
-  // Stats burst + steady polling (depends on coin.id + wallet)
+  // Stats burst + steady polling (depends ONLY on coin.id)
   useEffect(() => {
     if (!coin?.id) {
       setStats(null);
@@ -295,7 +271,7 @@ export default function CoinPage() {
       if (fastTimer) clearTimeout(fastTimer);
       clearInterval(steady);
     };
-  }, [coin?.id ?? null, publicKey?.toBase58() ?? null]);
+  }, [coin?.id ?? null]);
 
   // Prefill buy from ?buy= once per coin id
   useEffect(() => {
@@ -314,22 +290,11 @@ export default function CoinPage() {
     return quoteTokensUi(a, coin.curve, coin.strength, sd);
   }, [buySol, coin, stats]);
 
-const sellTokens = useMemo(() => {
-  const a = Number(sellSol);
-  if (!coin || !Number.isFinite(a) || a <= 0) return 0;
-
-  const sd = stats
-    ? Number(stats.soldDisplay ?? stats.soldTokens ?? 0)
-    : 0;
-
-  return quoteSellTokensUi(
-    coin.curve,
-    coin.strength,
-    coin.startPrice,
-    a,
-    sd,
-  );
-}, [sellSol, coin, stats]);
+  const sellTokens = useMemo(() => {
+    const a = Number(sellSol);
+    if (!coin || !Number.isFinite(a) || a <= 0) return 0;
+    return quoteSellTokensUi(coin.curve, coin.strength, coin.startPrice, a);
+  }, [sellSol, coin]);
 
   // ---------- ACTIONS ----------
   async function doBuy() {
@@ -535,7 +500,7 @@ const sellTokens = useMemo(() => {
               decoding="async"
             />
           ) : (
-            <div className="w-16 h-16 rounded-xl bg-white/10" />
+            <div className="w-16 h-16 rounded-xl bg.white/10" />
           )}
 
           <div>
@@ -569,7 +534,7 @@ const sellTokens = useMemo(() => {
           </div>
         )}
 
-        <div className="flex flex-wrap gap-6 text-sm text-white/70">
+        <div className="flex flex-wrap gap-6 text-sm text.white/70">
           <div>Wallet SOL: <span className="font-mono">{solBal.toFixed(4)} SOL</span></div>
           <div>Wallet {coin.symbol}: <span className="font-mono">{tokBal.toLocaleString()}</span></div>
           <div>Mint: <span className="font-mono">{coin.mint ?? '— (not set)'}</span></div>
@@ -615,24 +580,6 @@ const sellTokens = useMemo(() => {
           </div>
         )}
       </section>
-
-      {/* Initialize card – hidden for now */}
-      {false && (
-        <div className="mt-2 flex items-center justify-between rounded-xl bg-zinc-900 px-4 py-3">
-          <span className="text-sm text-zinc-300">
-            Initialize your curve on-chain (one-time).
-          </span>
-          <button
-            type="button"
-            className="px-4 py-2 rounded-lg bg-white/10 border border-white/20 text-sm text-white hover:bg-white/20 disabled:opacity-50"
-            // onClick={doInit}
-            disabled={!connected}
-            title={connected ? 'Initialize' : 'Connect wallet first'}
-          >
-            Initialize
-          </button>
-        </div>
-      )}
 
       {/* Buy / Sell */}
       <section className="grid md:grid-cols-2 gap-6">
