@@ -125,99 +125,96 @@ export default function CoinPage() {
     return tokBal / tokensPerSolSell;
   }, [tokBal, tokensPerSolSell]);
 
-// ---------- HELPERS ----------
-async function refreshBalances() {
-  try {
-    if (!connected || !publicKey) {
-      setSolBal(0);
-      setTokBal(0);
-      return;
-    }
-
-    // ---- SOL balance ----
-    const lamports = await connection.getBalance(publicKey, "confirmed");
-    setSolBal(lamports / LAMPORTS_PER_SOL);
-
-    // ---- Token balance ----
-    const mintStr = coin?.mint;
-    if (!mintStr) {
-      setTokBal(0);
-      return;
-    }
-
-    let mintPk: PublicKey;
+  // ---------- HELPERS ----------
+  async function refreshBalances() {
     try {
-      mintPk = new PublicKey(mintStr);
-    } catch {
-      console.warn("Invalid mint in coin row:", mintStr);
-      setTokBal(0);
-      return;
-    }
+      if (!connected || !publicKey) {
+        setSolBal(0);
+        setTokBal(0);
+        return;
+      }
 
-    // IMPORTANT: force classic Tokenkeg program id so ATA matches your program
-    const ata = getAssociatedTokenAddressSync(
-      mintPk,
-      publicKey,
-      false,
-      TOKEN_PROGRAM_ID,      // <- classic SPL token program, not 2022
-    );
+      // ---- SOL balance ----
+      const lamports = await connection.getBalance(publicKey, "confirmed");
+      setSolBal(lamports / LAMPORTS_PER_SOL);
 
-    const bal = await connection
-      .getTokenAccountBalance(ata, "confirmed")
-      .catch(() => null);
+      // ---- Token balance (match Phantom) ----
+      const mintStr = coin?.mint;
+      if (!mintStr) {
+        setTokBal(0);
+        return;
+      }
 
-    if (bal?.value) {
-      // Prefer uiAmount / uiAmountString
-      if (typeof bal.value.uiAmount === "number" && Number.isFinite(bal.value.uiAmount)) {
-        setTokBal(bal.value.uiAmount);
-      } else if (typeof bal.value.uiAmountString === "string") {
-        setTokBal(Number(bal.value.uiAmountString) || 0);
+      let mintPk: PublicKey;
+      try {
+        mintPk = new PublicKey(mintStr);
+      } catch {
+        console.warn("Invalid mint in coin row:", mintStr);
+        setTokBal(0);
+        return;
+      }
+
+      const parsed = await connection.getParsedTokenAccountsByOwner(
+        publicKey,
+        { mint: mintPk },
+        "confirmed"
+      );
+
+      if (!parsed.value.length) {
+        setTokBal(0);
+        return;
+      }
+
+      const tokenAmount = (parsed.value[0].account.data as any).parsed.info
+        .tokenAmount;
+
+      const uiAmount = tokenAmount.uiAmount as number | null | undefined;
+      if (typeof uiAmount === "number") {
+        setTokBal(uiAmount);
       } else {
-        const dec = Number(bal.value.decimals ?? 6);
-        const raw = Number(bal.value.amount ?? "0");
+        const raw = Number(tokenAmount.amount ?? "0");
+        const dec = Number(tokenAmount.decimals ?? 6);
         setTokBal(raw / Math.pow(10, dec));
       }
-    } else {
+    } catch (e) {
+      console.error("refreshBalances error:", e);
       setTokBal(0);
     }
-  } catch (e) {
-    console.error("refreshBalances error:", e);
   }
-}
 
-async function refreshStats() {
-  if (!coin?.id) {
-    setStats(null);
-    return;
-  }
-  try {
-    const res = await fetch(
-      `/api/coins/${encodeURIComponent(coin.id)}/stats`,
-      { cache: "no-store" }
-    );
-    const j = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      console.warn("[STATS] error payload:", j);
+  async function refreshStats() {
+    if (!coin?.id) {
+      setStats(null);
       return;
     }
+    try {
+      const res = await fetch(
+        `/api/coins/${encodeURIComponent(coin.id)}/stats`,
+        { cache: "no-store" }
+      );
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        console.warn("[STATS] error payload:", j);
+        return;
+      }
 
-    const s: CurveStats = {
-      poolSol: Number(j.poolSol ?? 0),
-      soldTokens: Number(j.soldTokens ?? 0),
-      totalSupplyTokens: Number(j.totalSupplyTokens ?? 0),
-      fdvSol: Number(j.fdvSol ?? 0),
-      priceTokensPerSol: Number(j.priceTokensPerSol ?? 0),
-      soldDisplay: Number(j.soldDisplay ?? j.soldTokens ?? 0),
-      isMigrated: Boolean(j.isMigrated ?? false),
-      migrationThresholdTokens:
-        Number(j.migrationThresholdTokens ?? 0) || undefined,
-      migrationPercent: Number(j.migrationPercent ?? 0) || undefined,
-    };
-    setStats(s);
-  } catch (e) {
-    console.warn("[STATS] fetch error:", e);
+      const s: CurveStats = {
+        poolSol: Number(j.poolSol ?? 0),
+        soldTokens: Number(j.soldTokens ?? 0),
+        totalSupplyTokens: Number(j.totalSupplyTokens ?? 0),
+        fdvSol: Number(j.fdvSol ?? 0),
+        priceTokensPerSol: Number(j.priceTokensPerSol ?? 0),
+        soldDisplay: Number(j.soldDisplay ?? j.soldTokens ?? 0),
+        isMigrated: Boolean(j.isMigrated ?? false),
+        migrationThresholdTokens:
+          Number(j.migrationThresholdTokens ?? 0) || undefined,
+        migrationPercent: Number(j.migrationPercent ?? 0) || undefined,
+      };
+      setStats(s);
+    } catch (e) {
+      console.warn("[STATS] fetch error:", e);
+    }
   }
-}
 
   // ---------- EFFECTS ----------
 
