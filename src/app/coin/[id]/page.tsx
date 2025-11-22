@@ -134,46 +134,83 @@ async function refreshBalances() {
       return;
     }
 
-    // 1) SOL balance (still via web3.js)
+    const walletStr = publicKey.toBase58();
+    const mintStr = coin?.mint;
+
+    // --- 1) SOL via debug API ---
     try {
-      const lamports = await connection.getBalance(publicKey, "confirmed");
-      setSolBal(lamports / LAMPORTS_PER_SOL);
+      const solRes = await fetch(
+        `/api/debug/wallet-sol?wallet=${encodeURIComponent(walletStr)}`,
+        { cache: "no-store" }
+      );
+
+      if (solRes.ok) {
+        const js = await solRes.json().catch(() => null);
+        const solVal =
+          js && typeof js.sol === "number"
+            ? js.sol
+            : js && typeof js.lamports === "number"
+            ? js.lamports / LAMPORTS_PER_SOL
+            : 0;
+
+        console.log("[BALANCES] SOL via API =", solVal);
+        setSolBal(Number.isFinite(solVal) ? solVal : 0);
+      } else {
+        console.warn(
+          "[BALANCES] wallet-sol API error:",
+          solRes.status,
+          await solRes.text().catch(() => "")
+        );
+        setSolBal(0);
+      }
     } catch (e) {
-      console.warn("[BALANCES] getBalance failed:", e);
+      console.error("[BALANCES] wallet-sol fetch error:", e);
       setSolBal(0);
     }
 
-    // 2) Token balance — use our debug API (same numbers as Phantom)
-    const mintStr = coin?.mint;
+    // --- 2) Token via wallet-balances API ---
     if (!mintStr) {
       setTokBal(0);
       return;
     }
 
-    const url = `/api/debug/wallet-balances?wallet=${encodeURIComponent(
-      publicKey.toBase58()
-    )}&mint=${encodeURIComponent(mintStr)}`;
+    try {
+      const tokRes = await fetch(
+        `/api/debug/wallet-balances?wallet=${encodeURIComponent(
+          walletStr
+        )}&mint=${encodeURIComponent(mintStr)}`,
+        { cache: "no-store" }
+      );
 
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) {
-      console.warn("[BALANCES] wallet-balances API error:", res.status);
-      return;
+      if (!tokRes.ok) {
+        console.warn(
+          "[BALANCES] wallet-balances API error:",
+          tokRes.status,
+          await tokRes.text().catch(() => "")
+        );
+        setTokBal(0);
+        return;
+      }
+
+      const j = await tokRes.json().catch(() => null);
+      if (!j) {
+        console.warn("[BALANCES] wallet-balances JSON parse error");
+        setTokBal(0);
+        return;
+      }
+
+      const uiAmount =
+        typeof j.uiAmount === "number"
+          ? j.uiAmount
+          : Number(j.uiAmountString ?? "0");
+
+      console.log("[BALANCES] token uiAmount =", uiAmount);
+
+      setTokBal(Number.isFinite(uiAmount) ? uiAmount : 0);
+    } catch (e) {
+      console.error("[BALANCES] wallet-balances fetch error:", e);
+      setTokBal(0);
     }
-
-    const j = await res.json().catch(() => null);
-    if (!j) {
-      console.warn("[BALANCES] wallet-balances JSON parse error");
-      return;
-    }
-
-    const uiAmount =
-      typeof j.uiAmount === "number"
-        ? j.uiAmount
-        : Number(j.uiAmountString ?? "0");
-
-    console.log("[BALANCES] API uiAmount =", uiAmount);
-
-    setTokBal(Number.isFinite(uiAmount) ? uiAmount : 0);
   } catch (e) {
     console.error("[BALANCES] refreshBalances fatal error:", e);
   }
