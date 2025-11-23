@@ -1,25 +1,23 @@
 // src/app/coin/[id]/page.tsx
-'use client';
+"use client";
 
-import { useEffect, useMemo, useState } from 'react';
-import Link from 'next/link';
-import Image from 'next/image';
-import { useParams, useSearchParams } from 'next/navigation';
+import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import Image from "next/image";
+import { useParams, useSearchParams } from "next/navigation";
 
-import { useWallet, useConnection } from '@solana/wallet-adapter-react';
+import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import {
   PublicKey,
   LAMPORTS_PER_SOL,
   Transaction,
   VersionedTransaction,
-} from '@solana/web3.js';
-import { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from '@solana/spl-token';
-import { Buffer } from 'buffer';
+} from "@solana/web3.js";
+import { Buffer } from "buffer";
 
-import WalletButton from '@/components/WalletButton';
-import { quoteTokensUi, quoteSellTokensUi } from '@/lib/curve';
+import { quoteTokensUi, quoteSellTokensUi } from "@/lib/curve";
 
-type CurveName = 'linear' | 'degen' | 'random';
+type CurveName = "linear" | "degen" | "random";
 
 type Coin = {
   id: string;
@@ -47,12 +45,14 @@ type CurveStats = {
 };
 
 function cx(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(' ');
+  return xs.filter(Boolean).join(" ");
 }
 
 // ---- MIGRATION HELPERS (UI) ----
 const MIGRATE_SOLD_DISPLAY_FALLBACK = 1_000_000;
-function clamp01(x: number) { return Math.max(0, Math.min(1, x)); }
+function clamp01(x: number) {
+  return Math.max(0, Math.min(1, x));
+}
 
 // Normalize Supabase row → Coin
 function normalizeCoin(raw: any): Coin {
@@ -90,16 +90,19 @@ export default function CoinPage() {
   const [stats, setStats] = useState<CurveStats | null>(null);
 
   // inputs
-  const [buySol, setBuySol] = useState('0.05');
-  const [sellSol, setSellSol] = useState('0.01');
+  const [buySol, setBuySol] = useState("0.05");
+  const [sellSol, setSellSol] = useState("0.01");
 
   // flash + pending
   const [flash, setFlash] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
   // ---- MIGRATION DERIVED (from stats) ----
-  const soldDisplay = Number((stats?.soldDisplay ?? stats?.soldTokens ?? 0) || 0);
-  const migrateThreshold = stats?.migrationThresholdTokens ?? MIGRATE_SOLD_DISPLAY_FALLBACK;
+  const soldDisplay = Number(
+    (stats?.soldDisplay ?? stats?.soldTokens ?? 0) || 0
+  );
+  const migrateThreshold =
+    stats?.migrationThresholdTokens ?? MIGRATE_SOLD_DISPLAY_FALLBACK;
 
   const migrateProgress = useMemo(() => {
     const ratio = migrateThreshold > 0 ? soldDisplay / migrateThreshold : 0;
@@ -108,14 +111,14 @@ export default function CoinPage() {
   }, [soldDisplay, migrateThreshold]);
 
   const isMigrated = Boolean(
-    stats && typeof stats.isMigrated === 'boolean'
+    stats && typeof stats.isMigrated === "boolean"
       ? stats.isMigrated
       : soldDisplay >= migrateThreshold
   );
 
   // How many tokens you must burn to receive 1 SOL when selling (flat for now)
   const tokensPerSolSell = useMemo(
-    () => quoteSellTokensUi('linear', 2, 0, 1),
+    () => quoteSellTokensUi("linear", 2, 0, 1),
     []
   );
 
@@ -125,130 +128,130 @@ export default function CoinPage() {
     return tokBal / tokensPerSolSell;
   }, [tokBal, tokensPerSolSell]);
 
-// ---------- HELPERS ----------
-async function refreshBalances() {
-  try {
-    if (!connected || !publicKey) {
-      setSolBal(0);
-      setTokBal(0);
-      return;
-    }
-
-    const walletStr = publicKey.toBase58();
-    const mintStr = coin?.mint;
-
-    // --- 1) SOL via debug API ---
+  // ---------- HELPERS ----------
+  async function refreshBalances() {
     try {
-      const solRes = await fetch(
-        `/api/debug/wallet-sol?wallet=${encodeURIComponent(walletStr)}`,
-        { cache: "no-store" }
-      );
+      if (!connected || !publicKey) {
+        setSolBal(0);
+        setTokBal(0);
+        return;
+      }
 
-      if (solRes.ok) {
-        const js = await solRes.json().catch(() => null);
-        const solVal =
-          js && typeof js.sol === "number"
-            ? js.sol
-            : js && typeof js.lamports === "number"
-            ? js.lamports / LAMPORTS_PER_SOL
-            : 0;
+      const walletStr = publicKey.toBase58();
+      const mintStr = coin?.mint;
 
-        console.log("[BALANCES] SOL via API =", solVal);
-        setSolBal(Number.isFinite(solVal) ? solVal : 0);
-      } else {
-        console.warn(
-          "[BALANCES] wallet-sol API error:",
-          solRes.status,
-          await solRes.text().catch(() => "")
+      // --- 1) SOL via debug API ---
+      try {
+        const solRes = await fetch(
+          `/api/debug/wallet-sol?wallet=${encodeURIComponent(walletStr)}`,
+          { cache: "no-store" }
         );
+
+        if (solRes.ok) {
+          const js = await solRes.json().catch(() => null);
+          const solVal =
+            js && typeof js.sol === "number"
+              ? js.sol
+              : js && typeof js.lamports === "number"
+              ? js.lamports / LAMPORTS_PER_SOL
+              : 0;
+
+          console.log("[BALANCES] SOL via API =", solVal);
+          setSolBal(Number.isFinite(solVal) ? solVal : 0);
+        } else {
+          console.warn(
+            "[BALANCES] wallet-sol API error:",
+            solRes.status,
+            await solRes.text().catch(() => "")
+          );
+          setSolBal(0);
+        }
+      } catch (e) {
+        console.error("[BALANCES] wallet-sol fetch error:", e);
         setSolBal(0);
       }
-    } catch (e) {
-      console.error("[BALANCES] wallet-sol fetch error:", e);
-      setSolBal(0);
-    }
 
-    // --- 2) Token via wallet-balances API ---
-    if (!mintStr) {
-      setTokBal(0);
+      // --- 2) Token via wallet-balances API ---
+      if (!mintStr) {
+        setTokBal(0);
+        return;
+      }
+
+      try {
+        const tokRes = await fetch(
+          `/api/debug/wallet-balances?wallet=${encodeURIComponent(
+            walletStr
+          )}&mint=${encodeURIComponent(mintStr)}`,
+          { cache: "no-store" }
+        );
+
+        if (!tokRes.ok) {
+          console.warn(
+            "[BALANCES] wallet-balances API error:",
+            tokRes.status,
+            await tokRes.text().catch(() => "")
+          );
+          setTokBal(0);
+          return;
+        }
+
+        const j = await tokRes.json().catch(() => null);
+        if (!j) {
+          console.warn("[BALANCES] wallet-balances JSON parse error");
+          setTokBal(0);
+          return;
+        }
+
+        const uiAmount =
+          typeof j.uiAmount === "number"
+            ? j.uiAmount
+            : Number(j.uiAmountString ?? "0");
+
+        console.log("[BALANCES] token uiAmount =", uiAmount);
+
+        setTokBal(Number.isFinite(uiAmount) ? uiAmount : 0);
+      } catch (e) {
+        console.error("[BALANCES] wallet-balances fetch error:", e);
+        setTokBal(0);
+      }
+    } catch (e) {
+      console.error("[BALANCES] refreshBalances fatal error:", e);
+    }
+  }
+
+  async function refreshStats() {
+    if (!coin?.id) {
+      setStats(null);
       return;
     }
-
     try {
-      const tokRes = await fetch(
-        `/api/debug/wallet-balances?wallet=${encodeURIComponent(
-          walletStr
-        )}&mint=${encodeURIComponent(mintStr)}`,
+      const res = await fetch(
+        `/api/coins/${encodeURIComponent(coin.id)}/stats`,
         { cache: "no-store" }
       );
-
-      if (!tokRes.ok) {
-        console.warn(
-          "[BALANCES] wallet-balances API error:",
-          tokRes.status,
-          await tokRes.text().catch(() => "")
-        );
-        setTokBal(0);
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        console.warn("[STATS] error payload:", j);
         return;
       }
 
-      const j = await tokRes.json().catch(() => null);
-      if (!j) {
-        console.warn("[BALANCES] wallet-balances JSON parse error");
-        setTokBal(0);
-        return;
-      }
-
-      const uiAmount =
-        typeof j.uiAmount === "number"
-          ? j.uiAmount
-          : Number(j.uiAmountString ?? "0");
-
-      console.log("[BALANCES] token uiAmount =", uiAmount);
-
-      setTokBal(Number.isFinite(uiAmount) ? uiAmount : 0);
+      const s: CurveStats = {
+        poolSol: Number(j.poolSol ?? 0),
+        soldTokens: Number(j.soldTokens ?? 0),
+        totalSupplyTokens: Number(j.totalSupplyTokens ?? 0),
+        fdvSol: Number(j.fdvSol ?? 0),
+        priceTokensPerSol: Number(j.priceTokensPerSol ?? 0),
+        soldDisplay: Number(j.soldDisplay ?? j.soldTokens ?? 0),
+        isMigrated: Boolean(j.isMigrated ?? false),
+        migrationThresholdTokens:
+          Number(j.migrationThresholdTokens ?? 0) || undefined,
+        migrationPercent: Number(j.migrationPercent ?? 0) || undefined,
+      };
+      setStats(s);
     } catch (e) {
-      console.error("[BALANCES] wallet-balances fetch error:", e);
-      setTokBal(0);
+      console.warn("[STATS] fetch error:", e);
     }
-  } catch (e) {
-    console.error("[BALANCES] refreshBalances fatal error:", e);
   }
-}
-
-async function refreshStats() {
-  if (!coin?.id) {
-    setStats(null);
-    return;
-  }
-  try {
-    const res = await fetch(
-      `/api/coins/${encodeURIComponent(coin.id)}/stats`,
-      { cache: "no-store" }
-    );
-    const j = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      console.warn("[STATS] error payload:", j);
-      return;
-    }
-
-    const s: CurveStats = {
-      poolSol: Number(j.poolSol ?? 0),
-      soldTokens: Number(j.soldTokens ?? 0),
-      totalSupplyTokens: Number(j.totalSupplyTokens ?? 0),
-      fdvSol: Number(j.fdvSol ?? 0),
-      priceTokensPerSol: Number(j.priceTokensPerSol ?? 0),
-      soldDisplay: Number(j.soldDisplay ?? j.soldTokens ?? 0),
-      isMigrated: Boolean(j.isMigrated ?? false),
-      migrationThresholdTokens:
-        Number(j.migrationThresholdTokens ?? 0) || undefined,
-      migrationPercent: Number(j.migrationPercent ?? 0) || undefined,
-    };
-    setStats(s);
-  } catch (e) {
-    console.warn("[STATS] fetch error:", e);
-  }
-}
 
   // ---------- EFFECTS ----------
 
@@ -261,11 +264,11 @@ async function refreshStats() {
         setErr(null);
 
         const res = await fetch(`/api/coins/${encodeURIComponent(id)}`, {
-          cache: 'no-store',
+          cache: "no-store",
         });
         const j = await res.json().catch(() => ({}));
         if (!res.ok || !j?.coin) {
-          throw new Error(j?.error || 'Failed to load coin');
+          throw new Error(j?.error || "Failed to load coin");
         }
         if (alive) setCoin(normalizeCoin(j.coin));
       } catch (e: any) {
@@ -274,7 +277,9 @@ async function refreshStats() {
         if (alive) setLoading(false);
       }
     })();
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, [id]);
 
   // Balances polling (stable scalar deps)
@@ -322,7 +327,7 @@ async function refreshStats() {
   // Prefill buy from ?buy= once per coin id
   useEffect(() => {
     try {
-      const b = searchParams.get('buy');
+      const b = searchParams.get("buy");
       if (b && Number(b) > 0) setBuySol(String(b));
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -332,7 +337,8 @@ async function refreshStats() {
   const buyTokens = useMemo(() => {
     const a = Number(buySol);
     if (!coin || !Number.isFinite(a) || a <= 0) return 0;
-    const sd = stats && Number(stats.soldDisplay) > 0 ? Number(stats.soldDisplay) : 0;
+    const sd =
+      stats && Number(stats.soldDisplay) > 0 ? Number(stats.soldDisplay) : 0;
     return quoteTokensUi(a, coin.curve, coin.strength, sd);
   }, [buySol, coin, stats]);
 
@@ -342,45 +348,70 @@ async function refreshStats() {
     return quoteSellTokensUi(coin.curve, coin.strength, coin.startPrice, a);
   }, [sellSol, coin]);
 
+  // ---------- DERIVED: MC + FDV (pump.fun style) ----------
+  const { marketCapSol, fdvSol } = useMemo(() => {
+    if (!stats || !stats.priceTokensPerSol || stats.priceTokensPerSol <= 0) {
+      return { marketCapSol: 0, fdvSol: 0 };
+    }
+
+    const pricePerTokenSol = 1 / stats.priceTokensPerSol;
+    const circulating = stats.soldTokens ?? 0;
+    const totalSupply = stats.totalSupplyTokens ?? 0;
+
+    const mc = circulating * pricePerTokenSol;
+    const fdv = totalSupply * pricePerTokenSol;
+
+    return {
+      marketCapSol: Number.isFinite(mc) ? mc : 0,
+      fdvSol: Number.isFinite(fdv) ? fdv : 0,
+    };
+  }, [stats]);
+
   // ---------- ACTIONS ----------
   async function doBuy() {
     try {
       if (isMigrated) {
-        alert('Curve migrated. Trading is locked; wait for Raydium listing.');
+        alert("Curve migrated. Trading is locked; wait for Raydium listing.");
         return;
       }
       if (!connected || !publicKey) {
-        alert('Connect your wallet first.');
+        alert("Connect your wallet first.");
         return;
       }
       if (!coin) {
-        alert('Coin not loaded.');
+        alert("Coin not loaded.");
         return;
       }
       if (!coin.mint) {
-        alert('This coin is not tradable yet (no mint configured).');
+        alert("This coin is not tradable yet (no mint configured).");
         return;
       }
 
       const sol = Number(String(buySol).trim());
       if (!Number.isFinite(sol) || sol <= 0) {
-        alert('Enter a positive SOL amount (e.g. 0.01)');
+        alert("Enter a positive SOL amount (e.g. 0.01)");
         return;
       }
 
-      const res = await fetch(`/api/coins/${encodeURIComponent(coin.id)}/buy`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ buyer: publicKey.toBase58(), amountSol: sol }),
-      });
+      const res = await fetch(
+        `/api/coins/${encodeURIComponent(coin.id)}/buy`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            buyer: publicKey.toBase58(),
+            amountSol: sol,
+          }),
+        }
+      );
 
       const j = await res.json().catch(() => ({}));
       if (!res.ok || !j?.txB64) {
-        console.error('[BUY] /buy error payload:', j);
-        throw new Error(j?.error || 'Buy failed');
+        console.error("[BUY] /buy error payload:", j);
+        throw new Error(j?.error || "Buy failed");
       }
 
-      const raw = Buffer.from(j.txB64 as string, 'base64');
+      const raw = Buffer.from(j.txB64 as string, "base64");
       const vtx = VersionedTransaction.deserialize(raw);
 
       setPending(true);
@@ -391,9 +422,9 @@ async function refreshStats() {
       });
 
       try {
-        await connection.confirmTransaction(sig, 'confirmed');
+        await connection.confirmTransaction(sig, "confirmed");
       } catch (e: any) {
-        console.warn('[BUY] confirm warning:', e);
+        console.warn("[BUY] confirm warning:", e);
       }
 
       setPending(false);
@@ -404,54 +435,62 @@ async function refreshStats() {
       setTimeout(refreshStats, 3000);
     } catch (e: any) {
       setPending(false);
-      console.error('[BUY] error:', e);
-      alert(e?.message || 'Unexpected buy error (see console).');
+      console.error("[BUY] error:", e);
+      alert(e?.message || "Unexpected buy error (see console).");
     }
   }
 
   async function doSell() {
     try {
       if (isMigrated) {
-        alert('Curve migrated. Trading is locked; wait for Raydium listing.');
+        alert("Curve migrated. Trading is locked; wait for Raydium listing.");
         return;
       }
       if (!connected || !publicKey) {
-        alert('Connect your wallet first.');
+        alert("Connect your wallet first.");
         return;
       }
       if (!coin) {
-        alert('Coin not loaded yet.');
+        alert("Coin not loaded yet.");
         return;
       }
       if (!coin.mint) {
-        alert('This coin is not tradable yet (no mint configured).');
+        alert("This coin is not tradable yet (no mint configured).");
         return;
       }
 
       const amt = Number(String(sellSol).trim());
       if (!Number.isFinite(amt) || amt <= 0) {
-        alert('Enter a positive SOL amount to sell (e.g. 0.01)');
+        alert("Enter a positive SOL amount to sell (e.g. 0.01)");
         return;
       }
 
-      const res = await fetch(`/api/coins/${encodeURIComponent(coin.id)}/sell`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ seller: publicKey.toBase58(), amountSol: amt }),
-      });
+      const res = await fetch(
+        `/api/coins/${encodeURIComponent(coin.id)}/sell`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            seller: publicKey.toBase58(),
+            amountSol: amt,
+          }),
+        }
+      );
 
       const text = await res.text();
       let j: any = {};
-      try { j = JSON.parse(text); } catch {}
+      try {
+        j = JSON.parse(text);
+      } catch {}
 
       if (!res.ok) {
-        console.error('[SELL] server error payload:', j || text);
-        alert(j?.error || 'Server sell failed (see console).');
+        console.error("[SELL] server error payload:", j || text);
+        alert(j?.error || "Server sell failed (see console).");
         return;
       }
-      if (!j.txB64 || typeof j.txB64 !== 'string') {
-        console.error('[SELL] missing txB64 in response:', j);
-        alert('Server sell failed: no transaction returned.');
+      if (!j.txB64 || typeof j.txB64 !== "string") {
+        console.error("[SELL] missing txB64 in response:", j);
+        alert("Server sell failed: no transaction returned.");
         return;
       }
 
@@ -471,23 +510,23 @@ async function refreshStats() {
       });
 
       try {
-        await connection.confirmTransaction(sig, 'confirmed');
+        await connection.confirmTransaction(sig, "confirmed");
       } catch (e2: any) {
-        console.warn('[SELL] confirmTransaction warning:', e2);
+        console.warn("[SELL] confirmTransaction warning:", e2);
       }
 
       setPending(false);
-      setFlash('Sell submitted ✅');
+      setFlash("Sell submitted ✅");
       setTimeout(() => setFlash(null), 4000);
       setTimeout(refreshBalances, 1200);
       setTimeout(refreshStats, 1200);
       setTimeout(refreshStats, 3000);
     } catch (e: any) {
       setPending(false);
-      console.error('[SELL] client error', e);
-      let msg = 'Sell failed (see console for details)';
-      if (e?.message && typeof e.message === 'string') msg = e.message;
-      else if (typeof e === 'string') msg = e;
+      console.error("[SELL] client error", e);
+      let msg = "Sell failed (see console for details)";
+      if (e?.message && typeof e.message === "string") msg = e.message;
+      else if (typeof e === "string") msg = e;
       alert(msg);
     }
   }
@@ -505,8 +544,10 @@ async function refreshStats() {
   if (err || !coin) {
     return (
       <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto">
-        <p className="text-red-400">Error: {err || 'Not found'}</p>
-        <Link className="underline" href="/coins">Back to coins</Link>
+        <p className="text-red-400">Error: {err || "Not found"}</p>
+        <Link className="underline" href="/coins">
+          Back to coins
+        </Link>
       </main>
     );
   }
@@ -515,6 +556,7 @@ async function refreshStats() {
 
   return (
     <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto grid gap-8">
+      {/* Top nav */}
       <header className="flex items-center justify-between">
         <Link href="/" className="flex items-center gap-2 font-semibold">
           <Image src="/logo.svg" alt="logo" width={28} height={28} />
@@ -524,7 +566,6 @@ async function refreshStats() {
           <Link className="underline" href="/coins">
             Coins
           </Link>
-          {/* WalletButton removed here; it already appears in your layout nav */}
         </nav>
       </header>
 
@@ -534,97 +575,157 @@ async function refreshStats() {
         </div>
       )}
 
-      <section className="grid gap-4 rounded-2xl border p-6 bg-black/20">
-        <div className="flex items-center gap-4">
-          {coin.logoUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={coin.logoUrl}
-              alt={coin.name}
-              className="rounded-xl w-16 h-16 object-cover"
-              loading="eager"
-              decoding="async"
-            />
-          ) : (
-            <div className="w-16 h-16 rounded-xl bg.white/10" />
+      {/* HERO SECTION – pump.fun style: left info, right stats */}
+      <section className="grid gap-6 md:grid-cols-[minmax(0,2fr)_minmax(260px,1fr)] rounded-2xl border p-6 bg-black/20">
+        {/* LEFT: coin info */}
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center gap-4">
+            {coin.logoUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={coin.logoUrl}
+                alt={coin.name}
+                className="rounded-xl w-16 h-16 object-cover"
+                loading="eager"
+                decoding="async"
+              />
+            ) : (
+              <div className="w-16 h-16 rounded-xl bg-white/10" />
+            )}
+
+            <div className="space-y-1">
+              <h1 className="text-2xl font-bold">
+                {coin.name}{" "}
+                <span className="text-white/60">
+                  ({(coin.symbol || "").toUpperCase()})
+                </span>
+              </h1>
+              <p className="text-xs text-white/60 flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded-full border border-white/15 uppercase tracking-wide text-[11px]">
+                  {coin.curve}
+                </span>
+                <span className="px-2 py-0.5 rounded-full border border-white/15 text-[11px]">
+                  Strength: {coin.strength}
+                </span>
+              </p>
+            </div>
+          </div>
+
+          {coin.description && (
+            <p className="text-white/80 text-sm">{coin.description}</p>
           )}
 
-          <div>
-            <h1 className="text-2xl font-bold">
-              {coin.name}{' '}
-              <span className="text-white/60">
-                ({(coin.symbol || '').toUpperCase()})
-              </span>
-            </h1>
-            <p className="text-white/60 text-sm">
-              Curve: {coin.curve} · Strength: {coin.strength}
-            </p>
-          </div>
-        </div>
+          {coin.socials && (
+            <div className="flex flex-wrap gap-3 text-sm">
+              {coin.socials.website && (
+                <a
+                  className="underline text-white/80"
+                  href={coin.socials.website}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Website
+                </a>
+              )}
+              {coin.socials.x && (
+                <a
+                  className="underline text-white/80"
+                  href={coin.socials.x}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  X
+                </a>
+              )}
+              {coin.socials.telegram && (
+                <a
+                  className="underline text-white/80"
+                  href={coin.socials.telegram}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Telegram
+                </a>
+              )}
+            </div>
+          )}
 
-        {coin.description && (
-          <p className="text-white/80">{coin.description}</p>
-        )}
-
-        {coin.socials && (
-          <div className="flex flex-wrap gap-3 text-sm">
-            {coin.socials.website && (
-              <a className="underline" href={coin.socials.website} target="_blank" rel="noreferrer">Website</a>
-            )}
-            {coin.socials.x && (
-              <a className="underline" href={coin.socials.x} target="_blank" rel="noreferrer">X</a>
-            )}
-            {coin.socials.telegram && (
-              <a className="underline" href={coin.socials.telegram} target="_blank" rel="noreferrer">Telegram</a>
-            )}
-          </div>
-        )}
-
-        <div className="flex flex-wrap gap-6 text-sm text.white/70">
-          <div>Wallet SOL: <span className="font-mono">{solBal.toFixed(4)} SOL</span></div>
-          <div>Wallet {coin.symbol}: <span className="font-mono">{tokBal.toLocaleString()}</span></div>
-          <div>Mint: <span className="font-mono">{coin.mint ?? '— (not set)'}</span></div>
-        </div>
-
-        {stats && (
-          <div className="mt-2 space-y-1 text-sm text-white/70">
+          {/* Wallet + mint info */}
+          <div className="flex flex-wrap gap-6 text-sm text-white/70 mt-2">
             <div>
-              Pool: <span className="font-mono">{stats.poolSol.toFixed(4)} SOL</span> · Sold{' '}
+              Wallet SOL:{" "}
+              <span className="font-mono">{solBal.toFixed(4)} SOL</span>
+            </div>
+            <div>
+              Wallet {coin.symbol}:{" "}
+              <span className="font-mono">{tokBal.toLocaleString()}</span>
+            </div>
+            <div className="w-full md:w-auto break-all">
+              Mint:{" "}
               <span className="font-mono">
-                {stats.soldTokens.toLocaleString()} / {stats.totalSupplyTokens.toLocaleString()} {coin.symbol}
-              </span>{' '}
-              · FDV: <span className="font-mono">{stats.fdvSol.toFixed(2)} SOL</span>
-            </div>
-            <div>
-              Price: 1 SOL ≈ <span className="font-mono">
-                {stats.priceTokensPerSol.toLocaleString()} {coin.symbol}
+                {coin.mint ?? "— (not set)"}
               </span>
             </div>
           </div>
-        )}
-      </section>
-
-      {/* Migration progress (Pump.fun-style) */}
-      <section className="rounded-xl border bg-black/20 p-4 grid gap-2">
-        <div className="flex items-center justify-between text-sm">
-          <span className="text-white/70">
-            Migration threshold: {migrateThreshold.toLocaleString()} sold
-          </span>
-          <span className="font-mono">{migrateProgress}%</span>
-        </div>
-        <div className="h-2 w-full rounded bg-white/10 overflow-hidden">
-          <div className="h-full bg-white/70" style={{ width: `${migrateProgress}%` }} />
         </div>
 
-        {isMigrated ? (
-          <div className="mt-2 rounded-md border border-green-500/40 bg-green-500/10 px-3 py-2 text-sm">
-            <b>Ready to migrate to Raydium.</b> Trading is now locked on the curve.
+        {/* RIGHT: stats card */}
+        <aside className="rounded-2xl bg-zinc-900/70 border border-zinc-700/60 p-4 grid gap-2 text-sm">
+          <div className="flex justify-between">
+            <span className="text-zinc-400">Price</span>
+            <span className="font-mono text-zinc-50">
+              1 SOL ≈{" "}
+              {stats
+                ? stats.priceTokensPerSol.toLocaleString()
+                : "—"}{" "}
+              {coin.symbol}
+            </span>
           </div>
-        ) : (
-          <div className="mt-2 text-xs text-white/60">
-            {soldDisplay.toLocaleString()} sold / {migrateThreshold.toLocaleString()} target
+
+          <div className="flex justify-between">
+            <span className="text-zinc-400">MC</span>
+            <span className="font-mono">
+              {marketCapSol.toFixed(3)} SOL
+            </span>
           </div>
-        )}
+
+          <div className="flex justify-between">
+            <span className="text-zinc-400">FDV</span>
+            <span className="font-mono">{fdvSol.toFixed(3)} SOL</span>
+          </div>
+
+          <div className="flex justify-between">
+            <span className="text-zinc-400">Pool</span>
+            <span className="font-mono">
+              {stats ? stats.poolSol.toFixed(4) : "0.0000"} SOL
+            </span>
+          </div>
+
+          <div className="pt-3">
+            <div className="flex justify-between text-xs text-zinc-400 mb-1">
+              <span>
+                Curve progress
+                {stats
+                  ? ` · ${soldDisplay.toLocaleString()} / ${migrateThreshold.toLocaleString()}`
+                  : ""}
+              </span>
+              <span>{migrateProgress}%</span>
+            </div>
+            <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-emerald-400"
+                style={{ width: `${migrateProgress}%` }}
+              />
+            </div>
+
+            {isMigrated && (
+              <div className="mt-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-100">
+                <b>Ready to migrate.</b> Trading on the curve is now locked
+                and can move to Raydium.
+              </div>
+            )}
+          </div>
+        </aside>
       </section>
 
       {/* Buy / Sell */}
@@ -635,7 +736,8 @@ async function refreshStats() {
 
           {!tradable && (
             <p className="text-yellow-400 text-sm">
-              This coin has no mint configured yet. It&apos;s not tradable until a mint is set.
+              This coin has no mint configured yet. It&apos;s not tradable
+              until a mint is set.
             </p>
           )}
 
@@ -652,7 +754,11 @@ async function refreshStats() {
           </div>
 
           <p className="text-white/70 text-sm">
-            You’ll get ~ <span className="font-mono">{buyTokens.toLocaleString()}</span> {coin.symbol}
+            You’ll get ~{" "}
+            <span className="font-mono">
+              {buyTokens.toLocaleString()}
+            </span>{" "}
+            {coin.symbol}
           </p>
 
           <button
@@ -660,7 +766,9 @@ async function refreshStats() {
             className="px-4 py-2 rounded-lg bg-green-500 text-black font-medium cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-green-500"
             onClick={doBuy}
             disabled={!connected || !tradable || isMigrated || pending}
-            title={isMigrated ? 'Curve migrated (trading locked)' : undefined}
+            title={
+              isMigrated ? "Curve migrated (trading locked)" : undefined
+            }
           >
             Buy {coin.symbol}
           </button>
@@ -697,12 +805,17 @@ async function refreshStats() {
                 <button
                   key={label}
                   type="button"
-                  disabled={!connected || isMigrated}
+                  disabled={
+                    !connected || isMigrated || maxSellSol <= 0 || !tradable
+                  }
                   onClick={() => {
-                    if (!connected || maxSellSol <= 0) return;
+                    if (maxSellSol <= 0) return;
                     const effectivePct = p === 1 ? 0.995 : p; // ~99.5% for "100%"
                     const raw = maxSellSol * effectivePct;
-                    const v = raw.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+                    const v = raw
+                      .toFixed(6)
+                      .replace(/0+$/, "")
+                      .replace(/\.$/, "");
                     setSellSol(v);
                   }}
                   className="rounded-md border border-zinc-600 px-2 py-1 text-xs hover:bg-zinc-800 disabled:opacity-40"
@@ -714,20 +827,31 @@ async function refreshStats() {
           </div>
 
           <p className="text-white/70 text-sm">
-            You’ll receive ~ <span className="font-mono">{sellSol || '0'}</span> SOL for ~{' '}
-            <span className="font-mono">{sellTokens.toLocaleString()}</span> {coin.symbol}
+            You’ll receive ~{" "}
+            <span className="font-mono">{sellSol || "0"}</span> SOL for ~{" "}
+            <span className="font-mono">
+              {sellTokens.toLocaleString()}
+            </span>{" "}
+            {coin.symbol}
           </p>
 
           <button
             type="button"
             className="px-4 py-2 rounded-lg bg-red-500 text-white font-medium cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-red-500"
             onClick={doSell}
-            disabled={!connected || !tradable || isMigrated || pending}
-            title={isMigrated ? "Curve migrated (trading locked)" : undefined}
+            disabled={
+              !connected ||
+              !tradable ||
+              isMigrated ||
+              pending ||
+              maxSellSol <= 0
+            }
+            title={
+              isMigrated ? "Curve migrated (trading locked)" : undefined
+            }
           >
             Sell {coin.symbol}
           </button>
-
         </div>
       </section>
     </main>
