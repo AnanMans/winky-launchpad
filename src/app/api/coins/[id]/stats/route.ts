@@ -10,11 +10,12 @@ import {
 } from "@solana/web3.js";
 
 import { RPC_URL, curvePda } from "@/lib/config";
+
+// curve math
 import {
-  tokensPerSolForState,
-  priceSolPerToken,
-  CurveName,
+  priceTokensPerSol,
   MIGRATION_TOKENS,
+  type CurveName,
 } from "@/lib/curve";
 
 function bad(msg: string, code = 400, extra: Record<string, unknown> = {}) {
@@ -126,21 +127,30 @@ export async function GET(
     // --- Curve-driven price, MC and FDV ---
     const curveName: CurveName =
       (coin.curve as CurveName) || "linear";
-    const strength = typeof coin.strength === "number" ? coin.strength : 1;
 
-    const priceTokensPerSol = tokensPerSolForState(
+    const strength =
+      typeof coin.strength === "number" && Number.isFinite(coin.strength)
+        ? coin.strength
+        : 1;
+
+    // tokens per 1 SOL, using our curve math
+    const tokensPerSol = priceTokensPerSol(
       curveName,
       strength,
       soldTokens
     );
 
-    const solPerToken = priceSolPerToken(curveName, strength, soldTokens);
+    // SOL per 1 token (inverse)
+    const solPerToken =
+      tokensPerSol > 0 ? 1 / tokensPerSol : 0;
 
+    // Market cap = sold tokens * price per token
     const marketCapSol =
       soldTokens > 0 && solPerToken > 0
         ? soldTokens * solPerToken
         : 0;
 
+    // FDV = total supply * price per token
     const fdvSol =
       totalSupplyTokens > 0 && solPerToken > 0
         ? totalSupplyTokens * solPerToken
@@ -161,7 +171,8 @@ export async function GET(
       soldRaw: sold_raw,
       soldTokens,
       totalSupplyTokens,
-      priceTokensPerSol,
+      // IMPORTANT: send the numeric value, not the function
+      priceTokensPerSol: tokensPerSol,
       marketCapSol,
       fdvSol,
       soldDisplay,
