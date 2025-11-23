@@ -9,9 +9,13 @@ import {
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
 
-import { getAccount, getMint } from "@solana/spl-token";
-
 import { RPC_URL, curvePda } from "@/lib/config";
+import {
+  tokensPerSolForState,
+  priceSolPerToken,
+  CurveName,
+  MIGRATION_TOKENS,
+} from "@/lib/curve";
 
 function bad(msg: string, code = 400, extra: Record<string, unknown> = {}) {
   return NextResponse.json({ error: msg, ...extra }, { status: code });
@@ -36,7 +40,7 @@ function decodeCurveState(buf: Buffer) {
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
 
   const offsetTotalSupply = 8 + 32 + 32 + 1 + 1; // 74
-  const offsetSold = offsetTotalSupply + 8;      // 82
+  const offsetSold = offsetTotalSupply + 8;       // 82
 
   const total_supply_raw = Number(dv.getBigUint64(offsetTotalSupply, true)); // LE
   const sold_raw = Number(dv.getBigUint64(offsetSold, true));
@@ -45,7 +49,7 @@ function decodeCurveState(buf: Buffer) {
 }
 
 export async function GET(
-  req: Request,
+  _req: Request,
   ctx: { params: Promise<{ id: string }> }
 ) {
   const baseDefaults = {
@@ -53,14 +57,13 @@ export async function GET(
     soldRaw: 0,
     soldTokens: 0,
     totalSupplyTokens: 0,
-    priceTokensPerSol: 1_000_000, // UI hint
+    priceTokensPerSol: 0,
+    marketCapSol: 0,
     fdvSol: 0,
     soldDisplay: 0,
-    migrationThresholdTokens: 1_000_000,
+    migrationThresholdTokens: MIGRATION_TOKENS,
     migrationPercent: 0,
     isMigrated: false,
-    walletSol: 0,
-    walletTokens: 0,
   };
 
   try {
@@ -68,10 +71,10 @@ export async function GET(
     const coinId = (id || "").trim();
     if (!coinId) return bad("Missing id param");
 
-    // 1) Load coin to get mint
+    // 1) Load coin to get mint + curve params
     const { data: coin, error } = await supabaseAdmin
       .from("coins")
-      .select("id, mint")
+      .select("id, mint, curve, strength")
       .eq("id", coinId)
       .maybeSingle();
 
@@ -98,6 +101,7 @@ export async function GET(
       return ok(baseDefaults);
     }
 
+    // Decode on-chain state
     let total_supply_raw = 0;
     let sold_raw = 0;
     try {
@@ -109,7 +113,6 @@ export async function GET(
       return ok(baseDefaults);
     }
 
-    // --- 6-decimals token ---
     const TOKEN_DECIMALS = 6;
     const DEC_FACTOR = Math.pow(10, TOKEN_DECIMALS);
 
@@ -120,55 +123,37 @@ export async function GET(
     const poolLamports = await conn.getBalance(statePk, "confirmed");
     const poolSol = poolLamports / LAMPORTS_PER_SOL;
 
-    const priceTokensPerSol = 1_000_000; // simple for now
-    const fdvSol = 0;                    // wire real FDV later
+    // --- Curve-driven price, MC and FDV ---
+    const curveName: CurveName =
+      (coin.curve as CurveName) || "linear";
+    const strength = typeof coin.strength === "number" ? coin.strength : 1;
+
+    const priceTokensPerSol = tokensPerSolForState(
+      curveName,
+      strength,
+      soldTokens
+    );
+
+    const solPerToken = priceSolPerToken(curveName, strength, soldTokens);
+
+    const marketCapSol =
+      soldTokens > 0 && solPerToken > 0
+        ? soldTokens * solPerToken
+        : 0;
+
+    const fdvSol =
+      totalSupplyTokens > 0 && solPerToken > 0
+        ? totalSupplyTokens * solPerToken
+        : 0;
 
     // Migration logic (UI)
-    const migrationThresholdTokens = 1_000_000;
+    const migrationThresholdTokens = MIGRATION_TOKENS;
     const soldDisplay = soldTokens;
     const migrationPercent =
       migrationThresholdTokens > 0
         ? Math.min(100, (soldDisplay * 100) / migrationThresholdTokens)
         : 0;
     const isMigrated = soldDisplay >= migrationThresholdTokens;
-
-    // -------- WALLET BALANCES (optional) --------
-    let walletSol = 0;
-    let walletTokens = 0;
-
-    try {
-      const url = new URL(req.url);
-      const qWallet = url.searchParams.get("wallet");
-      const headerWallet =
-        req.headers.get("x-wallet") || req.headers.get("x-wallet-address");
-
-      const walletStr = (qWallet || headerWallet || "").trim();
-
-      if (walletStr) {
-        const walletPk = new PublicKey(walletStr);
-
-        // SOL balance
-        const lamports = await conn.getBalance(walletPk, "confirmed");
-        walletSol = lamports / LAMPORTS_PER_SOL;
-
-        // Token balance
-        const ataRes = await conn.getTokenAccountsByOwner(walletPk, {
-          mint: mintPk,
-        });
-
-        if (ataRes.value.length > 0) {
-          const ataPubkey = ataRes.value[0].pubkey;
-          const ata = await getAccount(conn, ataPubkey);
-          const mintInfo = await getMint(conn, mintPk);
-
-          const raw = Number(ata.amount);
-          const decimals = mintInfo.decimals;
-          walletTokens = raw / Math.pow(10, decimals);
-        }
-      }
-    } catch (e) {
-      console.error("[STATS] wallet balance fetch failed:", e);
-    }
 
     return ok({
       poolLamports,
@@ -177,13 +162,12 @@ export async function GET(
       soldTokens,
       totalSupplyTokens,
       priceTokensPerSol,
+      marketCapSol,
       fdvSol,
       soldDisplay,
       migrationThresholdTokens,
       migrationPercent,
       isMigrated,
-      walletSol,
-      walletTokens,
     });
   } catch (e: any) {
     console.error("[/api/coins/[id]/stats] error:", e);

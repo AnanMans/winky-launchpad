@@ -1,136 +1,121 @@
 // src/lib/curve.ts
-//
-// UI helpers for quoting how many tokens you GET (buy)
-// or BURN (sell) for a given SOL amount.
-//
-// This mirrors the on-chain math:
-//  - BUY uses net lamports after protocol + creator fee
-//  - BUY also applies the bonding-curve factor
-//  - SELL is still flat (no extra fee), just lamports_to_tokens_raw
 
-export type CurveName = 'linear' | 'degen' | 'random';
+export type CurveName = "linear" | "degen" | "random";
 
-const LAMPORTS_PER_SOL = 1_000_000_000;
-const DECIMALS = 6; // must match the program
+// Global constants for the curve math
+export const TOKEN_DECIMALS = 6;
+export const TOTAL_SUPPLY_TOKENS = 1_000_000_000; // 1B total supply
+export const MIGRATION_TOKENS = 1_000_000;        // Raydium migration target
+export const BASE_TOKENS_PER_SOL = 1_000_000;     // Start: 1 SOL ≈ 1,000,000 tokens
 
-// On-chain defaults from CurveState in lib.rs
-const PROTOCOL_BPS = 60; // 0.6%
-const CREATOR_BPS = 30;  // 0.3%
-const TOTAL_FEE_BPS = PROTOCOL_BPS + CREATOR_BPS;
-
-// This matches CURVE_DISPLAY_SUPPLY in the Rust program (in DISPLAY tokens)
-const CURVE_DISPLAY_SUPPLY = 10_000_000; // first 10M tokens drive the price
-
-function lamportsFromSol(amountSol: number): number {
-  return amountSol * LAMPORTS_PER_SOL;
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
 }
 
-// Approximate lamports_to_tokens_raw(lamports, decimals) / 10^decimals,
-// i.e. return "display" tokens (what Phantom shows).
-function lamportsToTokensUi(lamports: number): number {
-  return (lamports * Math.pow(10, DECIMALS)) / LAMPORTS_PER_SOL;
+function normStrength(raw: number | null | undefined): number {
+  if (!Number.isFinite(raw as any)) return 1;
+  const r = Math.round(Number(raw));
+  return clamp(r, 1, 3); // strength is 1, 2, 3
 }
 
-// JS copy of curve_factor_micro from the Rust program.
-// Returns a factor in "micro" units where 1_000_000 == 1.0
-function curveFactorMicro(
+/**
+ * Core pricing function: given
+ * - curve type (linear / degen / random)
+ * - strength (1..3)
+ * - soldTokens (human tokens: e.g. 150_000)
+ *
+ * return how many tokens you get for 1 SOL at this point.
+ * (tokensPerSol, UI only – the on-chain program is the real source of truth)
+ */
+export function tokensPerSolForState(
+  curve: CurveName,
+  rawStrength: number,
+  soldTokens: number
+): number {
+  const strength = normStrength(rawStrength);
+  const progressTokens = clamp(soldTokens, 0, MIGRATION_TOKENS);
+  const x = progressTokens / MIGRATION_TOKENS; // 0..1 between launch and migration
+  let tokensPerSol = BASE_TOKENS_PER_SOL;
+
+  if (curve === "linear") {
+    // LINEAR:
+    // Start: 1,000,000 tokens/SOL
+    // End (strength=1): ~300,000  (≈3.3x price)
+    // End (strength=3): ~50,000   (≈20x price)
+    const maxDrop = 0.7; // 70% max drop in tokensPerSol (per strength bucket)
+    const factor = 1 - (maxDrop * strength * x) / 3; // divide by 3 so strength=3 uses full range
+    const clamped = clamp(factor, 0.05, 1);          // never below 5% of base
+    tokensPerSol = BASE_TOKENS_PER_SOL * clamped;
+  } else if (curve === "degen") {
+    // DEGEN:
+    // Same start, but price ramps much faster at the beginning.
+    // We use x^expo to make the early part steeper.
+    const maxDrop = 0.9; // can drop tokensPerSol by up to 90%
+    const expo = 1.7;
+    const curveFactor = Math.pow(x, expo); // small x => very tiny, big x => closer to 1
+    const strengthFactor = 0.5 + strength / 6; // ~0.66..1.0
+    const factor = 1 - maxDrop * curveFactor * strengthFactor;
+    const clamped = clamp(factor, 0.03, 1); // never below 3% of base
+    tokensPerSol = BASE_TOKENS_PER_SOL * clamped;
+  } else {
+    // RANDOM:
+    // A smoother "wavy" curve around a slightly bullish linear baseline.
+    // Not crazy: just ± ~10–20% noise depending on strength.
+    const baseDrop = 0.5; // at migration, base ~500k tokens/SOL
+    const base = BASE_TOKENS_PER_SOL * (1 - baseDrop * x); // linear drop
+
+    // Pseudo-random but deterministic from soldTokens
+    const noiseAmplitude = 0.15 * strength; // 15%, 30%, 45% max swing around base
+    const phase = x * 20 + strength * 1.234;
+    const wave = Math.sin(phase);           // -1..1
+    const noiseFactor = 1 + (noiseAmplitude * wave) / 2; // around 1 ± ~noiseAmplitude/2
+
+    let candidate = base * noiseFactor;
+
+    // Never drop below 30% of base tokensPerSol
+    const minFactor = 0.3;
+    candidate = Math.max(BASE_TOKENS_PER_SOL * minFactor, candidate);
+
+    tokensPerSol = candidate;
+  }
+
+  // Safety: at least 1 token per SOL and integer-ish
+  return Math.max(1, Math.floor(tokensPerSol));
+}
+
+/** SOL per single token at current state (UI quote). */
+export function priceSolPerToken(
   curve: CurveName,
   strength: number,
-  soldDisplay: number
+  soldTokens: number
 ): number {
-  const totalForCurve = CURVE_DISPLAY_SUPPLY;
-  if (!totalForCurve) return 1_000_000;
-
-  const usedForCurve = Math.min(
-    Math.max(soldDisplay, 0),
-    CURVE_DISPLAY_SUPPLY
-  );
-
-  // 0 .. 1_000_000
-  const u = (usedForCurve * 1_000_000) / totalForCurve;
-
-  // clamp strength 1..3
-  let s = strength;
-  if (s <= 0) s = 1;
-  else if (s > 3) s = 3;
-
-  // 0 = LINEAR
-  if (curve === 'linear') {
-    // max drop depends on strength: stronger => steeper
-    const maxDrop =
-      s === 1 ? 400_000 :
-      s === 2 ? 600_000 :
-      800_000; // strength 3 or more
-
-    const drop = (maxDrop * u) / 1_000_000;
-    let factor = 1_000_000 - drop;
-    const minFactor = 100_000; // never below 0.1x
-
-    if (factor < minFactor) factor = minFactor;
-    return factor;
-  }
-
-  // 1 = DEGEN (quadratic, ramps faster)
-  if (curve === 'degen') {
-    const inv = 1_000_000 - u; // 1_000_000 -> 0
-    let base = (inv * inv) / 1_000_000; // quadratic
-    const adjust = Math.max(s - 1, 0) * 100_000;
-
-    if (base > adjust) base -= adjust;
-    if (base < 50_000) base = 50_000; // clamp
-    return base;
-  }
-
-  // 2 = RANDOM (we ignore jitter; just a mild down-slope)
-  if (curve === 'random') {
-    let base = 1_000_000 - u / 2;
-    const minFactor = 100_000;
-    const maxFactor = 1_500_000;
-
-    if (base < minFactor) base = minFactor;
-    else if (base > maxFactor) base = maxFactor;
-    return base;
-  }
-
-  // default: flat
-  return 1_000_000;
+  const tps = tokensPerSolForState(curve, strength, soldTokens);
+  if (!Number.isFinite(tps) || tps <= 0) return 0;
+  return 1 / tps;
 }
 
-// BUY: approximate how many tokens on-chain will mint
+/** How many tokens you *expect* to receive for `amountSol` when buying. */
 export function quoteTokensUi(
   amountSol: number,
   curve: CurveName,
   strength: number,
-  soldDisplay: number
+  soldTokens: number
 ): number {
   if (!Number.isFinite(amountSol) || amountSol <= 0) return 0;
-
-  const grossLamports = lamportsFromSol(amountSol);
-
-  // net lamports after protocol + creator fee (matches compute_fees in Rust)
-  const netLamports =
-    grossLamports * (1 - TOTAL_FEE_BPS / 10_000);
-
-  // flat base amount
-  const baseTokens = lamportsToTokensUi(netLamports);
-
-  // curve factor
-  const factorMicro = curveFactorMicro(curve, strength, soldDisplay);
-
-  return (baseTokens * factorMicro) / 1_000_000;
+  const tps = tokensPerSolForState(curve, strength, soldTokens);
+  return amountSol * tps;
 }
 
-// SELL: still flat rate (no extra fee on sell right now).
-// We just mirror lamports_to_tokens_raw and ignore the curve.
+/** How many tokens you *expect* to burn when selling `amountSol` SOL worth. */
 export function quoteSellTokensUi(
-  _curve: CurveName,
-  _strength: number,
-  _startPrice: number,
-  amountSol: number
+  curve: CurveName,
+  strength: number,
+  _startPriceUnused: number,
+  amountSol: number,
+  soldTokens: number = 0
 ): number {
   if (!Number.isFinite(amountSol) || amountSol <= 0) return 0;
-
-  const lamports = lamportsFromSol(amountSol);
-  return lamportsToTokensUi(lamports);
+  const tps = tokensPerSolForState(curve, strength, soldTokens);
+  // symmetrical: same curve for buy and sell for now (no fee/slope difference in UI)
+  return amountSol * tps;
 }
-
