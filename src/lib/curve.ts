@@ -1,100 +1,102 @@
 // src/lib/curve.ts
+//
+// Centralized curve math for UI + API quoting.
+//
+// We model price as "tokens per 1 SOL" (higher = cheaper tokens).
+// - Linear  : smooth decrease as sold grows
+// - Degen   : exponential (cheap early, rips up later)
+// - Random  : casino mode, deterministic pseudo-random around a base curve
 
-export type CurveName = "linear" | "degen" | "random";
+export type CurveName = 'linear' | 'degen' | 'random';
 
-// Global constants for the curve math
-export const TOKEN_DECIMALS = 6;
-export const TOTAL_SUPPLY_TOKENS = 1_000_000_000; // 1B total supply
-export const MIGRATION_TOKENS = 1_000_000;        // Raydium migration target
-export const BASE_TOKENS_PER_SOL = 1_000_000;     // Start: 1 SOL ≈ 1,000,000 tokens
+// We treat the bonding-curve segment as 1M tokens (your migration threshold),
+// even though total supply is 1B. Above this we migrate to Raydium.
+const CURVE_RANGE_TOKENS = 1_000_000;
 
-function clamp(v: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, v));
+// Starting quote: 1 SOL ≈ 1,000,000 tokens at sold = 0 (strength = 1, linear).
+const BASE_TOKENS_PER_SOL = 1_000_000;
+
+// Don’t let tokens per SOL fall below this (prevents insane prices / div by 0).
+const MIN_TOKENS_PER_SOL = BASE_TOKENS_PER_SOL * 0.02; // 2% of base
+const MAX_TOKENS_PER_SOL = BASE_TOKENS_PER_SOL * 3;    // 3x cheaper than base
+
+function clamp(x: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, x));
 }
 
-function normStrength(raw: number | null | undefined): number {
-  if (!Number.isFinite(raw as any)) return 1;
-  const r = Math.round(Number(raw));
-  return clamp(r, 1, 3); // strength is 1, 2, 3
+function progress(soldTokens: number): number {
+  if (!Number.isFinite(soldTokens) || soldTokens <= 0) return 0;
+  return clamp(soldTokens / CURVE_RANGE_TOKENS, 0, 1);
 }
 
-/**
- * Core pricing function: given
- * - curve type (linear / degen / random)
- * - strength (1..3)
- * - soldTokens (human tokens: e.g. 150_000)
- *
- * return how many tokens you get for 1 SOL at this point.
- * (tokensPerSol, UI only – the on-chain program is the real source of truth)
- */
-export function tokensPerSolForState(
+// Deterministic pseudo-random in [0,1) based only on sold & salt,
+// so it’s stable across refreshes (no flickering prices).
+function pseudoRandom01(soldTokens: number, salt: number): number {
+  const x = soldTokens * 0.000001 + salt * 13.37;
+  const s = Math.sin(x * 12.9898 + 78.233) * 43758.5453;
+  return s - Math.floor(s);
+}
+
+// ---------- Core: tokensPerSol for each curve ----------
+
+function tokensPerSolForSold(
   curve: CurveName,
-  rawStrength: number,
+  strengthRaw: number,
   soldTokens: number
 ): number {
-  const strength = normStrength(rawStrength);
-  const progressTokens = clamp(soldTokens, 0, MIGRATION_TOKENS);
-  const x = progressTokens / MIGRATION_TOKENS; // 0..1 between launch and migration
-  let tokensPerSol = BASE_TOKENS_PER_SOL;
+  const strength = clamp(Math.floor(strengthRaw || 1), 1, 3);
+  const p = progress(soldTokens); // 0 → 1 across the 1M migration window
 
-  if (curve === "linear") {
-    // LINEAR:
-    // Start: 1,000,000 tokens/SOL
-    // End (strength=1): ~300,000  (≈3.3x price)
-    // End (strength=3): ~50,000   (≈20x price)
-    const maxDrop = 0.7; // 70% max drop in tokensPerSol (per strength bucket)
-    const factor = 1 - (maxDrop * strength * x) / 3; // divide by 3 so strength=3 uses full range
-    const clamped = clamp(factor, 0.05, 1);          // never below 5% of base
-    tokensPerSol = BASE_TOKENS_PER_SOL * clamped;
-  } else if (curve === "degen") {
-    // DEGEN:
-    // Same start, but price ramps much faster at the beginning.
-    // We use x^expo to make the early part steeper.
-    const maxDrop = 0.9; // can drop tokensPerSol by up to 90%
-    const expo = 1.7;
-    const curveFactor = Math.pow(x, expo); // small x => very tiny, big x => closer to 1
-    const strengthFactor = 0.5 + strength / 6; // ~0.66..1.0
-    const factor = 1 - maxDrop * curveFactor * strengthFactor;
-    const clamped = clamp(factor, 0.03, 1); // never below 3% of base
-    tokensPerSol = BASE_TOKENS_PER_SOL * clamped;
-  } else {
-    // RANDOM:
-    // A smoother "wavy" curve around a slightly bullish linear baseline.
-    // Not crazy: just ± ~10–20% noise depending on strength.
-    const baseDrop = 0.5; // at migration, base ~500k tokens/SOL
-    const base = BASE_TOKENS_PER_SOL * (1 - baseDrop * x); // linear drop
-
-    // Pseudo-random but deterministic from soldTokens
-    const noiseAmplitude = 0.15 * strength; // 15%, 30%, 45% max swing around base
-    const phase = x * 20 + strength * 1.234;
-    const wave = Math.sin(phase);           // -1..1
-    const noiseFactor = 1 + (noiseAmplitude * wave) / 2; // around 1 ± ~noiseAmplitude/2
-
-    let candidate = base * noiseFactor;
-
-    // Never drop below 30% of base tokensPerSol
-    const minFactor = 0.3;
-    candidate = Math.max(BASE_TOKENS_PER_SOL * minFactor, candidate);
-
-    tokensPerSol = candidate;
+  if (curve === 'linear') {
+    // Linear: simple straight-ish line down.
+    // Higher strength = steeper.
+    const steep = 0.6 + 0.1 * (strength - 1); // 1:0.6, 2:0.7, 3:0.8
+    const factor = 1 - p * steep;
+    const tps = BASE_TOKENS_PER_SOL * factor;
+    return clamp(tps, MIN_TOKENS_PER_SOL, MAX_TOKENS_PER_SOL);
   }
 
-  // Safety: at least 1 token per SOL and integer-ish
-  return Math.max(1, Math.floor(tokensPerSol));
+  if (curve === 'degen') {
+    // Degen: exponential – cheap early, rips up later.
+    // Option 1: price ∝ sold^expo
+    const expo = 1.4 + 0.2 * (strength - 1); // ~1.4–1.8
+    // When p is small, p^expo is very small (cheap);
+    // near 1, p^expo -> 1 (expensive).
+    const factor = 1 - Math.pow(p, expo);
+    const tps = BASE_TOKENS_PER_SOL * factor;
+    return clamp(tps, MIN_TOKENS_PER_SOL, MAX_TOKENS_PER_SOL);
+  }
+
+  // RANDOM: Full casino mode.
+  // 1) Start from a slightly steeper linear base
+  const baseSteep = 0.7 + 0.15 * (strength - 1);
+  const baseFactor = 1 - p * baseSteep;
+  let baseTps = BASE_TOKENS_PER_SOL * baseFactor;
+  baseTps = clamp(baseTps, MIN_TOKENS_PER_SOL, MAX_TOKENS_PER_SOL);
+
+  // 2) Volatility multiplier  (50–70% around base)
+  const r = pseudoRandom01(soldTokens, strength);
+  const vol = 0.5 + 0.1 * (strength - 1); // 0.5 → 0.7
+  const mul = 1 + (r - 0.5) * 2 * vol;    // [1 - vol, 1 + vol]
+
+  // 3) “Jackpot / Rug” events – rare big moves.
+  const r2 = pseudoRandom01(soldTokens, strength + 101);
+  let jackpot = 1;
+  if (r2 > 0.985) {
+    // 1.5% chance: super cheap – big jackpot entry.
+    jackpot = 1.8;
+  } else if (r2 < 0.015) {
+    // 1.5% chance: expensive spike – small rug moment.
+    jackpot = 0.4;
+  }
+
+  const tps = baseTps * mul * jackpot;
+  return clamp(tps, MIN_TOKENS_PER_SOL, MAX_TOKENS_PER_SOL);
 }
 
-/** SOL per single token at current state (UI quote). */
-export function priceSolPerToken(
-  curve: CurveName,
-  strength: number,
-  soldTokens: number
-): number {
-  const tps = tokensPerSolForState(curve, strength, soldTokens);
-  if (!Number.isFinite(tps) || tps <= 0) return 0;
-  return 1 / tps;
-}
+// ---------- Public helpers used by UI + API ----------
 
-/** How many tokens you *expect* to receive for `amountSol` when buying. */
+// Quote how many tokens you *approximately* get for `amountSol` right now.
 export function quoteTokensUi(
   amountSol: number,
   curve: CurveName,
@@ -102,20 +104,36 @@ export function quoteTokensUi(
   soldTokens: number
 ): number {
   if (!Number.isFinite(amountSol) || amountSol <= 0) return 0;
-  const tps = tokensPerSolForState(curve, strength, soldTokens);
-  return amountSol * tps;
+  const tps = tokensPerSolForSold(curve, strength, soldTokens);
+  // Small buys compared to 1M range → using current marginal price is fine.
+  const tokens = amountSol * tps;
+  return Math.floor(tokens);
 }
 
-/** How many tokens you *expect* to burn when selling `amountSol` SOL worth. */
+// Quote how many tokens you *approximately* burn to receive `amountSol` back.
+// We use a mid-curve reference + small fee multiplier for “slippage feel”.
 export function quoteSellTokensUi(
   curve: CurveName,
   strength: number,
-  _startPriceUnused: number,
-  amountSol: number,
-  soldTokens: number = 0
+  _startPrice: number,
+  amountSol: number
 ): number {
   if (!Number.isFinite(amountSol) || amountSol <= 0) return 0;
-  const tps = tokensPerSolForState(curve, strength, soldTokens);
-  // symmetrical: same curve for buy and sell for now (no fee/slope difference in UI)
-  return amountSol * tps;
+
+  const refSold = CURVE_RANGE_TOKENS * 0.5; // middle of the curve
+  const tps = tokensPerSolForSold(curve, strength, refSold);
+  const feeMul = 1.02; // ~2% extra tokens vs buy side
+
+  const tokens = amountSol * tps * feeMul;
+  return Math.floor(tokens);
 }
+
+// For stats API / UI “Price: 1 SOL ≈ X TOKEN”
+export function priceTokensPerSol(
+  curve: CurveName,
+  strength: number,
+  soldTokens: number
+): number {
+  return tokensPerSolForSold(curve, strength, soldTokens);
+}
+
