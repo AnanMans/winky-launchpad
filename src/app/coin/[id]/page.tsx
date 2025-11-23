@@ -1,23 +1,24 @@
 // src/app/coin/[id]/page.tsx
-"use client";
+'use client';
 
-import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
-import Image from "next/image";
-import { useParams, useSearchParams } from "next/navigation";
+import { useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
+import Image from 'next/image';
+import { useParams, useSearchParams } from 'next/navigation';
 
-import { useWallet, useConnection } from "@solana/wallet-adapter-react";
+import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import {
   PublicKey,
   LAMPORTS_PER_SOL,
   Transaction,
   VersionedTransaction,
-} from "@solana/web3.js";
-import { Buffer } from "buffer";
+} from '@solana/web3.js';
+import { Buffer } from 'buffer';
 
-import { quoteTokensUi, quoteSellTokensUi } from "@/lib/curve";
+import WalletButton from '@/components/WalletButton';
+import { quoteTokensUi, quoteSellTokensUi } from '@/lib/curve';
 
-type CurveName = "linear" | "degen" | "random";
+type CurveName = 'linear' | 'degen' | 'random';
 
 type Coin = {
   id: string;
@@ -45,7 +46,7 @@ type CurveStats = {
 };
 
 function cx(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
+  return xs.filter(Boolean).join(' ');
 }
 
 // ---- MIGRATION HELPERS (UI) ----
@@ -90,8 +91,8 @@ export default function CoinPage() {
   const [stats, setStats] = useState<CurveStats | null>(null);
 
   // inputs
-  const [buySol, setBuySol] = useState("0.05");
-  const [sellSol, setSellSol] = useState("0.01");
+  const [buySol, setBuySol] = useState('0.05');
+  const [sellSol, setSellSol] = useState('0.01');
 
   // flash + pending
   const [flash, setFlash] = useState<string | null>(null);
@@ -111,14 +112,14 @@ export default function CoinPage() {
   }, [soldDisplay, migrateThreshold]);
 
   const isMigrated = Boolean(
-    stats && typeof stats.isMigrated === "boolean"
+    stats && typeof stats.isMigrated === 'boolean'
       ? stats.isMigrated
       : soldDisplay >= migrateThreshold
   );
 
   // How many tokens you must burn to receive 1 SOL when selling (flat for now)
   const tokensPerSolSell = useMemo(
-    () => quoteSellTokensUi("linear", 2, 0, 1),
+    () => quoteSellTokensUi('linear', 2, 1_000_000, 1),
     []
   );
 
@@ -144,30 +145,30 @@ export default function CoinPage() {
       try {
         const solRes = await fetch(
           `/api/debug/wallet-sol?wallet=${encodeURIComponent(walletStr)}`,
-          { cache: "no-store" }
+          { cache: 'no-store' }
         );
 
         if (solRes.ok) {
           const js = await solRes.json().catch(() => null);
           const solVal =
-            js && typeof js.sol === "number"
+            js && typeof js.sol === 'number'
               ? js.sol
-              : js && typeof js.lamports === "number"
+              : js && typeof js.lamports === 'number'
               ? js.lamports / LAMPORTS_PER_SOL
               : 0;
 
-          console.log("[BALANCES] SOL via API =", solVal);
+          console.log('[BALANCES] SOL via API =', solVal);
           setSolBal(Number.isFinite(solVal) ? solVal : 0);
         } else {
           console.warn(
-            "[BALANCES] wallet-sol API error:",
+            '[BALANCES] wallet-sol API error:',
             solRes.status,
-            await solRes.text().catch(() => "")
+            await solRes.text().catch(() => '')
           );
           setSolBal(0);
         }
       } catch (e) {
-        console.error("[BALANCES] wallet-sol fetch error:", e);
+        console.error('[BALANCES] wallet-sol fetch error:', e);
         setSolBal(0);
       }
 
@@ -182,14 +183,14 @@ export default function CoinPage() {
           `/api/debug/wallet-balances?wallet=${encodeURIComponent(
             walletStr
           )}&mint=${encodeURIComponent(mintStr)}`,
-          { cache: "no-store" }
+          { cache: 'no-store' }
         );
 
         if (!tokRes.ok) {
           console.warn(
-            "[BALANCES] wallet-balances API error:",
+            '[BALANCES] wallet-balances API error:',
             tokRes.status,
-            await tokRes.text().catch(() => "")
+            await tokRes.text().catch(() => '')
           );
           setTokBal(0);
           return;
@@ -197,25 +198,25 @@ export default function CoinPage() {
 
         const j = await tokRes.json().catch(() => null);
         if (!j) {
-          console.warn("[BALANCES] wallet-balances JSON parse error");
+          console.warn('[BALANCES] wallet-balances JSON parse error');
           setTokBal(0);
           return;
         }
 
         const uiAmount =
-          typeof j.uiAmount === "number"
+          typeof j.uiAmount === 'number'
             ? j.uiAmount
-            : Number(j.uiAmountString ?? "0");
+            : Number(j.uiAmountString ?? '0');
 
-        console.log("[BALANCES] token uiAmount =", uiAmount);
+        console.log('[BALANCES] token uiAmount =', uiAmount);
 
         setTokBal(Number.isFinite(uiAmount) ? uiAmount : 0);
       } catch (e) {
-        console.error("[BALANCES] wallet-balances fetch error:", e);
+        console.error('[BALANCES] wallet-balances fetch error:', e);
         setTokBal(0);
       }
     } catch (e) {
-      console.error("[BALANCES] refreshBalances fatal error:", e);
+      console.error('[BALANCES] refreshBalances fatal error:', e);
     }
   }
 
@@ -227,11 +228,11 @@ export default function CoinPage() {
     try {
       const res = await fetch(
         `/api/coins/${encodeURIComponent(coin.id)}/stats`,
-        { cache: "no-store" }
+        { cache: 'no-store' }
       );
       const j = await res.json().catch(() => ({}));
       if (!res.ok) {
-        console.warn("[STATS] error payload:", j);
+        console.warn('[STATS] error payload:', j);
         return;
       }
 
@@ -249,7 +250,7 @@ export default function CoinPage() {
       };
       setStats(s);
     } catch (e) {
-      console.warn("[STATS] fetch error:", e);
+      console.warn('[STATS] fetch error:', e);
     }
   }
 
@@ -264,11 +265,11 @@ export default function CoinPage() {
         setErr(null);
 
         const res = await fetch(`/api/coins/${encodeURIComponent(id)}`, {
-          cache: "no-store",
+          cache: 'no-store',
         });
         const j = await res.json().catch(() => ({}));
         if (!res.ok || !j?.coin) {
-          throw new Error(j?.error || "Failed to load coin");
+          throw new Error(j?.error || 'Failed to load coin');
         }
         if (alive) setCoin(normalizeCoin(j.coin));
       } catch (e: any) {
@@ -327,7 +328,7 @@ export default function CoinPage() {
   // Prefill buy from ?buy= once per coin id
   useEffect(() => {
     try {
-      const b = searchParams.get("buy");
+      const b = searchParams.get('buy');
       if (b && Number(b) > 0) setBuySol(String(b));
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -348,70 +349,64 @@ export default function CoinPage() {
     return quoteSellTokensUi(coin.curve, coin.strength, coin.startPrice, a);
   }, [sellSol, coin]);
 
-  // ---------- DERIVED: MC + FDV (pump.fun style) ----------
-  const { marketCapSol, fdvSol } = useMemo(() => {
-    if (!stats || !stats.priceTokensPerSol || stats.priceTokensPerSol <= 0) {
-      return { marketCapSol: 0, fdvSol: 0 };
-    }
+  // ---------- DERIVED PRICE / MC / FDV ----------
+  const priceTokensPerSol = stats?.priceTokensPerSol ?? 1_000_000;
+  const priceSolPerToken =
+    priceTokensPerSol > 0 ? 1 / priceTokensPerSol : 0;
 
-    const pricePerTokenSol = 1 / stats.priceTokensPerSol;
-    const circulating = stats.soldTokens ?? 0;
-    const totalSupply = stats.totalSupplyTokens ?? 0;
+  const marketCapSol = useMemo(() => {
+    if (!stats) return 0;
+    if (!priceSolPerToken || priceSolPerToken <= 0) return 0;
+    // circulating supply ~ soldTokens along bonding curve
+    return stats.soldTokens * priceSolPerToken;
+  }, [stats, priceSolPerToken]);
 
-    const mc = circulating * pricePerTokenSol;
-    const fdv = totalSupply * pricePerTokenSol;
-
-    return {
-      marketCapSol: Number.isFinite(mc) ? mc : 0,
-      fdvSol: Number.isFinite(fdv) ? fdv : 0,
-    };
-  }, [stats]);
+  const fdvSol = useMemo(() => {
+    if (!stats) return 0;
+    if (!priceSolPerToken || priceSolPerToken <= 0) return 0;
+    // FDV based on full 1B supply (totalSupplyTokens from stats)
+    return stats.totalSupplyTokens * priceSolPerToken;
+  }, [stats, priceSolPerToken]);
 
   // ---------- ACTIONS ----------
   async function doBuy() {
     try {
       if (isMigrated) {
-        alert("Curve migrated. Trading is locked; wait for Raydium listing.");
+        alert('Curve migrated. Trading is locked; wait for Raydium listing.');
         return;
       }
       if (!connected || !publicKey) {
-        alert("Connect your wallet first.");
+        alert('Connect your wallet first.');
         return;
       }
       if (!coin) {
-        alert("Coin not loaded.");
+        alert('Coin not loaded.');
         return;
       }
       if (!coin.mint) {
-        alert("This coin is not tradable yet (no mint configured).");
+        alert('This coin is not tradable yet (no mint configured).');
         return;
       }
 
       const sol = Number(String(buySol).trim());
       if (!Number.isFinite(sol) || sol <= 0) {
-        alert("Enter a positive SOL amount (e.g. 0.01)");
+        alert('Enter a positive SOL amount (e.g. 0.01)');
         return;
       }
 
-      const res = await fetch(
-        `/api/coins/${encodeURIComponent(coin.id)}/buy`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            buyer: publicKey.toBase58(),
-            amountSol: sol,
-          }),
-        }
-      );
+      const res = await fetch(`/api/coins/${encodeURIComponent(coin.id)}/buy`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ buyer: publicKey.toBase58(), amountSol: sol }),
+      });
 
       const j = await res.json().catch(() => ({}));
       if (!res.ok || !j?.txB64) {
-        console.error("[BUY] /buy error payload:", j);
-        throw new Error(j?.error || "Buy failed");
+        console.error('[BUY] /buy error payload:', j);
+        throw new Error(j?.error || 'Buy failed');
       }
 
-      const raw = Buffer.from(j.txB64 as string, "base64");
+      const raw = Buffer.from(j.txB64 as string, 'base64');
       const vtx = VersionedTransaction.deserialize(raw);
 
       setPending(true);
@@ -422,9 +417,9 @@ export default function CoinPage() {
       });
 
       try {
-        await connection.confirmTransaction(sig, "confirmed");
+        await connection.confirmTransaction(sig, 'confirmed');
       } catch (e: any) {
-        console.warn("[BUY] confirm warning:", e);
+        console.warn('[BUY] confirm warning:', e);
       }
 
       setPending(false);
@@ -435,47 +430,41 @@ export default function CoinPage() {
       setTimeout(refreshStats, 3000);
     } catch (e: any) {
       setPending(false);
-      console.error("[BUY] error:", e);
-      alert(e?.message || "Unexpected buy error (see console).");
+      console.error('[BUY] error:', e);
+      alert(e?.message || 'Unexpected buy error (see console).');
     }
   }
 
   async function doSell() {
     try {
       if (isMigrated) {
-        alert("Curve migrated. Trading is locked; wait for Raydium listing.");
+        alert('Curve migrated. Trading is locked; wait for Raydium listing.');
         return;
       }
       if (!connected || !publicKey) {
-        alert("Connect your wallet first.");
+        alert('Connect your wallet first.');
         return;
       }
       if (!coin) {
-        alert("Coin not loaded yet.");
+        alert('Coin not loaded yet.');
         return;
       }
       if (!coin.mint) {
-        alert("This coin is not tradable yet (no mint configured).");
+        alert('This coin is not tradable yet (no mint configured).');
         return;
       }
 
       const amt = Number(String(sellSol).trim());
       if (!Number.isFinite(amt) || amt <= 0) {
-        alert("Enter a positive SOL amount to sell (e.g. 0.01)");
+        alert('Enter a positive SOL amount to sell (e.g. 0.01)');
         return;
       }
 
-      const res = await fetch(
-        `/api/coins/${encodeURIComponent(coin.id)}/sell`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            seller: publicKey.toBase58(),
-            amountSol: amt,
-          }),
-        }
-      );
+      const res = await fetch(`/api/coins/${encodeURIComponent(coin.id)}/sell`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ seller: publicKey.toBase58(), amountSol: amt }),
+      });
 
       const text = await res.text();
       let j: any = {};
@@ -484,13 +473,13 @@ export default function CoinPage() {
       } catch {}
 
       if (!res.ok) {
-        console.error("[SELL] server error payload:", j || text);
-        alert(j?.error || "Server sell failed (see console).");
+        console.error('[SELL] server error payload:', j || text);
+        alert(j?.error || 'Server sell failed (see console).');
         return;
       }
-      if (!j.txB64 || typeof j.txB64 !== "string") {
-        console.error("[SELL] missing txB64 in response:", j);
-        alert("Server sell failed: no transaction returned.");
+      if (!j.txB64 || typeof j.txB64 !== 'string') {
+        console.error('[SELL] missing txB64 in response:', j);
+        alert('Server sell failed: no transaction returned.');
         return;
       }
 
@@ -510,23 +499,23 @@ export default function CoinPage() {
       });
 
       try {
-        await connection.confirmTransaction(sig, "confirmed");
+        await connection.confirmTransaction(sig, 'confirmed');
       } catch (e2: any) {
-        console.warn("[SELL] confirmTransaction warning:", e2);
+        console.warn('[SELL] confirmTransaction warning:', e2);
       }
 
       setPending(false);
-      setFlash("Sell submitted ✅");
+      setFlash('Sell submitted ✅');
       setTimeout(() => setFlash(null), 4000);
       setTimeout(refreshBalances, 1200);
       setTimeout(refreshStats, 1200);
       setTimeout(refreshStats, 3000);
     } catch (e: any) {
       setPending(false);
-      console.error("[SELL] client error", e);
-      let msg = "Sell failed (see console for details)";
-      if (e?.message && typeof e.message === "string") msg = e.message;
-      else if (typeof e === "string") msg = e;
+      console.error('[SELL] client error', e);
+      let msg = 'Sell failed (see console for details)';
+      if (e?.message && typeof e.message === 'string') msg = e.message;
+      else if (typeof e === 'string') msg = e;
       alert(msg);
     }
   }
@@ -544,7 +533,7 @@ export default function CoinPage() {
   if (err || !coin) {
     return (
       <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto">
-        <p className="text-red-400">Error: {err || "Not found"}</p>
+        <p className="text-red-400">Error: {err || 'Not found'}</p>
         <Link className="underline" href="/coins">
           Back to coins
         </Link>
@@ -556,7 +545,6 @@ export default function CoinPage() {
 
   return (
     <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto grid gap-8">
-      {/* Top nav */}
       <header className="flex items-center justify-between">
         <Link href="/" className="flex items-center gap-2 font-semibold">
           <Image src="/logo.svg" alt="logo" width={28} height={28} />
@@ -566,6 +554,7 @@ export default function CoinPage() {
           <Link className="underline" href="/coins">
             Coins
           </Link>
+          {/* WalletButton removed here; it already appears in your layout nav */}
         </nav>
       </header>
 
@@ -575,9 +564,9 @@ export default function CoinPage() {
         </div>
       )}
 
-      {/* HERO SECTION – pump.fun style: left info, right stats */}
-      <section className="grid gap-6 md:grid-cols-[minmax(0,2fr)_minmax(260px,1fr)] rounded-2xl border p-6 bg-black/20">
-        {/* LEFT: coin info */}
+      {/* Top: Coin info + stats (pump-style-ish) */}
+      <section className="grid gap-4 md:grid-cols-[minmax(0,2fr)_minmax(260px,1fr)] rounded-2xl border p-6 bg-black/20">
+        {/* Left: basic coin info */}
         <div className="flex flex-col gap-4">
           <div className="flex items-center gap-4">
             {coin.logoUrl ? (
@@ -593,33 +582,28 @@ export default function CoinPage() {
               <div className="w-16 h-16 rounded-xl bg-white/10" />
             )}
 
-            <div className="space-y-1">
+            <div>
               <h1 className="text-2xl font-bold">
-                {coin.name}{" "}
+                {coin.name}{' '}
                 <span className="text-white/60">
-                  ({(coin.symbol || "").toUpperCase()})
+                  ({(coin.symbol || '').toUpperCase()})
                 </span>
               </h1>
-              <p className="text-xs text-white/60 flex items-center gap-2">
-                <span className="px-2 py-0.5 rounded-full border border-white/15 uppercase tracking-wide text-[11px]">
-                  {coin.curve}
-                </span>
-                <span className="px-2 py-0.5 rounded-full border border-white/15 text-[11px]">
-                  Strength: {coin.strength}
-                </span>
+              <p className="text-white/60 text-sm">
+                Curve: {coin.curve} · Strength: {coin.strength}
               </p>
             </div>
           </div>
 
           {coin.description && (
-            <p className="text-white/80 text-sm">{coin.description}</p>
+            <p className="text-white/80">{coin.description}</p>
           )}
 
           {coin.socials && (
             <div className="flex flex-wrap gap-3 text-sm">
               {coin.socials.website && (
                 <a
-                  className="underline text-white/80"
+                  className="underline"
                   href={coin.socials.website}
                   target="_blank"
                   rel="noreferrer"
@@ -629,7 +613,7 @@ export default function CoinPage() {
               )}
               {coin.socials.x && (
                 <a
-                  className="underline text-white/80"
+                  className="underline"
                   href={coin.socials.x}
                   target="_blank"
                   rel="noreferrer"
@@ -639,7 +623,7 @@ export default function CoinPage() {
               )}
               {coin.socials.telegram && (
                 <a
-                  className="underline text-white/80"
+                  className="underline"
                   href={coin.socials.telegram}
                   target="_blank"
                   rel="noreferrer"
@@ -650,65 +634,55 @@ export default function CoinPage() {
             </div>
           )}
 
-          {/* Wallet + mint info */}
-          <div className="flex flex-wrap gap-6 text-sm text-white/70 mt-2">
+          <div className="flex flex-wrap gap-6 text-sm text-white/70">
             <div>
-              Wallet SOL:{" "}
+              Wallet SOL:{' '}
               <span className="font-mono">{solBal.toFixed(4)} SOL</span>
             </div>
             <div>
-              Wallet {coin.symbol}:{" "}
+              Wallet {coin.symbol}:{' '}
               <span className="font-mono">{tokBal.toLocaleString()}</span>
             </div>
-            <div className="w-full md:w-auto break-all">
-              Mint:{" "}
+            <div>
+              Mint:{' '}
               <span className="font-mono">
-                {coin.mint ?? "— (not set)"}
+                {coin.mint ?? '— (not set)'}
               </span>
             </div>
           </div>
         </div>
 
-        {/* RIGHT: stats card */}
+        {/* Right: fancy stats card */}
         <aside className="rounded-2xl bg-zinc-900/70 border border-zinc-700/60 p-4 grid gap-2 text-sm">
           <div className="flex justify-between">
             <span className="text-zinc-400">Price</span>
             <span className="font-mono text-zinc-50">
-              1 SOL ≈{" "}
-              {stats
-                ? stats.priceTokensPerSol.toLocaleString()
-                : "—"}{" "}
+              1 SOL ≈{' '}
+              {priceTokensPerSol
+                ? priceTokensPerSol.toLocaleString()
+                : '—'}{' '}
               {coin.symbol}
             </span>
           </div>
-
           <div className="flex justify-between">
             <span className="text-zinc-400">MC</span>
             <span className="font-mono">
               {marketCapSol.toFixed(3)} SOL
             </span>
           </div>
-
           <div className="flex justify-between">
             <span className="text-zinc-400">FDV</span>
             <span className="font-mono">{fdvSol.toFixed(3)} SOL</span>
           </div>
-
           <div className="flex justify-between">
             <span className="text-zinc-400">Pool</span>
             <span className="font-mono">
-              {stats ? stats.poolSol.toFixed(4) : "0.0000"} SOL
+              {stats?.poolSol.toFixed(4) ?? 0} SOL
             </span>
           </div>
-
-          <div className="pt-3">
+          <div className="pt-2">
             <div className="flex justify-between text-xs text-zinc-400 mb-1">
-              <span>
-                Curve progress
-                {stats
-                  ? ` · ${soldDisplay.toLocaleString()} / ${migrateThreshold.toLocaleString()}`
-                  : ""}
-              </span>
+              <span>Curve progress</span>
               <span>{migrateProgress}%</span>
             </div>
             <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
@@ -717,15 +691,40 @@ export default function CoinPage() {
                 style={{ width: `${migrateProgress}%` }}
               />
             </div>
-
-            {isMigrated && (
-              <div className="mt-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-100">
-                <b>Ready to migrate.</b> Trading on the curve is now locked
-                and can move to Raydium.
-              </div>
-            )}
+            <div className="mt-1 text-[11px] text-zinc-500">
+              {soldDisplay.toLocaleString()} sold /{' '}
+              {migrateThreshold.toLocaleString()} target
+            </div>
           </div>
         </aside>
+      </section>
+
+      {/* Migration progress (secondary block) */}
+      <section className="rounded-xl border bg-black/20 p-4 grid gap-2">
+        <div className="flex items-center justify-between text-sm">
+          <span className="text-white/70">
+            Migration threshold: {migrateThreshold.toLocaleString()} sold
+          </span>
+          <span className="font-mono">{migrateProgress}%</span>
+        </div>
+        <div className="h-2 w-full rounded bg-white/10 overflow-hidden">
+          <div
+            className="h-full bg-white/70"
+            style={{ width: `${migrateProgress}%` }}
+          />
+        </div>
+
+        {isMigrated ? (
+          <div className="mt-2 rounded-md border border-green-500/40 bg-green-500/10 px-3 py-2 text-sm">
+            <b>Ready to migrate to Raydium.</b> Trading is now locked on the
+            curve.
+          </div>
+        ) : (
+          <div className="mt-2 text-xs text-white/60">
+            {soldDisplay.toLocaleString()} sold /{' '}
+            {migrateThreshold.toLocaleString()} target
+          </div>
+        )}
       </section>
 
       {/* Buy / Sell */}
@@ -754,10 +753,10 @@ export default function CoinPage() {
           </div>
 
           <p className="text-white/70 text-sm">
-            You’ll get ~{" "}
+            You’ll get ~{' '}
             <span className="font-mono">
               {buyTokens.toLocaleString()}
-            </span>{" "}
+            </span>{' '}
             {coin.symbol}
           </p>
 
@@ -767,7 +766,7 @@ export default function CoinPage() {
             onClick={doBuy}
             disabled={!connected || !tradable || isMigrated || pending}
             title={
-              isMigrated ? "Curve migrated (trading locked)" : undefined
+              isMigrated ? 'Curve migrated (trading locked)' : undefined
             }
           >
             Buy {coin.symbol}
@@ -806,7 +805,7 @@ export default function CoinPage() {
                   key={label}
                   type="button"
                   disabled={
-                    !connected || isMigrated || maxSellSol <= 0 || !tradable
+                    !connected || !tradable || isMigrated || maxSellSol <= 0
                   }
                   onClick={() => {
                     if (maxSellSol <= 0) return;
@@ -814,8 +813,8 @@ export default function CoinPage() {
                     const raw = maxSellSol * effectivePct;
                     const v = raw
                       .toFixed(6)
-                      .replace(/0+$/, "")
-                      .replace(/\.$/, "");
+                      .replace(/0+$/, '')
+                      .replace(/\.$/, '');
                     setSellSol(v);
                   }}
                   className="rounded-md border border-zinc-600 px-2 py-1 text-xs hover:bg-zinc-800 disabled:opacity-40"
@@ -827,11 +826,11 @@ export default function CoinPage() {
           </div>
 
           <p className="text-white/70 text-sm">
-            You’ll receive ~{" "}
-            <span className="font-mono">{sellSol || "0"}</span> SOL for ~{" "}
+            You’ll receive ~{' '}
+            <span className="font-mono">{sellSol || '0'}</span> SOL for ~{' '}
             <span className="font-mono">
               {sellTokens.toLocaleString()}
-            </span>{" "}
+            </span>{' '}
             {coin.symbol}
           </p>
 
@@ -847,7 +846,7 @@ export default function CoinPage() {
               maxSellSol <= 0
             }
             title={
-              isMigrated ? "Curve migrated (trading locked)" : undefined
+              isMigrated ? 'Curve migrated (trading locked)' : undefined
             }
           >
             Sell {coin.symbol}
