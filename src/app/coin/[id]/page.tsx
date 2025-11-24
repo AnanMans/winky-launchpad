@@ -8,12 +8,14 @@ import { useParams, useSearchParams } from "next/navigation";
 
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import {
+  PublicKey,
   LAMPORTS_PER_SOL,
   Transaction,
   VersionedTransaction,
 } from "@solana/web3.js";
 import { Buffer } from "buffer";
 
+import WalletButton from "@/components/WalletButton";
 import {
   quoteTokensUi,
   quoteSellTokensUi,
@@ -46,6 +48,10 @@ type CurveStats = {
   migrationThresholdTokens?: number;
   migrationPercent?: number;
 };
+
+function cx(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
 
 // ---- MIGRATION HELPERS (UI) ----
 const MIGRATE_SOLD_DISPLAY_FALLBACK = MIGRATION_TOKENS;
@@ -136,34 +142,26 @@ export default function CoinPage() {
   const marketCapSol = stats?.marketCapSol ?? 0;
   const fdvSol = stats?.fdvSol ?? 0;
 
- // ---- SAFE DISPLAY HELPERS FOR STATS CARD ----
-  const priceDisplay = (() => {
-    if (!stats) return "—";
-    const n = Number(stats.priceTokensPerSol);
-    if (!Number.isFinite(n) || n <= 0) return "—";
-    return n.toLocaleString();
-  })();
+  // ---- SAFE DISPLAY HELPERS FOR STATS CARD ----
+  const priceDisplay =
+    stats && Number.isFinite(stats.priceTokensPerSol) && stats.priceTokensPerSol > 0
+      ? stats.priceTokensPerSol.toLocaleString()
+      : "—";
 
-  const mcDisplay = (() => {
-    if (!stats) return "0.000";
-    const n = Number(stats.marketCapSol);
-    if (!Number.isFinite(n) || n < 0) return "0.000";
-    return n.toFixed(3);
-  })();
+  const mcDisplay =
+    Number.isFinite(marketCapSol) && marketCapSol > 0
+      ? marketCapSol.toFixed(3)
+      : "0.000";
 
-  const fdvDisplay = (() => {
-    if (!stats) return "0.000";
-    const n = Number(stats.fdvSol);
-    if (!Number.isFinite(n) || n < 0) return "0.000";
-    return n.toFixed(3);
-  })();
+  const fdvDisplay =
+    Number.isFinite(fdvSol) && fdvSol > 0
+      ? fdvSol.toFixed(3)
+      : "0.000";
 
-  const poolDisplay = (() => {
-    if (!stats) return "0.0000";
-    const n = Number(stats.poolSol);
-    if (!Number.isFinite(n) || n < 0) return "0.0000";
-    return n.toFixed(4);
-  })();
+  const poolDisplay =
+    stats && Number.isFinite(stats.poolSol) && stats.poolSol > 0
+      ? stats.poolSol.toFixed(4)
+      : "0.0000";
 
   // ---------- HELPERS ----------
   async function refreshBalances() {
@@ -581,6 +579,7 @@ export default function CoinPage() {
           <Link className="underline" href="/coins">
             Coins
           </Link>
+          {/* WalletButton lives in layout nav */}
         </nav>
       </header>
 
@@ -590,7 +589,7 @@ export default function CoinPage() {
         </div>
       )}
 
-      {/* Top: info + fancy stats card */}
+      {/* Top: info + stats card */}
       <section className="grid gap-4 md:grid-cols-[minmax(0,2fr)_minmax(260px,1fr)] rounded-2xl border p-6 bg-black/20">
         {/* Left: coin info */}
         <div className="flex flex-col gap-4">
@@ -686,22 +685,18 @@ export default function CoinPage() {
               1 SOL ≈ {priceDisplay} {coin.symbol}
             </span>
           </div>
-
           <div className="flex justify-between">
             <span className="text-zinc-400">MC</span>
             <span className="font-mono">{mcDisplay} SOL</span>
           </div>
-
           <div className="flex justify-between">
             <span className="text-zinc-400">FDV</span>
             <span className="font-mono">{fdvDisplay} SOL</span>
           </div>
-
           <div className="flex justify-between">
             <span className="text-zinc-400">Pool</span>
             <span className="font-mono">{poolDisplay} SOL</span>
           </div>
-
           <div className="pt-2">
             <div className="flex justify-between text-xs text-zinc-400 mb-1">
               <span>Curve progress</span>
@@ -719,7 +714,6 @@ export default function CoinPage() {
             </div>
           </div>
         </aside>
-
       </section>
 
       {/* Migration note (extra, below) */}
@@ -770,7 +764,7 @@ export default function CoinPage() {
               onChange={(e) => setBuySol(e.target.value)}
               inputMode="decimal"
               placeholder="0.05"
-              disabled={!tradable || isMigrated}
+              disabled {!tradable || isMigrated}
             />
             <span className="text-white/60">SOL</span>
           </div>
@@ -877,4 +871,3 @@ export default function CoinPage() {
     </main>
   );
 }
-
