@@ -136,26 +136,34 @@ export default function CoinPage() {
   const marketCapSol = stats?.marketCapSol ?? 0;
   const fdvSol = stats?.fdvSol ?? 0;
 
-  // ---- SAFE DISPLAY HELPERS FOR STATS CARD ----
-  const priceDisplay =
-    stats && Number.isFinite(stats.priceTokensPerSol)
-      ? stats.priceTokensPerSol.toLocaleString()
-      : "—";
+ // ---- SAFE DISPLAY HELPERS FOR STATS CARD ----
+  const priceDisplay = (() => {
+    if (!stats) return "—";
+    const n = Number(stats.priceTokensPerSol);
+    if (!Number.isFinite(n) || n <= 0) return "—";
+    return n.toLocaleString();
+  })();
 
-  const mcDisplay =
-    stats && Number.isFinite(stats.marketCapSol)
-      ? stats.marketCapSol.toFixed(3)
-      : "0.000";
+  const mcDisplay = (() => {
+    if (!stats) return "0.000";
+    const n = Number(stats.marketCapSol);
+    if (!Number.isFinite(n) || n < 0) return "0.000";
+    return n.toFixed(3);
+  })();
 
-  const fdvDisplay =
-    stats && Number.isFinite(stats.fdvSol)
-      ? stats.fdvSol.toFixed(3)
-      : "0.000";
+  const fdvDisplay = (() => {
+    if (!stats) return "0.000";
+    const n = Number(stats.fdvSol);
+    if (!Number.isFinite(n) || n < 0) return "0.000";
+    return n.toFixed(3);
+  })();
 
-  const poolDisplay =
-    stats && Number.isFinite(stats.poolSol)
-      ? stats.poolSol.toFixed(4)
-      : "0.0000";
+  const poolDisplay = (() => {
+    if (!stats) return "0.0000";
+    const n = Number(stats.poolSol);
+    if (!Number.isFinite(n) || n < 0) return "0.0000";
+    return n.toFixed(4);
+  })();
 
   // ---------- HELPERS ----------
   async function refreshBalances() {
@@ -678,18 +686,22 @@ export default function CoinPage() {
               1 SOL ≈ {priceDisplay} {coin.symbol}
             </span>
           </div>
+
           <div className="flex justify-between">
             <span className="text-zinc-400">MC</span>
             <span className="font-mono">{mcDisplay} SOL</span>
           </div>
+
           <div className="flex justify-between">
             <span className="text-zinc-400">FDV</span>
             <span className="font-mono">{fdvDisplay} SOL</span>
           </div>
+
           <div className="flex justify-between">
             <span className="text-zinc-400">Pool</span>
             <span className="font-mono">{poolDisplay} SOL</span>
           </div>
+
           <div className="pt-2">
             <div className="flex justify-between text-xs text-zinc-400 mb-1">
               <span>Curve progress</span>
@@ -707,6 +719,7 @@ export default function CoinPage() {
             </div>
           </div>
         </aside>
+
       </section>
 
       {/* Migration note (extra, below) */}
