@@ -1,3 +1,4 @@
+// src/app/api/coins/[id]/stats/route.ts
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
@@ -11,7 +12,7 @@ import {
 
 import { RPC_URL, curvePda } from "@/lib/config";
 
-// curve math
+// single import from curve.ts
 import {
   priceTokensPerSol,
   MIGRATION_TOKENS,
@@ -51,7 +52,7 @@ function decodeCurveState(buf: Buffer) {
 
 export async function GET(
   _req: Request,
-  ctx: { params: Promise<{ id: string }> }
+  ctx: { params: { id: string } }
 ) {
   const baseDefaults = {
     poolSol: 0,
@@ -68,7 +69,7 @@ export async function GET(
   };
 
   try {
-    const { id } = await ctx.params;
+    const { id } = ctx.params;
     const coinId = (id || "").trim();
     if (!coinId) return bad("Missing id param");
 
@@ -125,16 +126,15 @@ export async function GET(
     const poolSol = poolLamports / LAMPORTS_PER_SOL;
 
     // --- Curve-driven price, MC and FDV ---
-    const curveName: CurveName =
-      (coin.curve as CurveName) || "linear";
+    const curveName: CurveName = (coin.curve as CurveName) || "linear";
 
     const strength =
       typeof coin.strength === "number" && Number.isFinite(coin.strength)
         ? coin.strength
         : 1;
 
-    // tokens per 1 SOL, using our curve math
-    const tokensPerSol = priceTokensPerSol(
+    // tokens per 1 SOL, using our curve math (NUMBER!)
+    const tokensPerSolNum = priceTokensPerSol(
       curveName,
       strength,
       soldTokens
@@ -142,7 +142,7 @@ export async function GET(
 
     // SOL per 1 token (inverse)
     const solPerToken =
-      tokensPerSol > 0 ? 1 / tokensPerSol : 0;
+      tokensPerSolNum > 0 ? 1 / tokensPerSolNum : 0;
 
     // Market cap = sold tokens * price per token
     const marketCapSol =
@@ -171,8 +171,8 @@ export async function GET(
       soldRaw: sold_raw,
       soldTokens,
       totalSupplyTokens,
-      // IMPORTANT: send the numeric value, not the function
-      priceTokensPerSol: tokensPerSol,
+      // IMPORTANT: send the *number*, not the function
+      priceTokensPerSol: tokensPerSolNum,
       marketCapSol,
       fdvSol,
       soldDisplay,

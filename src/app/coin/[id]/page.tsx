@@ -8,14 +8,12 @@ import { useParams, useSearchParams } from "next/navigation";
 
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import {
-  PublicKey,
   LAMPORTS_PER_SOL,
   Transaction,
   VersionedTransaction,
 } from "@solana/web3.js";
 import { Buffer } from "buffer";
 
-import WalletButton from "@/components/WalletButton";
 import {
   quoteTokensUi,
   quoteSellTokensUi,
@@ -48,10 +46,6 @@ type CurveStats = {
   migrationThresholdTokens?: number;
   migrationPercent?: number;
 };
-
-function cx(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
-}
 
 // ---- MIGRATION HELPERS (UI) ----
 const MIGRATE_SOLD_DISPLAY_FALLBACK = MIGRATION_TOKENS;
@@ -141,6 +135,27 @@ export default function CoinPage() {
   // Derived MC & FDV for rendering
   const marketCapSol = stats?.marketCapSol ?? 0;
   const fdvSol = stats?.fdvSol ?? 0;
+
+  // ---- SAFE DISPLAY HELPERS FOR STATS CARD ----
+  const priceDisplay =
+    stats && Number.isFinite(stats.priceTokensPerSol)
+      ? stats.priceTokensPerSol.toLocaleString()
+      : "—";
+
+  const mcDisplay =
+    stats && Number.isFinite(stats.marketCapSol)
+      ? stats.marketCapSol.toFixed(3)
+      : "0.000";
+
+  const fdvDisplay =
+    stats && Number.isFinite(stats.fdvSol)
+      ? stats.fdvSol.toFixed(3)
+      : "0.000";
+
+  const poolDisplay =
+    stats && Number.isFinite(stats.poolSol)
+      ? stats.poolSol.toFixed(4)
+      : "0.0000";
 
   // ---------- HELPERS ----------
   async function refreshBalances() {
@@ -369,6 +384,161 @@ export default function CoinPage() {
     return quoteSellTokensUi(coin.curve, coin.strength, coin.startPrice, a, sd);
   }, [sellSol, coin, stats]);
 
+  // ---------- ACTIONS ----------
+  async function doBuy() {
+    try {
+      if (isMigrated) {
+        alert("Curve migrated. Trading is locked; wait for Raydium listing.");
+        return;
+      }
+      if (!connected || !publicKey) {
+        alert("Connect your wallet first.");
+        return;
+      }
+      if (!coin) {
+        alert("Coin not loaded.");
+        return;
+      }
+      if (!coin.mint) {
+        alert("This coin is not tradable yet (no mint configured).");
+        return;
+      }
+
+      const sol = Number(String(buySol).trim());
+      if (!Number.isFinite(sol) || sol <= 0) {
+        alert("Enter a positive SOL amount (e.g. 0.01)");
+        return;
+      }
+
+      const res = await fetch(`/api/coins/${encodeURIComponent(coin.id)}/buy`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ buyer: publicKey.toBase58(), amountSol: sol }),
+      });
+
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || !j?.txB64) {
+        console.error("[BUY] /buy error payload:", j);
+        throw new Error(j?.error || "Buy failed");
+      }
+
+      const raw = Buffer.from(j.txB64 as string, "base64");
+      const vtx = VersionedTransaction.deserialize(raw);
+
+      setPending(true);
+
+      const sig = await sendTransaction(vtx as any, connection, {
+        skipPreflight: true,
+        maxRetries: 5,
+      });
+
+      try {
+        await connection.confirmTransaction(sig, "confirmed");
+      } catch (e: any) {
+        console.warn("[BUY] confirm warning:", e);
+      }
+
+      setPending(false);
+      setFlash(`Buy submitted ✅ ${sig.slice(0, 8)}…`);
+      setTimeout(() => setFlash(null), 4000);
+      setTimeout(refreshBalances, 1200);
+      setTimeout(refreshStats, 1200);
+      setTimeout(refreshStats, 3000);
+    } catch (e: any) {
+      setPending(false);
+      console.error("[BUY] error:", e);
+      alert(e?.message || "Unexpected buy error (see console).");
+    }
+  }
+
+  async function doSell() {
+    try {
+      if (isMigrated) {
+        alert("Curve migrated. Trading is locked; wait for Raydium listing.");
+        return;
+      }
+      if (!connected || !publicKey) {
+        alert("Connect your wallet first.");
+        return;
+      }
+      if (!coin) {
+        alert("Coin not loaded yet.");
+        return;
+      }
+      if (!coin.mint) {
+        alert("This coin is not tradable yet (no mint configured).");
+        return;
+      }
+
+      const amt = Number(String(sellSol).trim());
+      if (!Number.isFinite(amt) || amt <= 0) {
+        alert("Enter a positive SOL amount to sell (e.g. 0.01)");
+        return;
+      }
+
+      const res = await fetch(
+        `/api/coins/${encodeURIComponent(coin.id)}/sell`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ seller: publicKey.toBase58(), amountSol: amt }),
+        }
+      );
+
+      const text = await res.text();
+      let j: any = {};
+      try {
+        j = JSON.parse(text);
+      } catch {}
+
+      if (!res.ok) {
+        console.error("[SELL] server error payload:", j || text);
+        alert(j?.error || "Server sell failed (see console).");
+        return;
+      }
+      if (!j.txB64 || typeof j.txB64 !== "string") {
+        console.error("[SELL] missing txB64 in response:", j);
+        alert("Server sell failed: no transaction returned.");
+        return;
+      }
+
+      const raw = Uint8Array.from(atob(j.txB64), (c) => c.charCodeAt(0));
+      let tx: Transaction | VersionedTransaction;
+      try {
+        tx = VersionedTransaction.deserialize(raw);
+      } catch {
+        tx = Transaction.from(raw);
+      }
+
+      setPending(true);
+
+      const sig = await sendTransaction(tx, connection, {
+        skipPreflight: true,
+        maxRetries: 5,
+      });
+
+      try {
+        await connection.confirmTransaction(sig, "confirmed");
+      } catch (e2: any) {
+        console.warn("[SELL] confirmTransaction warning:", e2);
+      }
+
+      setPending(false);
+      setFlash("Sell submitted ✅");
+      setTimeout(() => setFlash(null), 4000);
+      setTimeout(refreshBalances, 1200);
+      setTimeout(refreshStats, 1200);
+      setTimeout(refreshStats, 3000);
+    } catch (e: any) {
+      setPending(false);
+      console.error("[SELL] client error", e);
+      let msg = "Sell failed (see console for details)";
+      if (e?.message && typeof e.message === "string") msg = e.message;
+      else if (typeof e === "string") msg = e;
+      alert(msg);
+    }
+  }
+
   // ---------- RENDER ----------
 
   if (loading) {
@@ -392,25 +562,6 @@ export default function CoinPage() {
 
   const tradable = !!coin.mint;
 
-  // ---- SAFE DISPLAY HELPERS FOR STATS CARD ----
-  const priceDisplay =
-    stats && Number.isFinite(stats.priceTokensPerSol)
-      ? stats.priceTokensPerSol.toLocaleString()
-      : "—";
-
-  const mcDisplay =
-    Number.isFinite(marketCapSol) && marketCapSol > 0
-      ? marketCapSol.toFixed(3)
-      : "0.000";
-
-  const fdvDisplay =
-    Number.isFinite(fdvSol) && fdvSol > 0 ? fdvSol.toFixed(3) : "0.000";
-
-  const poolDisplay =
-    stats && Number.isFinite(stats.poolSol)
-      ? stats.poolSol.toFixed(4)
-      : "0.0000";
-
   return (
     <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto grid gap-8">
       <header className="flex items-center justify-between">
@@ -422,7 +573,6 @@ export default function CoinPage() {
           <Link className="underline" href="/coins">
             Coins
           </Link>
-          {/* WalletButton removed here; it already appears in your layout nav */}
         </nav>
       </header>
 
