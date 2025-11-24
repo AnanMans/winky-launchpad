@@ -587,7 +587,7 @@ export default function CoinPage() {
               <div className="w-16 h-16 rounded-xl bg-white/10" />
             )}
 
-            <div>
+              Wallet<div>
               <h1 className="text-2xl font-bold">
                 {coin.name}{" "}
                 <span className="text-white/60">
@@ -644,10 +644,13 @@ export default function CoinPage() {
               Wallet SOL:{" "}
               <span className="font-mono">{solBal.toFixed(4)} SOL</span>
             </div>
-            <div>
-              Wallet {coin.symbol}:{" "}
-              <span className="font-mono">{tokBal.toLocaleString()}</span>
-            </div>
+<div>
+  Wallet {coin.symbol}:{" "}
+  <span className="font-mono">
+    {(tokBal ?? 0).toLocaleString()}
+  </span>
+</div>
+
             <div className="break-all">
               Mint:{" "}
               <span className="font-mono">
@@ -688,10 +691,11 @@ export default function CoinPage() {
                 style={{ width: `${migrateProgress}%` }}
               />
             </div>
-            <div className="mt-1 text-[11px] text-zinc-500">
-              {soldDisplay.toLocaleString()} sold /{" "}
-              {migrateThreshold.toLocaleString()} target
-            </div>
+<div className="mt-1 text-[11px] text-zinc-500">
+  {(soldDisplay ?? 0).toLocaleString()} sold /{" "}
+  {(migrateThreshold ?? 0).toLocaleString()} target
+</div>
+
           </div>
         </aside>
       </section>
@@ -699,9 +703,10 @@ export default function CoinPage() {
       {/* Migration note */}
       <section className="rounded-xl border bg-black/20 p-4 grid gap-2">
         <div className="flex items-center justify-between text-sm">
-          <span className="text-white/70">
-            Migration threshold: {migrateThreshold.toLocaleString()} sold
-          </span>
+<span className="text-white/70">
+  Migration threshold: {(migrateThreshold ?? 0).toLocaleString()} sold
+</span>
+
           <span className="font-mono">{migrateProgress}%</span>
         </div>
         <div className="h-2 w-full rounded bg-white/10 overflow-hidden">
@@ -718,8 +723,8 @@ export default function CoinPage() {
           </div>
         ) : (
           <div className="mt-2 text-xs text-white/60">
-            {soldDisplay.toLocaleString()} sold /{" "}
-            {migrateThreshold.toLocaleString()} target
+{(soldDisplay ?? 0).toLocaleString()} sold /{" "}
+{(migrateThreshold ?? 0).toLocaleString()} target
           </div>
         )}
       </section>
@@ -751,9 +756,11 @@ export default function CoinPage() {
 
           <p className="text-white/70 text-sm">
             You’ll get ~{" "}
-            <span className="font-mono">
-              {buyTokens.toLocaleString()}
-            </span>{" "}
+<span className="font-mono">
+  {(buyTokens ?? 0).toLocaleString()}
+</span>
+
+{" "}
             {coin.symbol}
           </p>
 
@@ -822,9 +829,11 @@ export default function CoinPage() {
           <p className="text-white/70 text-sm">
             You’ll receive ~{" "}
             <span className="font-mono">{sellSol || "0"}</span> SOL for ~{" "}
-            <span className="font-mono">
-              {sellTokens.toLocaleString()}
-            </span>{" "}
+<span className="font-mono">
+  {(sellTokens ?? 0).toLocaleString()}
+</span>
+
+{" "}
             {coin.symbol}
           </p>
 
