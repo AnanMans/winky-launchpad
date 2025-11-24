@@ -15,11 +15,10 @@ import {
 } from "@solana/web3.js";
 import { Buffer } from "buffer";
 
-import WalletButton from "@/components/WalletButton";
 import {
   quoteTokensUi,
   quoteSellTokensUi,
-  CurveName,
+  type CurveName,
   MIGRATION_TOKENS,
 } from "@/lib/curve";
 
@@ -43,23 +42,18 @@ type CurveStats = {
   priceTokensPerSol: number;
   marketCapSol: number;
   fdvSol: number;
-  soldDisplay?: number;
-  isMigrated?: boolean;
-  migrationThresholdTokens?: number;
-  migrationPercent?: number;
+  soldDisplay: number;
+  isMigrated: boolean;
+  migrationThresholdTokens: number;
+  migrationPercent: number;
 };
 
-function cx(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
-}
-
-// ---- MIGRATION HELPERS (UI) ----
 const MIGRATE_SOLD_DISPLAY_FALLBACK = MIGRATION_TOKENS;
+
 function clamp01(x: number) {
   return Math.max(0, Math.min(1, x));
 }
 
-// Normalize Supabase row → Coin
 function normalizeCoin(raw: any): Coin {
   return {
     id: raw.id,
@@ -72,13 +66,13 @@ function normalizeCoin(raw: any): Coin {
     startPrice: raw.startPrice ?? raw.start_price ?? 0,
     strength: raw.strength ?? 1,
     mint: raw.mint ?? null,
-  } as Coin;
+  };
 }
 
 export default function CoinPage() {
   const params = useParams<{ id: string }>();
   const searchParams = useSearchParams();
-  const id = params.id;
+  const id = params?.id;
 
   const { connection } = useConnection();
   const { publicKey, connected, sendTransaction } = useWallet();
@@ -87,22 +81,18 @@ export default function CoinPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  // balances
   const [solBal, setSolBal] = useState(0);
   const [tokBal, setTokBal] = useState(0);
 
-  // curve stats (pool / sold / fdv / price)
   const [stats, setStats] = useState<CurveStats | null>(null);
 
-  // inputs
   const [buySol, setBuySol] = useState("0.05");
   const [sellSol, setSellSol] = useState("0.01");
 
-  // flash + pending
   const [flash, setFlash] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
-  // ---- MIGRATION DERIVED (from stats) ----
+  // ----- MIGRATION DERIVED -----
   const soldDisplay = Number(
     (stats?.soldDisplay ?? stats?.soldTokens ?? 0) || 0
   );
@@ -121,45 +111,43 @@ export default function CoinPage() {
       : soldDisplay >= migrateThreshold
   );
 
-  // How many tokens you must burn to receive 1 SOL when selling (flat quote)
+  // ----- TOKENS PER 1 SOL (SELL SIDE) -----
   const tokensPerSolSell = useMemo(() => {
     if (!coin || !stats) return 0;
     const sd =
       stats && Number(stats.soldDisplay) > 0
         ? Number(stats.soldDisplay)
         : Number(stats.soldTokens ?? 0) || 0;
-    // 1 SOL worth of tokens at current curve position
     return quoteSellTokensUi(coin.curve, coin.strength, coin.startPrice, 1, sd);
   }, [coin, stats]);
 
-  // Maximum SOL you can sell based on your current token balance
   const maxSellSol = useMemo(() => {
     if (!tokensPerSolSell || tokensPerSolSell <= 0) return 0;
     return tokBal / tokensPerSolSell;
   }, [tokBal, tokensPerSolSell]);
 
-  // Derived MC & FDV for rendering
+  // ----- MC / FDV -----
   const marketCapSol = stats?.marketCapSol ?? 0;
   const fdvSol = stats?.fdvSol ?? 0;
 
-  // ---- SAFE DISPLAY HELPERS FOR STATS CARD ----
+  // ----- SAFE DISPLAY HELPERS FOR STATS CARD -----
   const priceDisplay =
-    stats && Number.isFinite(stats.priceTokensPerSol) && stats.priceTokensPerSol > 0
+    stats && Number.isFinite(stats.priceTokensPerSol)
       ? stats.priceTokensPerSol.toLocaleString()
       : "—";
 
   const mcDisplay =
-    Number.isFinite(marketCapSol) && marketCapSol > 0
-      ? marketCapSol.toFixed(3)
+    stats && Number.isFinite(stats.marketCapSol)
+      ? stats.marketCapSol.toFixed(3)
       : "0.000";
 
   const fdvDisplay =
-    Number.isFinite(fdvSol) && fdvSol > 0
-      ? fdvSol.toFixed(3)
+    stats && Number.isFinite(stats.fdvSol)
+      ? stats.fdvSol.toFixed(3)
       : "0.000";
 
   const poolDisplay =
-    stats && Number.isFinite(stats.poolSol) && stats.poolSol > 0
+    stats && Number.isFinite(stats.poolSol)
       ? stats.poolSol.toFixed(4)
       : "0.0000";
 
@@ -175,7 +163,7 @@ export default function CoinPage() {
       const walletStr = publicKey.toBase58();
       const mintStr = coin?.mint;
 
-      // --- 1) SOL via debug API ---
+      // 1) SOL
       try {
         const solRes = await fetch(
           `/api/debug/wallet-sol?wallet=${encodeURIComponent(walletStr)}`,
@@ -190,23 +178,15 @@ export default function CoinPage() {
               : js && typeof js.lamports === "number"
               ? js.lamports / LAMPORTS_PER_SOL
               : 0;
-
-          console.log("[BALANCES] SOL via API =", solVal);
           setSolBal(Number.isFinite(solVal) ? solVal : 0);
         } else {
-          console.warn(
-            "[BALANCES] wallet-sol API error:",
-            solRes.status,
-            await solRes.text().catch(() => "")
-          );
           setSolBal(0);
         }
-      } catch (e) {
-        console.error("[BALANCES] wallet-sol fetch error:", e);
+      } catch {
         setSolBal(0);
       }
 
-      // --- 2) Token via wallet-balances API ---
+      // 2) Token
       if (!mintStr) {
         setTokBal(0);
         return;
@@ -221,18 +201,12 @@ export default function CoinPage() {
         );
 
         if (!tokRes.ok) {
-          console.warn(
-            "[BALANCES] wallet-balances API error:",
-            tokRes.status,
-            await tokRes.text().catch(() => "")
-          );
           setTokBal(0);
           return;
         }
 
         const j = await tokRes.json().catch(() => null);
         if (!j) {
-          console.warn("[BALANCES] wallet-balances JSON parse error");
           setTokBal(0);
           return;
         }
@@ -242,15 +216,12 @@ export default function CoinPage() {
             ? j.uiAmount
             : Number(j.uiAmountString ?? "0");
 
-        console.log("[BALANCES] token uiAmount =", uiAmount);
-
         setTokBal(Number.isFinite(uiAmount) ? uiAmount : 0);
-      } catch (e) {
-        console.error("[BALANCES] wallet-balances fetch error:", e);
+      } catch {
         setTokBal(0);
       }
     } catch (e) {
-      console.error("[BALANCES] refreshBalances fatal error:", e);
+      console.error("[BALANCES] fatal", e);
     }
   }
 
@@ -259,12 +230,14 @@ export default function CoinPage() {
       setStats(null);
       return;
     }
+
     try {
       const res = await fetch(
         `/api/coins/${encodeURIComponent(coin.id)}/stats`,
         { cache: "no-store" }
       );
-      const j = await res.json().catch(() => ({}));
+      const j = await res.json().catch(() => ({} as any));
+
       if (!res.ok) {
         console.warn("[STATS] error payload:", j);
         return;
@@ -279,10 +252,12 @@ export default function CoinPage() {
         fdvSol: Number(j.fdvSol ?? 0),
         soldDisplay: Number(j.soldDisplay ?? j.soldTokens ?? 0),
         isMigrated: Boolean(j.isMigrated ?? false),
-        migrationThresholdTokens:
-          Number(j.migrationThresholdTokens ?? 0) || undefined,
-        migrationPercent: Number(j.migrationPercent ?? 0) || undefined,
+        migrationThresholdTokens: Number(
+          j.migrationThresholdTokens ?? MIGRATION_TOKENS
+        ),
+        migrationPercent: Number(j.migrationPercent ?? 0),
       };
+
       setStats(s);
     } catch (e) {
       console.warn("[STATS] fetch error:", e);
@@ -290,11 +265,12 @@ export default function CoinPage() {
   }
 
   // ---------- EFFECTS ----------
-
-  // Load coin (depends ONLY on id)
+  // Load coin
   useEffect(() => {
     let alive = true;
+
     (async () => {
+      if (!id) return;
       try {
         setLoading(true);
         setErr(null);
@@ -302,10 +278,12 @@ export default function CoinPage() {
         const res = await fetch(`/api/coins/${encodeURIComponent(id)}`, {
           cache: "no-store",
         });
-        const j = await res.json().catch(() => ({}));
+        const j = await res.json().catch(() => ({} as any));
+
         if (!res.ok || !j?.coin) {
           throw new Error(j?.error || "Failed to load coin");
         }
+
         if (alive) setCoin(normalizeCoin(j.coin));
       } catch (e: any) {
         if (alive) setErr(e?.message || String(e));
@@ -313,35 +291,35 @@ export default function CoinPage() {
         if (alive) setLoading(false);
       }
     })();
+
     return () => {
       alive = false;
     };
   }, [id]);
 
-  // Balances polling (stable scalar deps)
+  // Balances polling
   useEffect(() => {
     if (!connected || !publicKey) {
       setSolBal(0);
       setTokBal(0);
       return;
     }
+
     refreshBalances();
     const t = setInterval(refreshBalances, 8000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected, publicKey?.toBase58(), coin?.mint ?? null]);
 
-  // Stats burst + steady polling (depends ONLY on coin.id)
+  // Stats polling
   useEffect(() => {
     if (!coin?.id) {
       setStats(null);
       return;
     }
 
-    // initial
     refreshStats();
 
-    // fast burst ~15s after actions
     let fastTimer: ReturnType<typeof setTimeout> | null = null;
     const start = Date.now();
     const burst = () => {
@@ -351,7 +329,6 @@ export default function CoinPage() {
     };
     fastTimer = setTimeout(burst, 1500);
 
-    // steady 8s
     const steady = setInterval(refreshStats, 8000);
 
     return () => {
@@ -360,16 +337,18 @@ export default function CoinPage() {
     };
   }, [coin?.id ?? null]);
 
-  // Prefill buy from ?buy= once per coin id
+  // Prefill ?buy=
   useEffect(() => {
     try {
       const b = searchParams.get("buy");
       if (b && Number(b) > 0) setBuySol(String(b));
-    } catch {}
+    } catch {
+      // ignore
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // ---------- QUOTES (UI only) ----------
+  // ---------- QUOTES ----------
   const buyTokens = useMemo(() => {
     const a = Number(buySol);
     if (!coin || !stats || !Number.isFinite(a) || a <= 0) return 0;
@@ -422,7 +401,7 @@ export default function CoinPage() {
         body: JSON.stringify({ buyer: publicKey.toBase58(), amountSol: sol }),
       });
 
-      const j = await res.json().catch(() => ({}));
+      const j = await res.json().catch(() => ({} as any));
       if (!res.ok || !j?.txB64) {
         console.error("[BUY] /buy error payload:", j);
         throw new Error(j?.error || "Buy failed");
@@ -440,7 +419,7 @@ export default function CoinPage() {
 
       try {
         await connection.confirmTransaction(sig, "confirmed");
-      } catch (e: any) {
+      } catch (e) {
         console.warn("[BUY] confirm warning:", e);
       }
 
@@ -495,7 +474,9 @@ export default function CoinPage() {
       let j: any = {};
       try {
         j = JSON.parse(text);
-      } catch {}
+      } catch {
+        // ignore
+      }
 
       if (!res.ok) {
         console.error("[SELL] server error payload:", j || text);
@@ -579,12 +560,11 @@ export default function CoinPage() {
           <Link className="underline" href="/coins">
             Coins
           </Link>
-          {/* WalletButton lives in layout nav */}
         </nav>
       </header>
 
       {flash && (
-        <div className="mb-3 rounded-md border px-3 py-2 text-sm panel">
+        <div className="mb-3 rounded-md border px-3 py-2 text-sm bg-black/40">
           {flash}
         </div>
       )}
@@ -668,7 +648,7 @@ export default function CoinPage() {
               Wallet {coin.symbol}:{" "}
               <span className="font-mono">{tokBal.toLocaleString()}</span>
             </div>
-            <div>
+            <div className="break-all">
               Mint:{" "}
               <span className="font-mono">
                 {coin.mint ?? "— (not set)"}
@@ -716,7 +696,7 @@ export default function CoinPage() {
         </aside>
       </section>
 
-      {/* Migration note (extra, below) */}
+      {/* Migration note */}
       <section className="rounded-xl border bg-black/20 p-4 grid gap-2">
         <div className="flex items-center justify-between text-sm">
           <span className="text-white/70">
@@ -764,8 +744,7 @@ export default function CoinPage() {
               onChange={(e) => setBuySol(e.target.value)}
               inputMode="decimal"
               placeholder="0.05"
-disabled={!tradable || isMigrated}
-
+              disabled={!tradable || isMigrated}
             />
             <span className="text-white/60">SOL</span>
           </div>
@@ -813,7 +792,6 @@ disabled={!tradable || isMigrated}
             <span className="text-white/60">SOL</span>
           </div>
 
-          {/* Quick % sell buttons */}
           <div className="mt-2 flex items-center gap-2 text-xs text-zinc-400">
             <span>Quick:</span>
             {[0.25, 0.5, 0.75, 1].map((p) => {
@@ -825,7 +803,7 @@ disabled={!tradable || isMigrated}
                   disabled={!connected || isMigrated || maxSellSol <= 0}
                   onClick={() => {
                     if (maxSellSol <= 0) return;
-                    const effectivePct = p === 1 ? 0.995 : p; // ~99.5% for "100%"
+                    const effectivePct = p === 1 ? 0.995 : p;
                     const raw = maxSellSol * effectivePct;
                     const v = raw
                       .toFixed(6)
@@ -872,3 +850,4 @@ disabled={!tradable || isMigrated}
     </main>
   );
 }
+
