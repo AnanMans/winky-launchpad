@@ -764,7 +764,8 @@ export default function CoinPage() {
               onChange={(e) => setBuySol(e.target.value)}
               inputMode="decimal"
               placeholder="0.05"
-              disabled {!tradable || isMigrated}
+disabled={!tradable || isMigrated}
+
             />
             <span className="text-white/60">SOL</span>
           </div>
