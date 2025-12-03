@@ -16,21 +16,22 @@ import {
 } from "@solana/spl-token";
 import { Buffer } from "buffer";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { PROGRAM_ID, RPC_URL } from "@/lib/config";
+
+// ✅ use the SAME RPC_URL as the rest of the app
+import { RPC_URL } from "@/lib/config";
 
 function bad(msg: string, code = 400, extra: any = {}) {
   return NextResponse.json({ error: msg, ...extra }, { status: code });
 }
-
 function ok(data: any, code = 200) {
   return NextResponse.json(data, { status: code });
 }
 
-// Anchor discriminator for `trade_sell` (global: trade_sell)
+// Anchor discriminator for `trade_sell`
 const TRADE_SELL_DISC = Buffer.from("3ba24d6d0952d8a0", "hex");
 
 // 1 SOL = 1e9 lamports
-const LAMPORTS_PER_SOL = 1_000_000_000;
+const LAMPORTS_PER_SOL = 1_000_000_000n;
 
 function u64ToLeBuffer(v: bigint): Buffer {
   const b = Buffer.alloc(8);
@@ -42,13 +43,21 @@ type RouteCtx = {
   params: Promise<{ id: string }>;
 };
 
-export async function POST(req: Request, ctx: RouteCtx) {
-  try {
-    if (!PROGRAM_ID) {
-      console.error("[/api/coins/[id]/sell] PROGRAM_ID missing");
-      return bad("PROGRAM_ID not configured on server", 500);
-    }
+const PROGRAM_ID_STR =
+  process.env.NEXT_PUBLIC_PROGRAM_ID || process.env.PROGRAM_ID;
 
+if (!PROGRAM_ID_STR) {
+  console.error("[/api/coins/[id]/sell] PROGRAM_ID missing in env");
+}
+
+const PROGRAM_ID = PROGRAM_ID_STR ? new PublicKey(PROGRAM_ID_STR) : null;
+
+export async function POST(req: Request, ctx: RouteCtx) {
+  if (!PROGRAM_ID) {
+    return bad("PROGRAM_ID not configured on server", 500);
+  }
+
+  try {
     const { id } = await ctx.params;
     const coinId = (id || "").trim();
     if (!coinId) return bad("Missing coin id");
@@ -63,7 +72,6 @@ export async function POST(req: Request, ctx: RouteCtx) {
 
     const payerStr = String(body?.payer ?? "").trim();
     if (!payerStr) return bad("Missing payer");
-
     const payer = new PublicKey(payerStr);
 
     const solAmount = Number(body?.solAmount ?? 0);
@@ -92,20 +100,22 @@ export async function POST(req: Request, ctx: RouteCtx) {
     }
 
     const mintPk = new PublicKey(coin.mint);
+
+    // ✅ now ALWAYS use the same RPC as other routes
+    console.log("[SELL] RPC_URL =", RPC_URL);
     const connection = new Connection(RPC_URL, "confirmed");
 
     // -------- figure out raw token amount & ensure user has it --------
     const supplyInfo = await connection.getTokenSupply(mintPk, "confirmed");
     const decimals = supplyInfo.value.decimals ?? 9;
 
-    const multiplier = 10 ** decimals;
+    const multiplier = 10 ** decimals; // small enough for JS number
     const tokensRaw = BigInt(Math.floor(tokensUi * multiplier));
 
     if (tokensRaw <= 0n) {
       return bad("Token amount too small to sell", 400);
     }
 
-    // user's ATA (will be burned by program)
     const userAta = getAssociatedTokenAddressSync(mintPk, payer, false);
 
     const ataBalInfo = await connection.getTokenAccountBalance(
@@ -127,9 +137,7 @@ export async function POST(req: Request, ctx: RouteCtx) {
     );
 
     // -------- compute lamports to request, clamp to pool --------
-    let lamports = BigInt(
-      Math.floor(solAmount * Number(LAMPORTS_PER_SOL))
-    );
+    let lamports = BigInt(Math.floor(solAmount * Number(LAMPORTS_PER_SOL)));
     if (lamports <= 0n) {
       return bad("Lamports amount must be > 0", 400);
     }
@@ -156,8 +164,7 @@ export async function POST(req: Request, ctx: RouteCtx) {
     }
 
     // -------- build program ix for Anchor `trade_sell` --------
-    // data = discriminator + lamports (u64 LE) + tokens_raw (u64 LE)
-    const dataBuf = Buffer.concat([
+    const data = Buffer.concat([
       TRADE_SELL_DISC,
       u64ToLeBuffer(lamports),
       u64ToLeBuffer(tokensRaw),
@@ -166,17 +173,16 @@ export async function POST(req: Request, ctx: RouteCtx) {
     const sellIx = new TransactionInstruction({
       programId: PROGRAM_ID,
       keys: [
-        { pubkey: payer, isSigner: true, isWritable: true }, // payer (gets SOL)
+        { pubkey: payer, isSigner: true, isWritable: true }, // payer (signer, gets SOL)
         { pubkey: mintPk, isSigner: false, isWritable: true }, // mint
         { pubkey: statePk, isSigner: false, isWritable: true }, // curve state PDA
-        { pubkey: userAta, isSigner: false, isWritable: true }, // seller ATA
+        { pubkey: userAta, isSigner: false, isWritable: true }, // seller_ata
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // token_program
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
       ],
-      data: dataBuf,
+      data,
     });
 
-    // -------- final v0 tx (same style as BUY) --------
     const { blockhash, lastValidBlockHeight } =
       await connection.getLatestBlockhash("confirmed");
 
@@ -190,7 +196,7 @@ export async function POST(req: Request, ctx: RouteCtx) {
     const serialized = vtx.serialize();
     const txB64 = Buffer.from(serialized).toString("base64");
 
-    const estSolIn = Number(lamports) / LAMPORTS_PER_SOL;
+    const estSolIn = Number(lamports) / Number(LAMPORTS_PER_SOL);
 
     console.log(
       "[SELL] payer:",
@@ -205,15 +211,19 @@ export async function POST(req: Request, ctx: RouteCtx) {
       tokensRaw.toString()
     );
 
-    return ok({
-      txB64,
-      blockhash,
-      lastValidBlockHeight,
-      version: 0,
-      estSolIn,
-    });
+    return ok(
+      {
+        txB64,
+        blockhash,
+        lastValidBlockHeight,
+        version: 0,
+        estSolIn,
+      },
+      200
+    );
   } catch (e: any) {
     console.error("[/api/coins/[id]/sell] POST error:", e);
+    // if RPC fails (devnet down / Helius error) web3 throws "fetch failed"
     return bad(e?.message || "Sell route failed", 500);
   }
 }
