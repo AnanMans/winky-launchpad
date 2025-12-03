@@ -1,3 +1,4 @@
+// TEMP: test deploy
 // src/app/coin/[id]/page.tsx
 "use client";
 
