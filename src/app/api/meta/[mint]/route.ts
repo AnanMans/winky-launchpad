@@ -1,78 +1,81 @@
 // src/app/api/meta/[mint]/route.ts
-export const runtime = "nodejs";
-
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-// ------------ helpers ------------
-
-function bad(msg: string, code = 400, extra: any = {}) {
-  return NextResponse.json({ error: msg, ...extra }, { status: code });
+function bad(message: string, status = 400, extra: any = {}) {
+  return NextResponse.json({ error: message, ...extra }, { status });
 }
 
-function ok(data: any, code = 200) {
-  return NextResponse.json(data, { status: code });
+function ok(data: any) {
+  return NextResponse.json(data, { status: 200 });
 }
 
-// ------------ handler (NO on-chain TX) ------------
-
-export async function POST(
-  _req: NextRequest,
-  context: { params: Promise<{ mint: string }> }
+export async function GET(
+  req: Request,
+  ctx: { params: Promise<{ mint: string }> }
 ) {
   try {
-    const { mint } = await context.params;
-    if (!mint) return bad("Missing mint");
+    // ✅ Next 15: params must be awaited
+    const { mint } = await ctx.params;
+    const rawMint = (mint || "").trim();
+    if (!rawMint) return bad("Missing mint param", 400);
 
-    // Load coin info from Supabase
-    const { data: coin, error } = await supabaseAdmin
+    // Allow `/.../H8i...SqD.json` or `/.../H8i...SqD`
+    const mintStr = rawMint.endsWith(".json")
+      ? rawMint.slice(0, -5)
+      : rawMint;
+
+    // ✅ use `description`, not `desc`
+    const { data, error } = await supabaseAdmin
       .from("coins")
-      .select("name, symbol, description, logo_url, socials")
-      .eq("mint", mint)
+      .select("id,name,symbol,description,logo_url")
+      .eq("mint", mintStr)
       .maybeSingle();
 
     if (error) {
-      console.error("[meta] supabase error:", error);
-      return bad(error.message, 500);
+      console.error("[META] Supabase error:", error);
+      return bad("Metadata DB error", 500);
     }
 
-    // Fallbacks if coin row is missing or fields are null
-    const name: string = (coin?.name ?? "Winky Coin").slice(0, 32);
-    const symbol: string = (coin?.symbol ?? "WINKY")
-      .toUpperCase()
-      .slice(0, 10);
+    if (!data) {
+      return bad("Coin not found for mint", 404, { mint: mintStr });
+    }
 
-    // Base URL for metadata JSON
-    const metadataBase =
+    const siteBase =
       process.env.NEXT_PUBLIC_METADATA_BASE_URL ||
       process.env.SITE_BASE ||
-      "http://localhost:3000";
+      process.env.NEXT_PUBLIC_SITE_URL ||
+      "https://winky-launchpad.vercel.app";
 
-    // This is the URI Phantom and others will use (off-chain JSON)
-    const uri = `${metadataBase}/api/metadata/${mint}.json?v=${Date.now()}`;
+    const siteBaseTrimmed = siteBase.replace(/\/$/, "");
 
-    console.log(
-      "[meta] stub OK for mint",
-      mint,
-      "name:",
-      name,
-      "symbol:",
-      symbol,
-      "uri:",
-      uri
-    );
+    const imageUrl = data.logo_url || "";
+    const externalUrl = `${siteBaseTrimmed}/coin/${data.id}`;
 
-    // IMPORTANT: no sendTransaction, no Metaplex program here.
-    return ok({
-      ok: true,
-      mint,
-      name,
-      symbol,
-      uri,
-    });
+    const json = {
+      name: data.name,
+      symbol: data.symbol,
+      description: data.description || data.name,
+      image: imageUrl,
+      external_url: externalUrl,
+      attributes: [],
+      properties: {
+        category: "image",
+        files: imageUrl
+          ? [
+              {
+                uri: imageUrl,
+                type: "image/png",
+              },
+            ]
+          : [],
+      },
+    };
+
+    return ok(json);
   } catch (e: any) {
-    console.error("[meta] error:", e);
-    return bad(e?.message || String(e), 500);
+    console.error("[META] GET error:", e);
+    return bad("Metadata handler failed", 500);
   }
 }
 

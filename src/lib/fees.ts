@@ -84,3 +84,23 @@ export function buildFeeTransfers(opts: {
   return { ixs, detail };
 }
 
+// --- Winky Launchpad fee config (basis points, 1 bp = 0.01%) ---
+
+// BUY: 0.5% platform, 0% creator
+export const BUY_PLATFORM_BPS = 50;   // 0.50%
+export const BUY_CREATOR_BPS = 0;    // 0%
+
+// SELL: 0.25% platform, 0.25% creator
+export const SELL_PLATFORM_BPS = 25;  // 0.25%
+export const SELL_CREATOR_BPS = 25;   // 0.25%
+
+export const TOTAL_BUY_BPS = BUY_PLATFORM_BPS + BUY_CREATOR_BPS;   // 50 bps = 0.5%
+export const TOTAL_SELL_BPS = SELL_PLATFORM_BPS + SELL_CREATOR_BPS; // 50 bps = 0.5%
+
+// Simple helper for float amounts (UI side)
+export function applyFee(amount: number, feeBps: number) {
+  const fee = (amount * feeBps) / 10_000;
+  const net = amount - fee;
+  return { net, fee };
+}
+

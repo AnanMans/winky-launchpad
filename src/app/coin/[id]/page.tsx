@@ -8,11 +8,11 @@ import { useParams, useSearchParams } from "next/navigation";
 
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import {
-  PublicKey,
   LAMPORTS_PER_SOL,
-  Transaction,
   VersionedTransaction,
+  Transaction,
 } from "@solana/web3.js";
+
 import { Buffer } from "buffer";
 
 import {
@@ -21,6 +21,7 @@ import {
   type CurveName,
   MIGRATION_TOKENS,
 } from "@/lib/curve";
+import { TOTAL_BUY_BPS, TOTAL_SELL_BPS } from "@/lib/fees";
 
 type Coin = {
   id: string;
@@ -86,11 +87,17 @@ export default function CoinPage() {
 
   const [stats, setStats] = useState<CurveStats | null>(null);
 
+  // BUY input (SOL)
   const [buySol, setBuySol] = useState("0.05");
-  const [sellSol, setSellSol] = useState("0.01");
+
+  // SELL input is now **tokens**
+  const [sellTokensInput, setSellTokensInput] = useState("");
 
   const [flash, setFlash] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+
+  const [isSelling, setIsSelling] = useState(false);
+  const [sellError, setSellError] = useState<string | null>(null);
 
   // ----- MIGRATION DERIVED -----
   const soldDisplay = Number(
@@ -112,6 +119,7 @@ export default function CoinPage() {
   );
 
   // ----- TOKENS PER 1 SOL (SELL SIDE) -----
+  // Returns "tokens per 1 SOL" at current curve position
   const tokensPerSolSell = useMemo(() => {
     if (!coin || !stats) return 0;
     const sd =
@@ -121,10 +129,40 @@ export default function CoinPage() {
     return quoteSellTokensUi(coin.curve, coin.strength, coin.startPrice, 1, sd);
   }, [coin, stats]);
 
-  const maxSellSol = useMemo(() => {
+  // Max tokens user can sell (wallet balance)
+  const maxSellTokens = useMemo(() => tokBal || 0, [tokBal]);
+
+  // Parsed + clamped token amount we will actually try to sell
+  const sellTokens = useMemo(() => {
+    const t = Number(sellTokensInput);
+    if (!Number.isFinite(t) || t <= 0) return 0;
+    if (maxSellTokens <= 0) return 0;
+    return Math.min(t, maxSellTokens);
+  }, [sellTokensInput, maxSellTokens]);
+
+  // Gross SOL from the curve (no fees), with pool safety clamp
+  const sellSolGross = useMemo(() => {
+    if (!coin || !stats) return 0;
     if (!tokensPerSolSell || tokensPerSolSell <= 0) return 0;
-    return tokBal / tokensPerSolSell;
-  }, [tokBal, tokensPerSolSell]);
+    if (!sellTokens || sellTokens <= 0) return 0;
+
+    let solOut = sellTokens / tokensPerSolSell;
+
+    const poolSol = stats.poolSol ?? 0;
+    if (poolSol > 0) {
+      const maxOut = poolSol * 0.995; // keep ~0.5% buffer
+      if (solOut > maxOut) solOut = maxOut;
+    }
+
+    return solOut;
+  }, [coin, stats, tokensPerSolSell, sellTokens]);
+
+  // Net SOL to user after sell fees (0.25% platform + 0.25% creator in UI)
+  const sellSolNet = useMemo(() => {
+    if (!sellSolGross || sellSolGross <= 0) return 0;
+    const totalSellBps = TOTAL_SELL_BPS; // 50 bps = 0.5%
+    return sellSolGross * (1 - totalSellBps / 10_000);
+  }, [sellSolGross]);
 
   // ----- MC / FDV -----
   const marketCapSol = stats?.marketCapSol ?? 0;
@@ -243,14 +281,32 @@ export default function CoinPage() {
         return;
       }
 
+      // --- raw values from API ---
+      const poolSol = Number(j.poolSol ?? 0);
+      const soldTokens = Number(j.soldTokens ?? 0);
+      const totalSupplyTokens = Number(j.totalSupplyTokens ?? 0);
+      const priceTokensPerSol = Number(j.priceTokensPerSol ?? 0);
+      const soldDisplayVal = Number(j.soldDisplay ?? j.soldTokens ?? 0);
+
+      // --- DEX-like MC/FDV (computed on client) ---
+      const dexMarketCapSol = poolSol > 0 ? poolSol * 2 : 0;
+
+      const circulating = soldDisplayVal || soldTokens || 0;
+      const dexFdvSol =
+        dexMarketCapSol > 0 &&
+        totalSupplyTokens > 0 &&
+        circulating > 0
+          ? dexMarketCapSol * (totalSupplyTokens / circulating)
+          : dexMarketCapSol;
+
       const s: CurveStats = {
-        poolSol: Number(j.poolSol ?? 0),
-        soldTokens: Number(j.soldTokens ?? 0),
-        totalSupplyTokens: Number(j.totalSupplyTokens ?? 0),
-        priceTokensPerSol: Number(j.priceTokensPerSol ?? 0),
-        marketCapSol: Number(j.marketCapSol ?? 0),
-        fdvSol: Number(j.fdvSol ?? 0),
-        soldDisplay: Number(j.soldDisplay ?? j.soldTokens ?? 0),
+        poolSol,
+        soldTokens,
+        totalSupplyTokens,
+        priceTokensPerSol,
+        marketCapSol: dexMarketCapSol,
+        fdvSol: dexFdvSol,
+        soldDisplay: soldDisplayVal,
         isMigrated: Boolean(j.isMigrated ?? false),
         migrationThresholdTokens: Number(
           j.migrationThresholdTokens ?? MIGRATION_TOKENS
@@ -352,22 +408,24 @@ export default function CoinPage() {
   const buyTokens = useMemo(() => {
     const a = Number(buySol);
     if (!coin || !stats || !Number.isFinite(a) || a <= 0) return 0;
-    const sd =
-      stats && Number(stats.soldDisplay) > 0
-        ? Number(stats.soldDisplay)
-        : Number(stats.soldTokens ?? 0) || 0;
-    return quoteTokensUi(a, coin.curve, coin.strength, sd);
-  }, [buySol, coin, stats]);
 
-  const sellTokens = useMemo(() => {
-    const a = Number(sellSol);
-    if (!coin || !stats || !Number.isFinite(a) || a <= 0) return 0;
+    // Use soldDisplay if present, otherwise fall back to soldTokens
     const sd =
       stats && Number(stats.soldDisplay) > 0
         ? Number(stats.soldDisplay)
         : Number(stats.soldTokens ?? 0) || 0;
-    return quoteSellTokensUi(coin.curve, coin.strength, coin.startPrice, a, sd);
-  }, [sellSol, coin, stats]);
+
+    // Use shared fee config (0.5% platform, 0% creator)
+    const totalPreFeeBps = TOTAL_BUY_BPS;
+
+    // Net SOL that actually goes into the curve after fees
+    const netSol = a * (1 - totalPreFeeBps / 10_000);
+
+    if (!Number.isFinite(netSol) || netSol <= 0) return 0;
+
+    // Quote tokens using the *net* SOL, so UI matches what actually hits the curve
+    return quoteTokensUi(netSol, coin.curve, coin.strength, sd);
+  }, [buySol, coin, stats]);
 
   // ---------- ACTIONS ----------
   async function doBuy() {
@@ -398,7 +456,10 @@ export default function CoinPage() {
       const res = await fetch(`/api/coins/${encodeURIComponent(coin.id)}/buy`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ buyer: publicKey.toBase58(), amountSol: sol }),
+        body: JSON.stringify({
+          buyer: publicKey.toBase58(),
+          amountSol: sol,
+        }),
       });
 
       const j = await res.json().catch(() => ({} as any));
@@ -438,40 +499,89 @@ export default function CoinPage() {
 
   async function doSell() {
     try {
-      if (isMigrated) {
-        alert("Curve migrated. Trading is locked; wait for Raydium listing.");
-        return;
-      }
+      setIsSelling(true);
+      setSellError(null);
+
       if (!connected || !publicKey) {
         alert("Connect your wallet first.");
         return;
       }
+
       if (!coin) {
         alert("Coin not loaded yet.");
         return;
       }
+
       if (!coin.mint) {
         alert("This coin is not tradable yet (no mint configured).");
         return;
       }
 
-      const amt = Number(String(sellSol).trim());
-      if (!Number.isFinite(amt) || amt <= 0) {
-        alert("Enter a positive SOL amount to sell (e.g. 0.01)");
+      if (!tokensPerSolSell || tokensPerSolSell <= 0) {
+        alert("Price not available yet, try again in a few seconds.");
         return;
       }
+
+      const rawTokensUi = Number(String(sellTokensInput).trim());
+      if (!Number.isFinite(rawTokensUi) || rawTokensUi <= 0) {
+        alert("Enter a valid token amount to sell.");
+        return;
+      }
+
+      const maxTokens = maxSellTokens || 0;
+      if (maxTokens <= 0) {
+        alert("You don’t have any tokens to sell.");
+        return;
+      }
+
+      // Clamp to wallet balance (safety + 100% fix)
+      const tokensUi = Math.min(rawTokensUi, maxTokens);
+      if (!Number.isFinite(tokensUi) || tokensUi <= 0) {
+        alert("You don’t have enough tokens to sell.");
+        return;
+      }
+
+      // Gross SOL out from curve
+      let solGross = tokensUi / tokensPerSolSell;
+
+      // Pool safety clamp
+      const poolSol = stats?.poolSol ?? 0;
+      if (poolSol > 0) {
+        const maxOut = poolSol * 0.995;
+        if (solGross > maxOut) solGross = maxOut;
+      }
+
+      if (!Number.isFinite(solGross) || solGross <= 0) {
+        alert("Quote is zero; nothing to sell.");
+        return;
+      }
+
+      // Net SOL to user after sell fee (currently fee just stays in pool)
+      const solAmount =
+        solGross * (1 - TOTAL_SELL_BPS / 10_000);
+
+      if (!Number.isFinite(solAmount) || solAmount <= 0) {
+        alert("Quote is zero; nothing to sell.");
+        return;
+      }
+
+      const payer = publicKey.toBase58();
 
       const res = await fetch(
         `/api/coins/${encodeURIComponent(coin.id)}/sell`,
         {
           method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ seller: publicKey.toBase58(), amountSol: amt }),
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            payer,
+            solAmount, // SOL user should receive (net)
+            tokensUi,  // tokens (UI amount) we burn from the wallet
+          }),
         }
       );
 
       const text = await res.text();
-      let j: any = {};
+      let j: any = null;
       try {
         j = JSON.parse(text);
       } catch {
@@ -483,46 +593,51 @@ export default function CoinPage() {
         alert(j?.error || "Server sell failed (see console).");
         return;
       }
-      if (!j.txB64 || typeof j.txB64 !== "string") {
+
+      const { txB64, blockhash, lastValidBlockHeight } = j;
+      if (!txB64) {
         console.error("[SELL] missing txB64 in response:", j);
-        alert("Server sell failed: no transaction returned.");
+        alert("Server did not return a transaction to sign.");
         return;
       }
 
-      const raw = Uint8Array.from(atob(j.txB64), (c) => c.charCodeAt(0));
-      let tx: Transaction | VersionedTransaction;
+      const txBytes = Buffer.from(txB64, "base64");
+
+      // Support BOTH v0 and legacy transactions coming from the server.
+      let tx: VersionedTransaction | Transaction;
       try {
-        tx = VersionedTransaction.deserialize(raw);
-      } catch {
-        tx = Transaction.from(raw);
+        tx = VersionedTransaction.deserialize(txBytes);
+      } catch (e) {
+        console.warn(
+          "[SELL] v0 deserialize failed, falling back to legacy tx:",
+          e
+        );
+        tx = Transaction.from(txBytes);
       }
 
-      setPending(true);
-
-      const sig = await sendTransaction(tx, connection, {
-        skipPreflight: true,
+      const sig = await sendTransaction(tx as any, connection, {
+        skipPreflight: true, // same as your BUY path
         maxRetries: 5,
       });
 
+      console.log("[SELL] sent tx:", sig);
+
       try {
-        await connection.confirmTransaction(sig, "confirmed");
-      } catch (e2: any) {
-        console.warn("[SELL] confirmTransaction warning:", e2);
+        await connection.confirmTransaction(
+          { signature: sig, blockhash, lastValidBlockHeight },
+          "confirmed"
+        );
+      } catch (e) {
+        console.warn("[SELL] confirm warning:", e);
       }
 
-      setPending(false);
-      setFlash("Sell submitted ✅");
-      setTimeout(() => setFlash(null), 4000);
-      setTimeout(refreshBalances, 1200);
-      setTimeout(refreshStats, 1200);
-      setTimeout(refreshStats, 3000);
-    } catch (e: any) {
-      setPending(false);
-      console.error("[SELL] client error", e);
-      let msg = "Sell failed (see console for details)";
-      if (e?.message && typeof e.message === "string") msg = e.message;
-      else if (typeof e === "string") msg = e;
-      alert(msg);
+      await refreshBalances();
+      await refreshStats();
+    } catch (err: any) {
+      console.error("[SELL] error:", err);
+      setSellError(err?.message || "Sell failed");
+    } finally {
+      setIsSelling(false);
     }
   }
 
@@ -587,7 +702,8 @@ export default function CoinPage() {
               <div className="w-16 h-16 rounded-xl bg-white/10" />
             )}
 
-              Wallet<div>
+            <div>
+              <div className="text-xs text-white/60">Wallet</div>
               <h1 className="text-2xl font-bold">
                 {coin.name}{" "}
                 <span className="text-white/60">
@@ -644,12 +760,12 @@ export default function CoinPage() {
               Wallet SOL:{" "}
               <span className="font-mono">{solBal.toFixed(4)} SOL</span>
             </div>
-<div>
-  Wallet {coin.symbol}:{" "}
-  <span className="font-mono">
-    {(tokBal ?? 0).toLocaleString()}
-  </span>
-</div>
+            <div>
+              Wallet {coin.symbol}:{" "}
+              <span className="font-mono">
+                {(tokBal ?? 0).toLocaleString()}
+              </span>
+            </div>
 
             <div className="break-all">
               Mint:{" "}
@@ -691,11 +807,10 @@ export default function CoinPage() {
                 style={{ width: `${migrateProgress}%` }}
               />
             </div>
-<div className="mt-1 text-[11px] text-zinc-500">
-  {(soldDisplay ?? 0).toLocaleString()} sold /{" "}
-  {(migrateThreshold ?? 0).toLocaleString()} target
-</div>
-
+            <div className="mt-1 text-[11px] text-zinc-500">
+              {(soldDisplay ?? 0).toLocaleString()} sold /{" "}
+              {(migrateThreshold ?? 0).toLocaleString()} target
+            </div>
           </div>
         </aside>
       </section>
@@ -703,9 +818,10 @@ export default function CoinPage() {
       {/* Migration note */}
       <section className="rounded-xl border bg-black/20 p-4 grid gap-2">
         <div className="flex items-center justify-between text-sm">
-<span className="text-white/70">
-  Migration threshold: {(migrateThreshold ?? 0).toLocaleString()} sold
-</span>
+          <span className="text-white/70">
+            Migration threshold:{" "}
+            {(migrateThreshold ?? 0).toLocaleString()} sold
+          </span>
 
           <span className="font-mono">{migrateProgress}%</span>
         </div>
@@ -723,8 +839,8 @@ export default function CoinPage() {
           </div>
         ) : (
           <div className="mt-2 text-xs text-white/60">
-{(soldDisplay ?? 0).toLocaleString()} sold /{" "}
-{(migrateThreshold ?? 0).toLocaleString()} target
+            {(soldDisplay ?? 0).toLocaleString()} sold /{" "}
+            {(migrateThreshold ?? 0).toLocaleString()} target
           </div>
         )}
       </section>
@@ -756,11 +872,9 @@ export default function CoinPage() {
 
           <p className="text-white/70 text-sm">
             You’ll get ~{" "}
-<span className="font-mono">
-  {(buyTokens ?? 0).toLocaleString()}
-</span>
-
-{" "}
+            <span className="font-mono">
+              {(buyTokens ?? 0).toLocaleString()}
+            </span>{" "}
             {coin.symbol}
           </p>
 
@@ -790,13 +904,13 @@ export default function CoinPage() {
           <div className="flex items-center gap-2">
             <input
               className="px-3 py-2 rounded-lg bg-black/30 border w-40 disabled:opacity-50"
-              value={sellSol}
-              onChange={(e) => setSellSol(e.target.value)}
+              value={sellTokensInput}
+              onChange={(e) => setSellTokensInput(e.target.value)}
               inputMode="decimal"
-              placeholder="0.01"
+              placeholder="1000"
               disabled={!tradable || isMigrated}
             />
-            <span className="text-white/60">SOL</span>
+            <span className="text-white/60">{coin.symbol}</span>
           </div>
 
           <div className="mt-2 flex items-center gap-2 text-xs text-zinc-400">
@@ -807,16 +921,17 @@ export default function CoinPage() {
                 <button
                   key={label}
                   type="button"
-                  disabled={!connected || isMigrated || maxSellSol <= 0}
+                  disabled={!connected || isMigrated || maxSellTokens <= 0}
                   onClick={() => {
-                    if (maxSellSol <= 0) return;
-                    const effectivePct = p === 1 ? 0.995 : p;
-                    const raw = maxSellSol * effectivePct;
-                    const v = raw
+                    if (maxSellTokens <= 0) return;
+                    // For 100% we sell ~99.999% to avoid rounding dust
+                    const effectivePct = p === 1 ? 0.99999 : p;
+                    const tokens = maxSellTokens * effectivePct;
+                    const v = tokens
                       .toFixed(6)
                       .replace(/0+$/, "")
                       .replace(/\.$/, "");
-                    setSellSol(v);
+                    setSellTokensInput(v);
                   }}
                   className="rounded-md border border-zinc-600 px-2 py-1 text-xs hover:bg-zinc-800 disabled:opacity-40"
                 >
@@ -828,14 +943,19 @@ export default function CoinPage() {
 
           <p className="text-white/70 text-sm">
             You’ll receive ~{" "}
-            <span className="font-mono">{sellSol || "0"}</span> SOL for ~{" "}
-<span className="font-mono">
-  {(sellTokens ?? 0).toLocaleString()}
-</span>
-
-{" "}
+            <span className="font-mono">
+              {sellSolNet ? sellSolNet.toFixed(6) : "0"}
+            </span>{" "}
+            SOL for ~{" "}
+            <span className="font-mono">
+              {sellTokens ? sellTokens.toLocaleString() : "0"}
+            </span>{" "}
             {coin.symbol}
           </p>
+
+          {sellError && (
+            <p className="text-xs text-red-400">• {sellError}</p>
+          )}
 
           <button
             type="button"
@@ -846,13 +966,15 @@ export default function CoinPage() {
               !tradable ||
               isMigrated ||
               pending ||
-              maxSellSol <= 0
+              isSelling ||
+              maxSellTokens <= 0 ||
+              sellSolNet <= 0
             }
             title={
               isMigrated ? "Curve migrated (trading locked)" : undefined
             }
           >
-            Sell {coin.symbol}
+            {isSelling ? "Selling…" : `Sell ${coin.symbol}`}
           </button>
         </div>
       </section>

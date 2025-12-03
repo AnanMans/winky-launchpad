@@ -52,7 +52,7 @@ function decodeCurveState(buf: Buffer) {
 
 export async function GET(
   _req: Request,
-  ctx: { params: { id: string } }
+  ctx: { params: Promise<{ id: string }> }
 ) {
   const baseDefaults = {
     poolSol: 0,
@@ -69,7 +69,7 @@ export async function GET(
   };
 
   try {
-    const { id } = ctx.params;
+    const { id } = await ctx.params;    // 👈 important
     const coinId = (id || "").trim();
     if (!coinId) return bad("Missing id param");
 

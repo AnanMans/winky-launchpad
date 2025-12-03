@@ -25,6 +25,9 @@ import {
   createAssociatedTokenAccountInstruction,
 } from "@solana/spl-token";
 
+import { CurveName, quoteTokensUi } from "@/lib/curve";
+import { BUY_PLATFORM_BPS, TOTAL_BUY_BPS } from "@/lib/fees";
+
 // Discriminator for `trade_buy` (global:trade_buy)
 const DISC_BUY = Buffer.from([173, 172, 52, 244, 61, 65, 216, 118]);
 
@@ -37,8 +40,20 @@ function ok(data: any, code = 200) {
 
 // 1e9 lamports = 1 SOL
 const LAMPORTS_PER_SOL = 1_000_000_000;
-// Just for UI estimate: 1 SOL ≈ 1,000,000 tokens (human units, decimals = 6)
-const TOKENS_PER_SOL = 1_000_000;
+
+// ---- fee treasury ----
+const FEE_TREASURY_STR =
+  process.env.NEXT_PUBLIC_FEE_TREASURY ||
+  process.env.NEXT_PUBLIC_PLATFORM_WALLET ||
+  process.env.NEXT_PUBLIC_TREASURY;
+
+if (!FEE_TREASURY_STR) {
+  console.error(
+    "[BUY] No fee treasury configured (NEXT_PUBLIC_FEE_TREASURY / NEXT_PUBLIC_PLATFORM_WALLET / NEXT_PUBLIC_TREASURY)"
+  );
+}
+
+const FEE_TREASURY_PK = FEE_TREASURY_STR ? new PublicKey(FEE_TREASURY_STR) : null;
 
 export async function POST(
   req: Request,
@@ -65,13 +80,21 @@ export async function POST(
       return bad("amountSol must be > 0");
     }
 
-    const lamports = Math.round(amountSol * LAMPORTS_PER_SOL);
-    if (!Number.isFinite(lamports) || lamports <= 0) {
+    // Gross lamports user is spending for this BUY
+    const lamportsGross = Math.floor(amountSol * LAMPORTS_PER_SOL);
+    if (!Number.isFinite(lamportsGross) || lamportsGross <= 0) {
       return bad("Failed to compute lamports");
     }
 
-    // UI-only estimate of tokens (this is NOT sent to the program)
-    const estTokensHuman = amountSol * TOKENS_PER_SOL;
+    // Fee split: 0.5% platform, 0% creator
+    const feeLamports = Math.floor(
+      (lamportsGross * TOTAL_BUY_BPS) / 10_000
+    ); // TOTAL_BUY_BPS = 50
+    const lamportsToCurve = lamportsGross - feeLamports;
+
+    if (lamportsToCurve <= 0) {
+      return bad("Net lamports to curve is <= 0 after fees");
+    }
 
     // ---------- resolve coin + mint ----------
     const conn = new Connection(RPC_URL, "confirmed");
@@ -84,12 +107,19 @@ export async function POST(
       mintPk = null;
     }
 
-    let coinRow: { id: string; mint: string; creator: string } | null = null;
+    // also fetch curve + strength so we can estimate tokens for logs
+    let coinRow: {
+      id: string;
+      mint: string;
+      creator: string;
+      curve: CurveName;
+      strength: number;
+    } | null = null;
 
     if (mintPk) {
       const { data, error } = await supabaseAdmin
         .from("coins")
-        .select("id,mint,creator")
+        .select("id,mint,creator,curve,strength")
         .eq("mint", mintPk.toBase58())
         .maybeSingle();
 
@@ -102,7 +132,7 @@ export async function POST(
     } else {
       const { data, error } = await supabaseAdmin
         .from("coins")
-        .select("id,mint,creator")
+        .select("id,mint,creator,curve,strength")
         .eq("id", idStr)
         .maybeSingle();
 
@@ -141,6 +171,28 @@ export async function POST(
       return bad("Server: state PDA not found. Run /init for this mint.", 400);
     }
 
+    // ---------- curve estimate for logs (optional) ----------
+    let estTokensHuman = 0;
+    try {
+      const data = stateInfo.data;
+      // EXAMPLE: sold_tokens at bytes [8..16] as u64 LE
+      const soldLittle = data.subarray(8, 16);
+      const sold = Number(soldLittle.readBigUint64LE(0));
+
+      // IMPORTANT: use **net** SOL that hits the curve
+      const netSol = lamportsToCurve / LAMPORTS_PER_SOL;
+
+      estTokensHuman = quoteTokensUi(
+        netSol,
+        (coinRow.curve as CurveName) || "linear",
+        Number(coinRow.strength || 1),
+        sold
+      );
+    } catch (e) {
+      console.warn("[BUY] estTokensHuman curve estimate failed:", e);
+      estTokensHuman = 0;
+    }
+
     // ---------- ensure buyer ATA ----------
     const buyerAta = getAssociatedTokenAddressSync(
       mintPk,
@@ -169,31 +221,42 @@ export async function POST(
       ixs.push(createAtaIx);
     }
 
-    // 2) Move SOL into curve PDA (liquidity)
+    // 2) Move **net** SOL into curve PDA (liquidity)
     ixs.push(
       SystemProgram.transfer({
         fromPubkey: buyer,
         toPubkey: state,
-        lamports,
+        lamports: lamportsToCurve,
       })
     );
 
-    // 3) TradeBuy instruction
-    //    Program expects: [disc][lamports_in: u64]
-    const buf = Buffer.alloc(8);
-    buf.writeBigUInt64LE(BigInt(lamports), 0);
-    const data = Buffer.concat([DISC_BUY, buf]);
+    // 3) Platform fee: buyer -> fee treasury
+    if (feeLamports > 0 && FEE_TREASURY_PK) {
+      ixs.push(
+        SystemProgram.transfer({
+          fromPubkey: buyer,
+          toPubkey: FEE_TREASURY_PK,
+          lamports: feeLamports,
+        })
+      );
+    }
 
-    // MUST match TradeBuy accounts in lib.rs:
-    // payer, mint, state, mint_auth_pda, buyer_ata, system_program, token_program
+    // 4) TradeBuy instruction
+    //    Program expects: [disc][lamports_in: u64] where lamports_in = net sent to curve
+    const buf = Buffer.alloc(8);
+    buf.writeBigUInt64LE(BigInt(lamportsToCurve), 0);
+    const dataBuf = Buffer.concat([DISC_BUY, buf]);
+
+    // MUST match TradeBuyAcct in the on-chain program:
+    // payer, mint, state, mint_auth_pda, buyer_ata, token_program, system_program
     const keys = [
       { pubkey: buyer, isSigner: true, isWritable: true }, // payer
       { pubkey: mintPk, isSigner: false, isWritable: true }, // mint
-      { pubkey: state, isSigner: false, isWritable: true }, // curve state
-      { pubkey: mAuth, isSigner: false, isWritable: false }, // mint auth PDA
+      { pubkey: state, isSigner: false, isWritable: true }, // curve state PDA
+      { pubkey: mAuth, isSigner: false, isWritable: false }, // mint_auth_pda
       { pubkey: buyerAta, isSigner: false, isWritable: true }, // buyer ATA
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // token_program
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
     ];
 
     console.log(
@@ -204,10 +267,10 @@ export async function POST(
     const ix = new TransactionInstruction({
       programId: PROGRAM_ID,
       keys,
-      data,
+      data: dataBuf,
     });
 
-    ixs.push(ix); // [maybe] ATA create + SOL transfer + TradeBuy
+    ixs.push(ix); // [maybe] ATA create + SOL transfers + TradeBuy
 
     // ---------- build final tx ----------
     const { blockhash, lastValidBlockHeight } =
@@ -231,8 +294,12 @@ export async function POST(
       state.toBase58(),
       "buyer:",
       buyer.toBase58(),
-      "lamports:",
-      lamports,
+      "lamportsGross:",
+      lamportsGross,
+      "lamportsToCurve:",
+      lamportsToCurve,
+      "feeLamports:",
+      feeLamports,
       "estTokensHuman:",
       estTokensHuman
     );
@@ -242,7 +309,7 @@ export async function POST(
       blockhash,
       lastValidBlockHeight,
       version: 0,
-      estTokensHuman,
+      estTokensHuman, // purely informational
     });
   } catch (e: any) {
     console.error("[/api/coins/[id]/buy] error:", e);
