@@ -499,39 +499,45 @@ export default function CoinPage() {
   }
 
   async function doSell() {
-    try {
-      setIsSelling(true);
-      setSellError(null);
+    setIsSelling(true);
+    setSellError(null);
 
+    try {
       if (!connected || !publicKey) {
         alert("Connect your wallet first.");
+        setIsSelling(false);
         return;
       }
 
       if (!coin) {
         alert("Coin not loaded yet.");
+        setIsSelling(false);
         return;
       }
 
       if (!coin.mint) {
         alert("This coin is not tradable yet (no mint configured).");
+        setIsSelling(false);
         return;
       }
 
       if (!tokensPerSolSell || tokensPerSolSell <= 0) {
         alert("Price not available yet, try again in a few seconds.");
+        setIsSelling(false);
         return;
       }
 
       const rawTokensUi = Number(String(sellTokensInput).trim());
       if (!Number.isFinite(rawTokensUi) || rawTokensUi <= 0) {
         alert("Enter a valid token amount to sell.");
+        setIsSelling(false);
         return;
       }
 
       const maxTokens = maxSellTokens || 0;
       if (maxTokens <= 0) {
         alert("You don’t have any tokens to sell.");
+        setIsSelling(false);
         return;
       }
 
@@ -539,34 +545,42 @@ export default function CoinPage() {
       const tokensUi = Math.min(rawTokensUi, maxTokens);
       if (!Number.isFinite(tokensUi) || tokensUi <= 0) {
         alert("You don’t have enough tokens to sell.");
+        setIsSelling(false);
         return;
       }
 
-      // Gross SOL out from curve
+      // Gross SOL out from curve (before fees)
       let solGross = tokensUi / tokensPerSolSell;
 
-      // Pool safety clamp
+      // Pool safety clamp – don’t drain the curve state
       const poolSol = stats?.poolSol ?? 0;
       if (poolSol > 0) {
-        const maxOut = poolSol * 0.995;
+        const maxOut = poolSol * 0.995; // keep 0.5% buffer in the pool
         if (solGross > maxOut) solGross = maxOut;
       }
 
       if (!Number.isFinite(solGross) || solGross <= 0) {
         alert("Quote is zero; nothing to sell.");
+        setIsSelling(false);
         return;
       }
 
-      // Net SOL to user after sell fee (currently fee just stays in pool)
-      const solAmount =
-        solGross * (1 - TOTAL_SELL_BPS / 10_000);
-
+      // Net SOL to user after sell fee
+      const solAmount = solGross * (1 - TOTAL_SELL_BPS / 10_000);
       if (!Number.isFinite(solAmount) || solAmount <= 0) {
         alert("Quote is zero; nothing to sell.");
+        setIsSelling(false);
         return;
       }
 
       const payer = publicKey.toBase58();
+
+      console.log("[SELL] request =>", {
+        coinId: coin.id,
+        payer,
+        solAmount,
+        tokensUi,
+      });
 
       const res = await fetch(
         `/api/coins/${encodeURIComponent(coin.id)}/sell`,
@@ -586,19 +600,21 @@ export default function CoinPage() {
       try {
         j = JSON.parse(text);
       } catch {
-        // ignore
+        // non-JSON error – keep raw text
       }
 
       if (!res.ok) {
-        console.error("[SELL] server error payload:", j || text);
+        console.error("[SELL] server error:", j || text);
         alert(j?.error || "Server sell failed (see console).");
+        setIsSelling(false);
         return;
       }
 
-      const { txB64, blockhash, lastValidBlockHeight } = j;
+      const { txB64, blockhash, lastValidBlockHeight } = j || {};
       if (!txB64) {
         console.error("[SELL] missing txB64 in response:", j);
         alert("Server did not return a transaction to sign.");
+        setIsSelling(false);
         return;
       }
 
@@ -616,24 +632,35 @@ export default function CoinPage() {
         tx = Transaction.from(txBytes);
       }
 
+      console.log("[SELL] sending tx to wallet…");
+
       const sig = await sendTransaction(tx as any, connection, {
-        skipPreflight: true, // same as your BUY path
+        skipPreflight: true,
         maxRetries: 5,
       });
 
       console.log("[SELL] sent tx:", sig);
 
+      // Confirm – if blockhash info missing, fall back to simple confirm
       try {
-        await connection.confirmTransaction(
-          { signature: sig, blockhash, lastValidBlockHeight },
-          "confirmed"
-        );
+        if (blockhash && lastValidBlockHeight) {
+          await connection.confirmTransaction(
+            { signature: sig, blockhash, lastValidBlockHeight },
+            "confirmed"
+          );
+        } else {
+          await connection.confirmTransaction(sig, "confirmed");
+        }
       } catch (e) {
         console.warn("[SELL] confirm warning:", e);
       }
 
+      // Refresh UI after trade
       await refreshBalances();
       await refreshStats();
+
+      // Optional: clear the input so user sees fresh state
+      // setSellTokensInput("");  // uncomment if you have this setter
     } catch (err: any) {
       console.error("[SELL] error:", err);
       setSellError(err?.message || "Sell failed");
