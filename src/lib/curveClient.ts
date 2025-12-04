@@ -26,62 +26,54 @@ function discSell() {
   return Buffer.from([59, 162, 77, 109, 9, 82, 216, 160]); // trade_sell
 }
 
-/* Small helper to read protocol treasury from env */
-function getProtocolTreasury(): PublicKey | null {
-  const k = process.env.NEXT_PUBLIC_FEE_TREASURY;
-  if (!k) return null;
-  try {
-    return new PublicKey(k);
-  } catch {
-    console.warn("NEXT_PUBLIC_FEE_TREASURY is not a valid pubkey:", k);
-    return null;
-  }
-}
+// protocol / fee treasury (platform wallet)
+const FEE_TREASURY = new PublicKey(
+  process.env.NEXT_PUBLIC_FEE_TREASURY ||
+    process.env.NEXT_PUBLIC_TREASURY || // fallback
+    process.env.NEXT_PUBLIC_PLATFORM_WALLET!
+);
 
 /* ======================= BUY ======================= */
 /**
- * trade_buy transaction:
- * - optional fee transfers (platform + creator) BEFORE the buy
- * - system transfer payer -> curve state PDA
- * - program ix trade_buy(lamports)
+ * trade_buy with platform/creator fee.
  *
- * `creator` is optional; if you pass it, sell-side fees will share with creator.
+ * - amountSol = amount going into the curve (basis for price & tokens).
+ * - Fees are charged ON TOP from the user's wallet:
+ *     payer -> platform + optional creator
+ *
+ * Tx flow:
+ *   1) fee transfers
+ *   2) system transfer payer -> curve state PDA (trade lamports)
+ *   3) program ix: trade_buy(lamports)
  */
 export async function buildBuyTx(
   conn: Connection,
   mint: PublicKey,
   payer: PublicKey,
   amountSol: number,
-  creator?: PublicKey | null
+  creatorAddress?: PublicKey | null // optional; if not provided, all fee -> platform
 ) {
   const state = curveStatePda(mint);
-  const lamports = Math.floor((amountSol || 0) * 1e9);
+  const tradeLamports = Math.floor((amountSol || 0) * 1e9);
 
-  const allIxs: TransactionInstruction[] = [];
+  // 1) fee transfers (pre / buy side)
+  const { ixs: feeIxs } = buildFeeTransfers({
+    feePayer: payer,
+    tradeSol: amountSol,
+    phase: "pre",
+    protocolTreasury: FEE_TREASURY,
+    creatorAddress: creatorAddress ?? null,
+  });
 
-  // 0) Fee transfers (env-based bps)
-  const protocolTreasury = getProtocolTreasury();
-  if (protocolTreasury && amountSol > 0) {
-    const { ixs: feeIxs } = buildFeeTransfers({
-      feePayer: payer,
-      tradeSol: amountSol,
-      phase: "pre", // BUY side
-      protocolTreasury,
-      creatorAddress: creator ?? null,
-    });
-    allIxs.push(...feeIxs);
-  }
-
-  // 1) system transfer payer -> state PDA (principal)
+  // 2) system transfer payer -> state (actual trade amount)
   const transferIx = SystemProgram.transfer({
     fromPubkey: payer,
     toPubkey: state,
-    lamports,
+    lamports: tradeLamports,
   });
-  allIxs.push(transferIx);
 
-  // 2) program ix: trade_buy(payer, mint, state, system_program, lamports)
-  const data = Buffer.concat([discBuy(), u64(lamports)]);
+  // 3) program ix: trade_buy(payer, mint, state, system_program)
+  const data = Buffer.concat([discBuy(), u64(tradeLamports)]);
   const keys = [
     { pubkey: payer, isSigner: true, isWritable: true },
     { pubkey: mint, isSigner: false, isWritable: false },
@@ -93,11 +85,10 @@ export async function buildBuyTx(
     keys,
     data,
   });
-  allIxs.push(buyIx);
 
   const { blockhash } = await conn.getLatestBlockhash("confirmed");
   const tx = new Transaction();
-  tx.add(...allIxs);
+  tx.add(...feeIxs, transferIx, buyIx);
   tx.recentBlockhash = blockhash;
   tx.feePayer = payer;
   return tx;
@@ -105,28 +96,31 @@ export async function buildBuyTx(
 
 /* ======================= SELL ======================= */
 /**
- * trade_sell transaction:
- * - program ix trade_sell(lamports)
- * - optional fee transfers (platform + creator) AFTER the sell
+ * trade_sell with platform/creator fee.
  *
- * NOTE: this version still uses only `lamports` for the program; your
- * on-chain `trade_sell` signature must match (lamports only) for this
- * to work. If you later pass `tokens_raw` on-chain we’ll extend this.
+ * - amountSol = gross amount you want from the curve PDA.
+ * - Program moves lamports from curve PDA -> payer.
+ * - Then we send a small % fee from payer -> platform/creator.
+ *
+ * Tx flow:
+ *   1) program ix: trade_sell(lamports)
+ *   2) fee transfers payer -> platform + optional creator
+ *
+ * NOTE: We are not touching the on-chain program for fees.
+ *       Fees are done with extra SystemProgram.transfer instructions.
  */
 export async function buildSellTx(
   conn: Connection,
   mint: PublicKey,
   payer: PublicKey,
   amountSol: number,
-  creator?: PublicKey | null
+  creatorAddress?: PublicKey | null
 ) {
   const state = curveStatePda(mint);
-  const lamports = Math.floor((amountSol || 0) * 1e9);
+  const tradeLamports = Math.floor((amountSol || 0) * 1e9);
 
-  const allIxs: TransactionInstruction[] = [];
-
-  // 1) program ix: trade_sell(payer, mint, state, system_program, lamports)
-  const data = Buffer.concat([discSell(), u64(lamports)]);
+  // program ix: trade_sell(payer, mint, state, system_program)
+  const data = Buffer.concat([discSell(), u64(tradeLamports)]);
   const keys = [
     { pubkey: payer, isSigner: true, isWritable: true },
     { pubkey: mint, isSigner: false, isWritable: false },
@@ -138,24 +132,19 @@ export async function buildSellTx(
     keys,
     data,
   });
-  allIxs.push(sellIx);
 
-  // 2) Fee transfers AFTER the sell
-  const protocolTreasury = getProtocolTreasury();
-  if (protocolTreasury && amountSol > 0) {
-    const { ixs: feeIxs } = buildFeeTransfers({
-      feePayer: payer,
-      tradeSol: amountSol,
-      phase: "post", // SELL side
-      protocolTreasury,
-      creatorAddress: creator ?? null,
-    });
-    allIxs.push(...feeIxs);
-  }
+  // fee transfers (post / sell side) – from payer AFTER they receive from curve
+  const { ixs: feeIxs } = buildFeeTransfers({
+    feePayer: payer,
+    tradeSol: amountSol,
+    phase: "post",
+    protocolTreasury: FEE_TREASURY,
+    creatorAddress: creatorAddress ?? null,
+  });
 
   const { blockhash } = await conn.getLatestBlockhash("confirmed");
   const tx = new Transaction();
-  tx.add(...allIxs);
+  tx.add(sellIx, ...feeIxs);
   tx.recentBlockhash = blockhash;
   tx.feePayer = payer;
   return tx;
