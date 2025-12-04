@@ -1,4 +1,16 @@
 // src/lib/fees.ts
+//
+// Centralized fee helpers for Winky Launchpad.
+//
+// We use env-based basis points (bps) so you can tune fees without code changes:
+//
+//   F_PROTOCOL_BP_PRE   - buy side platform fee (bps)
+//   F_CREATOR_BP_PRE    - buy side creator  fee (bps)
+//   F_PROTOCOL_BP_POST  - sell side platform fee (bps)
+//   F_CREATOR_BP_POST   - sell side creator  fee (bps)
+//
+// 1 bp = 0.01%   →   50 bps = 0.50%
+
 import {
   LAMPORTS_PER_SOL,
   PublicKey,
@@ -8,45 +20,21 @@ import {
 
 export type Phase = "pre" | "post";
 
-/**
- * ---- ENV-driven basis points ----
- * Values are in bps (1 bp = 0.01%).
- *
- * PRE  = BUY side fees
- * POST = SELL side fees
- */
+/** Read protocol/creator bps for given phase from env */
+function getEnvBps(phase: Phase) {
+  const protKey =
+    phase === "pre" ? "F_PROTOCOL_BP_PRE" : "F_PROTOCOL_BP_POST";
+  const creatorKey =
+    phase === "pre" ? "F_CREATOR_BP_PRE" : "F_CREATOR_BP_POST";
 
-const ENV_PROTOCOL_PRE = Number(process.env.F_PROTOCOL_BP_PRE ?? 50); // default 0.50%
-const ENV_CREATOR_PRE = Number(process.env.F_CREATOR_BP_PRE ?? 0); // default 0%
+  const protocolBps = Number(process.env[protKey] ?? 0);
+  const creatorBps = Number(process.env[creatorKey] ?? 0);
+  const totalBps = protocolBps + creatorBps;
 
-const ENV_PROTOCOL_POST = Number(process.env.F_PROTOCOL_BP_POST ?? 30); // default 0.30%
-const ENV_CREATOR_POST = Number(process.env.F_CREATOR_BP_POST ?? 70); // default 0.70%
-
-// ---------- Core fee config by phase ----------
-
-/**
- * Returns total / creator / protocol bps for this trade.
- * We currently ignore trade size tiers and just use ENV values.
- */
-function tierBpsFor(_tradeSol: number, phase: Phase) {
-  if (phase === "pre") {
-    const totalBps = ENV_PROTOCOL_PRE + ENV_CREATOR_PRE;
-    return {
-      totalBps,
-      creatorBps: ENV_CREATOR_PRE,
-      protocolBps: ENV_PROTOCOL_PRE,
-    };
-  } else {
-    const totalBps = ENV_PROTOCOL_POST + ENV_CREATOR_POST;
-    return {
-      totalBps,
-      creatorBps: ENV_CREATOR_POST,
-      protocolBps: ENV_PROTOCOL_POST,
-    };
-  }
+  return { totalBps, creatorBps, protocolBps };
 }
 
-/** Absolute caps (lamports) to protect whales; driven by env if set */
+/** Absolute caps (lamports) to protect whales */
 function lamportsCapFor(phase: Phase) {
   const defPre = 500_000_000; // 0.5 SOL
   const defPost = 250_000_000; // 0.25 SOL
@@ -56,35 +44,63 @@ function lamportsCapFor(phase: Phase) {
 }
 
 /**
- * Compute total / creator / protocol fees for a given trade.
+ * Core fee math in lamports.
+ *
+ * tradeLamports: gross trade size in lamports
+ * tradeSol     : same amount in SOL (float) for sanity checking
  */
 export function computeFeeLamports(
   tradeLamports: number,
   tradeSol: number,
   phase: Phase,
-  overrides?:
-    | { totalBps?: number; creatorBps?: number; protocolBps?: number }
-    | null
+  overrides?: {
+    totalBps?: number;
+    creatorBps?: number;
+    protocolBps?: number;
+  } | null
 ) {
   const cap = lamportsCapFor(phase);
 
-  const tier = tierBpsFor(tradeSol, phase);
-  const totalBps = overrides?.totalBps ?? tier.totalBps;
-  const creatorBps = overrides?.creatorBps ?? tier.creatorBps;
-  const protocolBps =
-    overrides?.protocolBps ?? Math.max(totalBps - creatorBps, 0);
+  let { totalBps, creatorBps, protocolBps } = getEnvBps(phase);
+
+  // Allow call-site overrides (optional)
+  if (overrides?.totalBps !== undefined) totalBps = overrides.totalBps;
+  if (overrides?.creatorBps !== undefined) creatorBps = overrides.creatorBps;
+  if (overrides?.protocolBps !== undefined)
+    protocolBps = overrides.protocolBps;
+
+  if (
+    !Number.isFinite(tradeSol) ||
+    tradeLamports <= 0 ||
+    !Number.isFinite(totalBps) ||
+    totalBps <= 0
+  ) {
+    return {
+      feeTotal: 0,
+      protocol: 0,
+      creator: 0,
+      cap,
+      totalBps,
+      creatorBps,
+      protocolBps,
+    };
+  }
 
   const raw = Math.floor((tradeLamports * totalBps) / 10_000);
   const feeTotal = Math.min(raw, cap);
 
-  const creator = Math.floor((feeTotal * creatorBps) / Math.max(totalBps, 1));
+  const creator = Math.floor(
+    (feeTotal * creatorBps) / Math.max(totalBps, 1)
+  );
   const protocol = feeTotal - creator;
 
   return { feeTotal, protocol, creator, cap, totalBps, creatorBps, protocolBps };
 }
 
 /**
- * Build SystemProgram.transfer ixs for protocol + creator fees.
+ * Build fee transfer instructions (protocol + optional creator).
+ *
+ * These are **pure SystemProgram.transfer** Ixs, independent of the program.
  */
 export function buildFeeTransfers(opts: {
   feePayer: PublicKey;
@@ -92,9 +108,11 @@ export function buildFeeTransfers(opts: {
   phase: Phase;
   protocolTreasury: PublicKey;
   creatorAddress?: PublicKey | null;
-  overrides?:
-    | { totalBps?: number; creatorBps?: number; protocolBps?: number }
-    | null;
+  overrides?: {
+    totalBps?: number;
+    creatorBps?: number;
+    protocolBps?: number;
+  } | null;
 }): {
   ixs: TransactionInstruction[];
   detail: ReturnType<typeof computeFeeLamports>;
@@ -108,6 +126,7 @@ export function buildFeeTransfers(opts: {
   );
 
   const ixs: TransactionInstruction[] = [];
+
   if (detail.protocol > 0) {
     ixs.push(
       SystemProgram.transfer({
@@ -117,6 +136,7 @@ export function buildFeeTransfers(opts: {
       })
     );
   }
+
   if (detail.creator > 0 && opts.creatorAddress) {
     ixs.push(
       SystemProgram.transfer({
@@ -130,15 +150,15 @@ export function buildFeeTransfers(opts: {
   return { ixs, detail };
 }
 
-// --- Simple UI helpers (kept for display, not used in tx building) ---
+/* ===== Simple UI helpers (you already had these, kept for compatibility) ===== */
 
-// BUY: 0.5% platform, 0% creator (defaults, can diverge from ENV if you want)
-export const BUY_PLATFORM_BPS = ENV_PROTOCOL_PRE;
-export const BUY_CREATOR_BPS = ENV_CREATOR_PRE;
+// BUY: 0.5% platform, 0% creator (used only for UI, real math comes from env)
+export const BUY_PLATFORM_BPS = 50; // 0.50%
+export const BUY_CREATOR_BPS = 0; // 0%
 
-// SELL: e.g. 0.3% platform, 0.7% creator (from ENV)
-export const SELL_PLATFORM_BPS = ENV_PROTOCOL_POST;
-export const SELL_CREATOR_BPS = ENV_CREATOR_POST;
+// SELL: 0.25% platform, 0.25% creator (UI only; on-chain/env uses F_*_POST)
+export const SELL_PLATFORM_BPS = 25; // 0.25%
+export const SELL_CREATOR_BPS = 25; // 0.25%
 
 export const TOTAL_BUY_BPS = BUY_PLATFORM_BPS + BUY_CREATOR_BPS;
 export const TOTAL_SELL_BPS = SELL_PLATFORM_BPS + SELL_CREATOR_BPS;
