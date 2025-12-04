@@ -610,32 +610,33 @@ async function doSell() {
       tx = Transaction.from(txBytes);
     }
 
-    const sig = await sendTransaction(tx as any, connection, {
-      skipPreflight: true,
-      maxRetries: 5,
-    });
+const sig = await sendTransaction(tx as any, connection, {
+  skipPreflight: true,
+  maxRetries: 5,
+});
 
-    console.log("[SELL] sent tx:", sig);
+console.log("[SELL] sent tx:", sig);
 
-    // ---- IMPORTANT CHANGE HERE ----
-    // Use simple confirm (only by signature) + timeout,
-    // so it never blocks the UI forever even if RPC is slow.
-    try {
-      const confirmPromise = connection.confirmTransaction(sig, "confirmed");
-      const timeout = new Promise<void>((resolve) =>
-        setTimeout(resolve, 20_000)
-      );
-      await Promise.race([confirmPromise, timeout]);
-    } catch (e) {
-      console.warn("[SELL] confirm warning:", e);
-    }
+// ---- NEW CONFIRM LOGIC ----
+// Just confirm by signature, and don't block UI longer than ~20s.
+try {
+  const confirmPromise = connection.confirmTransaction(sig, "confirmed");
+  const timeout = new Promise<void>((resolve) =>
+    setTimeout(resolve, 20_000) // you can lower to e.g. 10_000 if you want
+  );
 
-    // Refresh balances & stats after sell
-    await refreshBalances();
-    await refreshStats();
+  await Promise.race([confirmPromise, timeout]);
+} catch (e) {
+  console.warn("[SELL] confirm warning:", e);
+}
 
-    // Clear input so next sell starts “fresh”
-    setSellTokensInput("");
+// Refresh balances & stats after sell
+await refreshBalances();
+await refreshStats();
+
+// Clear input so next sell starts “fresh”
+setSellTokensInput("");
+
   } catch (err: any) {
     console.error("[SELL] error:", err);
     setSellError(err?.message || "Sell failed");
