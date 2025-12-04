@@ -10,19 +10,12 @@ import {
   TransactionMessage,
   VersionedTransaction,
 } from "@solana/web3.js";
-import {
-  TOKEN_PROGRAM_ID,
-  getAssociatedTokenAddressSync,
-} from "@solana/spl-token";
+import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { Buffer } from "buffer";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-// ✅ Use same inline RPC logic as BUY route
-const RPC_URL =
-  process.env.NEXT_PUBLIC_SOLANA_RPC ||
-  process.env.NEXT_PUBLIC_RPC_URL ||
-  process.env.RPC ||
-  "https://api.devnet.solana.com";
+// ✅ use the SAME config as BUY route
+import { PROGRAM_ID, RPC_URL, TOKEN_PROGRAM_ID } from "@/lib/config";
 
 function bad(msg: string, code = 400, extra: any = {}) {
   return NextResponse.json({ error: msg, ...extra }, { status: code });
@@ -37,10 +30,6 @@ const TRADE_SELL_DISC = Buffer.from("3ba24d6d0952d8a0", "hex");
 // 1 SOL = 1e9 lamports
 const LAMPORTS_PER_SOL = 1_000_000_000n;
 
-// Our memecoins are always 6 decimals
-const TOKEN_DECIMALS = 6;
-const TOKEN_MULTIPLIER = 10 ** TOKEN_DECIMALS;
-
 function u64ToLeBuffer(v: bigint): Buffer {
   const b = Buffer.alloc(8);
   b.writeBigUInt64LE(v);
@@ -51,17 +40,9 @@ type RouteCtx = {
   params: Promise<{ id: string }>;
 };
 
-const PROGRAM_ID_STR =
-  process.env.NEXT_PUBLIC_PROGRAM_ID || process.env.PROGRAM_ID;
-
-if (!PROGRAM_ID_STR) {
-  console.error("[/api/coins/[id]/sell] PROGRAM_ID missing in env");
-}
-
-const PROGRAM_ID = PROGRAM_ID_STR ? new PublicKey(PROGRAM_ID_STR) : null;
-
 export async function POST(req: Request, ctx: RouteCtx) {
   if (!PROGRAM_ID) {
+    console.error("[SELL] PROGRAM_ID missing in config");
     return bad("PROGRAM_ID not configured on server", 500);
   }
 
@@ -100,7 +81,7 @@ export async function POST(req: Request, ctx: RouteCtx) {
       .maybeSingle();
 
     if (error) {
-      console.error("[/api/coins/[id]/sell] supabase error:", error);
+      console.error("[SELL] supabase error:", error);
       return bad(error.message, 500);
     }
     if (!coin || !coin.mint) {
@@ -113,17 +94,41 @@ export async function POST(req: Request, ctx: RouteCtx) {
     const connection = new Connection(RPC_URL, "confirmed");
 
     // -------- figure out raw token amount & ensure user has it --------
-    const tokensRaw = BigInt(Math.floor(tokensUi * TOKEN_MULTIPLIER));
+    let supplyInfo;
+    try {
+      supplyInfo = await connection.getTokenSupply(mintPk, "confirmed");
+    } catch (e: any) {
+      console.error("[SELL] getTokenSupply failed:", e);
+      return bad(
+        "RPC getTokenSupply failed: " + (e?.message || "unknown"),
+        500
+      );
+    }
+
+    const decimals = supplyInfo.value.decimals ?? 9;
+    const multiplier = 10 ** decimals; // safe in JS for 6–9 decimals
+    const tokensRaw = BigInt(Math.floor(tokensUi * multiplier));
+
     if (tokensRaw <= 0n) {
       return bad("Token amount too small to sell", 400);
     }
 
     const userAta = getAssociatedTokenAddressSync(mintPk, payer, false);
 
-    const ataBalInfo = await connection.getTokenAccountBalance(
-      userAta,
-      "confirmed"
-    );
+    let ataBalInfo;
+    try {
+      ataBalInfo = await connection.getTokenAccountBalance(
+        userAta,
+        "confirmed"
+      );
+    } catch (e: any) {
+      console.error("[SELL] getTokenAccountBalance failed:", e);
+      return bad(
+        "RPC getTokenAccountBalance failed: " + (e?.message || "unknown"),
+        500
+      );
+    }
+
     const ataRaw = BigInt(ataBalInfo.value.amount ?? "0");
     if (ataRaw < tokensRaw) {
       return bad("Not enough tokens in wallet", 400, {
@@ -144,7 +149,17 @@ export async function POST(req: Request, ctx: RouteCtx) {
       return bad("Lamports amount must be > 0", 400);
     }
 
-    const stateBalance = await connection.getBalance(statePk, "confirmed");
+    let stateBalance: number;
+    try {
+      stateBalance = await connection.getBalance(statePk, "confirmed");
+    } catch (e: any) {
+      console.error("[SELL] getBalance(statePk) failed:", e);
+      return bad(
+        "RPC getBalance failed: " + (e?.message || "unknown"),
+        500
+      );
+    }
+
     if (stateBalance <= 0) {
       return bad("Curve pool has no SOL liquidity", 400);
     }
@@ -157,7 +172,7 @@ export async function POST(req: Request, ctx: RouteCtx) {
 
     if (lamports > maxPayout) {
       console.warn(
-        "[/api/coins/[id]/sell] Clamping lamports from",
+        "[SELL] Clamping lamports from",
         lamports.toString(),
         "to",
         maxPayout.toString()
@@ -175,7 +190,7 @@ export async function POST(req: Request, ctx: RouteCtx) {
     const sellIx = new TransactionInstruction({
       programId: PROGRAM_ID,
       keys: [
-        { pubkey: payer, isSigner: true, isWritable: true }, // payer (signer, gets SOL)
+        { pubkey: payer, isSigner: true, isWritable: true }, // payer (gets SOL)
         { pubkey: mintPk, isSigner: false, isWritable: true }, // mint
         { pubkey: statePk, isSigner: false, isWritable: true }, // curve state PDA
         { pubkey: userAta, isSigner: false, isWritable: true }, // seller_ata
@@ -185,8 +200,19 @@ export async function POST(req: Request, ctx: RouteCtx) {
       data,
     });
 
-    const { blockhash, lastValidBlockHeight } =
-      await connection.getLatestBlockhash("confirmed");
+    let blockhash: string;
+    let lastValidBlockHeight: number;
+    try {
+      const res = await connection.getLatestBlockhash("confirmed");
+      blockhash = res.blockhash;
+      lastValidBlockHeight = res.lastValidBlockHeight;
+    } catch (e: any) {
+      console.error("[SELL] getLatestBlockhash failed:", e);
+      return bad(
+        "RPC getLatestBlockhash failed: " + (e?.message || "unknown"),
+        500
+      );
+    }
 
     const messageV0 = new TransactionMessage({
       payerKey: payer,
@@ -224,8 +250,7 @@ export async function POST(req: Request, ctx: RouteCtx) {
       200
     );
   } catch (e: any) {
-    console.error("[/api/coins/[id]/sell] POST error:", e);
-    // web3 "fetch failed" etc. will surface here
+    console.error("[/api/coins/[id]/sell] POST error (top-level):", e);
     return bad(e?.message || "Sell route failed", 500);
   }
 }
