@@ -3,7 +3,7 @@
 // Centralized curve math for UI + API quoting.
 //
 // We model price as "tokens per 1 SOL" (higher = cheaper tokens).
-// - Linear  : smooth decrease as sold grows
+// - Linear  : smooth decrease as sold grows (now matches on-chain math)
 // - Degen   : exponential (cheap early, rips up later)
 // - Random  : casino mode, deterministic pseudo-random around a base curve
 
@@ -11,7 +11,7 @@ export type CurveName = "linear" | "degen" | "random";
 
 // We treat the bonding-curve segment as 1M tokens (your migration threshold),
 // even though total supply is 1B. Above this we migrate to Raydium.
-const CURVE_RANGE_TOKENS = 1_000_000;
+const CURVE_RANGE_TOKENS = 700_000_000;
 
 // This is what the UI / stats use as the migration target.
 // IMPORTANT: keep this as a plain number (no `n`, no string) so we don't get NaN.
@@ -52,11 +52,21 @@ function tokensPerSolForSold(
   const p = progress(soldTokens); // 0 → 1 across the 1M migration window
 
   if (curve === "linear") {
-    // Linear: simple straight-ish line down.
-    // Higher strength = steeper.
-    const steep = 0.6 + 0.1 * (strength - 1); // 1:0.6, 2:0.7, 3:0.8
-    const factor = 1 - p * steep;
-    const tps = BASE_TOKENS_PER_SOL * factor;
+    // LINEAR (FIXED): match on-chain `tokens_per_sol_linear_raw`
+    //
+    // On-chain:
+    //   base = BASE_TOKENS_PER_SOL_RAW
+    //   min  = MIN_TOKENS_PER_SOL_RAW (= base * 0.02)
+    //   diff = base - min
+    //   p    = sold / CURVE_RANGE
+    //   tps  = base - diff * p
+    //
+    // Here we work in human units (not raw), but same formula.
+    const base = BASE_TOKENS_PER_SOL;
+    const min = MIN_TOKENS_PER_SOL;
+    const diff = base - min;
+
+    const tps = base - diff * p; // linear between base and min as sold grows
     return clamp(tps, MIN_TOKENS_PER_SOL, MAX_TOKENS_PER_SOL);
   }
 
