@@ -1,4 +1,3 @@
-// Temp
 // src/app/api/coins/[id]/sell/route.ts
 export const runtime = "nodejs";
 
@@ -18,8 +17,12 @@ import {
 import { Buffer } from "buffer";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-// ✅ use the SAME RPC_URL as the rest of the app
-import { RPC_URL } from "@/lib/config";
+// ✅ Use same inline RPC logic as BUY route
+const RPC_URL =
+  process.env.NEXT_PUBLIC_SOLANA_RPC ||
+  process.env.NEXT_PUBLIC_RPC_URL ||
+  process.env.RPC ||
+  "https://api.devnet.solana.com";
 
 function bad(msg: string, code = 400, extra: any = {}) {
   return NextResponse.json({ error: msg, ...extra }, { status: code });
@@ -33,6 +36,10 @@ const TRADE_SELL_DISC = Buffer.from("3ba24d6d0952d8a0", "hex");
 
 // 1 SOL = 1e9 lamports
 const LAMPORTS_PER_SOL = 1_000_000_000n;
+
+// Our memecoins are always 6 decimals
+const TOKEN_DECIMALS = 6;
+const TOKEN_MULTIPLIER = 10 ** TOKEN_DECIMALS;
 
 function u64ToLeBuffer(v: bigint): Buffer {
   const b = Buffer.alloc(8);
@@ -102,17 +109,11 @@ export async function POST(req: Request, ctx: RouteCtx) {
 
     const mintPk = new PublicKey(coin.mint);
 
-    // ✅ now ALWAYS use the same RPC as other routes
     console.log("[SELL] RPC_URL =", RPC_URL);
     const connection = new Connection(RPC_URL, "confirmed");
 
     // -------- figure out raw token amount & ensure user has it --------
-    const supplyInfo = await connection.getTokenSupply(mintPk, "confirmed");
-    const decimals = supplyInfo.value.decimals ?? 9;
-
-    const multiplier = 10 ** decimals; // small enough for JS number
-    const tokensRaw = BigInt(Math.floor(tokensUi * multiplier));
-
+    const tokensRaw = BigInt(Math.floor(tokensUi * TOKEN_MULTIPLIER));
     if (tokensRaw <= 0n) {
       return bad("Token amount too small to sell", 400);
     }
@@ -224,7 +225,7 @@ export async function POST(req: Request, ctx: RouteCtx) {
     );
   } catch (e: any) {
     console.error("[/api/coins/[id]/sell] POST error:", e);
-    // if RPC fails (devnet down / Helius error) web3 throws "fetch failed"
+    // web3 "fetch failed" etc. will surface here
     return bad(e?.message || "Sell route failed", 500);
   }
 }
