@@ -498,158 +498,152 @@ export default function CoinPage() {
     }
   }
 
-  async function doSell() {
-    // extra safety: if already selling, ignore double click
-    if (isSelling) return;
-
+async function doSell() {
+  try {
     setIsSelling(true);
     setSellError(null);
 
-    try {
-      if (!connected || !publicKey) {
-        alert("Connect your wallet first.");
-        return;
-      }
-
-      if (!coin) {
-        alert("Coin not loaded yet.");
-        return;
-      }
-
-      if (!coin.mint) {
-        alert("This coin is not tradable yet (no mint configured).");
-        return;
-      }
-
-      if (!tokensPerSolSell || tokensPerSolSell <= 0) {
-        alert("Price not available yet, try again in a few seconds.");
-        return;
-      }
-
-      const rawTokensUi = Number(String(sellTokensInput).trim());
-      if (!Number.isFinite(rawTokensUi) || rawTokensUi <= 0) {
-        alert("Enter a valid token amount to sell.");
-        return;
-      }
-
-      const maxTokens = maxSellTokens || 0;
-      if (maxTokens <= 0) {
-        alert("You don’t have any tokens to sell.");
-        return;
-      }
-
-      // Clamp to wallet balance (safety + 100% fix)
-      const tokensUi = Math.min(rawTokensUi, maxTokens);
-      if (!Number.isFinite(tokensUi) || tokensUi <= 0) {
-        alert("You don’t have enough tokens to sell.");
-        return;
-      }
-
-      // Gross SOL out from curve
-      let solGross = tokensUi / tokensPerSolSell;
-
-      // Pool safety clamp
-      const poolSol = stats?.poolSol ?? 0;
-      if (poolSol > 0) {
-        const maxOut = poolSol * 0.995;
-        if (solGross > maxOut) solGross = maxOut;
-      }
-
-      if (!Number.isFinite(solGross) || solGross <= 0) {
-        alert("Quote is zero; nothing to sell.");
-        return;
-      }
-
-      // Net SOL to user after sell fee (currently fee just stays in pool)
-      const solAmount = solGross * (1 - TOTAL_SELL_BPS / 10_000);
-
-      if (!Number.isFinite(solAmount) || solAmount <= 0) {
-        alert("Quote is zero; nothing to sell.");
-        return;
-      }
-
-      const payer = publicKey.toBase58();
-
-      const res = await fetch(
-        `/api/coins/${encodeURIComponent(coin.id)}/sell`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            payer,
-            solAmount, // SOL user should receive (net)
-            tokensUi,  // tokens (UI amount) we burn from the wallet
-          }),
-        }
-      );
-
-      const text = await res.text();
-      let j: any = null;
-      try {
-        j = JSON.parse(text);
-      } catch {
-        // ignore JSON parse errors; we'll log raw text below
-      }
-
-      if (!res.ok) {
-        console.error("[SELL] server error payload:", j || text);
-        alert(j?.error || "Server sell failed (see console).");
-        return;
-      }
-
-      const { txB64, blockhash, lastValidBlockHeight } = j;
-      if (!txB64) {
-        console.error("[SELL] missing txB64 in response:", j);
-        alert("Server did not return a transaction to sign.");
-        return;
-      }
-
-      const txBytes = Buffer.from(txB64, "base64");
-
-      // Support BOTH v0 and legacy transactions coming from the server.
-      let tx: VersionedTransaction | Transaction;
-      try {
-        tx = VersionedTransaction.deserialize(txBytes);
-      } catch (e) {
-        console.warn(
-          "[SELL] v0 deserialize failed, falling back to legacy tx:",
-          e
-        );
-        tx = Transaction.from(txBytes);
-      }
-
-      const sig = await sendTransaction(tx as any, connection, {
-        skipPreflight: true, // same as your BUY path
-        maxRetries: 5,
-      });
-
-      console.log("[SELL] sent tx:", sig);
-
-      try {
-        await connection.confirmTransaction(
-          { signature: sig, blockhash, lastValidBlockHeight },
-          "confirmed"
-        );
-      } catch (e) {
-        console.warn("[SELL] confirm warning:", e);
-      }
-
-      // 🧹 Reset input so next sell is clean
-      setSellTokensInput("");
-
-      // 🔥 Fire-and-forget refreshes so UI never gets stuck
-      Promise.allSettled([
-        refreshBalances(),
-        refreshStats(),
-      ]).catch((e) => console.warn("[SELL] refresh error:", e));
-    } catch (err: any) {
-      console.error("[SELL] error:", err);
-      setSellError(err?.message || "Sell failed");
-    } finally {
-      // ✅ ALWAYS clear the "Selling..." state
-      setIsSelling(false);
+    if (!connected || !publicKey) {
+      alert("Connect your wallet first.");
+      return;
     }
+
+    if (!coin) {
+      alert("Coin not loaded yet.");
+      return;
+    }
+
+    if (!coin.mint) {
+      alert("This coin is not tradable yet (no mint configured).");
+      return;
+    }
+
+    if (!tokensPerSolSell || tokensPerSolSell <= 0) {
+      alert("Price not available yet, try again in a few seconds.");
+      return;
+    }
+
+    const rawTokensUi = Number(String(sellTokensInput).trim());
+    if (!Number.isFinite(rawTokensUi) || rawTokensUi <= 0) {
+      alert("Enter a valid token amount to sell.");
+      return;
+    }
+
+    const maxTokens = maxSellTokens || 0;
+    if (maxTokens <= 0) {
+      alert("You don’t have any tokens to sell.");
+      return;
+    }
+
+    // Clamp to wallet balance (safety + 100% quick buttons)
+    const tokensUi = Math.min(rawTokensUi, maxTokens);
+    if (!Number.isFinite(tokensUi) || tokensUi <= 0) {
+      alert("You don’t have enough tokens to sell.");
+      return;
+    }
+
+    // Gross SOL out from curve, then clamp by pool
+    let solGross = tokensUi / tokensPerSolSell;
+
+    const poolSol = stats?.poolSol ?? 0;
+    if (poolSol > 0) {
+      const maxOut = poolSol * 0.995;
+      if (solGross > maxOut) solGross = maxOut;
+    }
+
+    if (!Number.isFinite(solGross) || solGross <= 0) {
+      alert("Quote is zero; nothing to sell.");
+      return;
+    }
+
+    // Net SOL to user after total sell fee (expressed in BPS)
+    const solAmount = solGross * (1 - TOTAL_SELL_BPS / 10_000);
+    if (!Number.isFinite(solAmount) || solAmount <= 0) {
+      alert("Quote is zero; nothing to sell.");
+      return;
+    }
+
+    const payer = publicKey.toBase58();
+
+    const res = await fetch(`/api/coins/${encodeURIComponent(coin.id)}/sell`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        payer,
+        solAmount, // SOL user should receive (net, after fee)
+        tokensUi,  // UI token amount to burn
+      }),
+    });
+
+    const text = await res.text();
+    let j: any = null;
+    try {
+      j = JSON.parse(text);
+    } catch {
+      // ignore parse errors, we'll log text below if needed
+    }
+
+    if (!res.ok) {
+      console.error("[SELL] server error payload:", j || text);
+      alert(j?.error || "Server sell failed (see console).");
+      return;
+    }
+
+    const { txB64 } = j || {};
+    if (!txB64) {
+      console.error("[SELL] missing txB64 in response:", j);
+      alert("Server did not return a transaction to sign.");
+      return;
+    }
+
+    const txBytes = Buffer.from(txB64, "base64");
+
+    // Support BOTH v0 and legacy transactions
+    let tx: VersionedTransaction | Transaction;
+    try {
+      tx = VersionedTransaction.deserialize(txBytes);
+    } catch (e) {
+      console.warn(
+        "[SELL] v0 deserialize failed, falling back to legacy tx:",
+        e
+      );
+      tx = Transaction.from(txBytes);
+    }
+
+    const sig = await sendTransaction(tx as any, connection, {
+      skipPreflight: true,
+      maxRetries: 5,
+    });
+
+    console.log("[SELL] sent tx:", sig);
+
+    // ---- IMPORTANT CHANGE HERE ----
+    // Use simple confirm (only by signature) + timeout,
+    // so it never blocks the UI forever even if RPC is slow.
+    try {
+      const confirmPromise = connection.confirmTransaction(sig, "confirmed");
+      const timeout = new Promise<void>((resolve) =>
+        setTimeout(resolve, 20_000)
+      );
+      await Promise.race([confirmPromise, timeout]);
+    } catch (e) {
+      console.warn("[SELL] confirm warning:", e);
+    }
+
+    // Refresh balances & stats after sell
+    await refreshBalances();
+    await refreshStats();
+
+    // Clear input so next sell starts “fresh”
+    setSellTokensInput("");
+  } catch (err: any) {
+    console.error("[SELL] error:", err);
+    setSellError(err?.message || "Sell failed");
+  } finally {
+    // ALWAYS release the button, even if anything above throws
+    setIsSelling(false);
   }
+}
 
   // ---------- RENDER ----------
 
