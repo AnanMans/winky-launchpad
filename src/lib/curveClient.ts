@@ -18,8 +18,7 @@ function u64(n: number | bigint) {
     v = n;
   } else {
     const num = Number(n);
-    if (!Number.isFinite(num)) {
-      // if NaN / Infinity / undefined → treat as 0
+    if (!Number.isFinite(num) || num < 0) {
       v = 0n;
     } else {
       v = BigInt(Math.floor(num));
@@ -27,7 +26,8 @@ function u64(n: number | bigint) {
   }
 
   const a = new Uint8Array(8);
-  new DataView(a.buffer).setBigUint64(0, v, true); // little-endian
+  const view = new DataView(a.buffer);
+  view.setBigUint64(0, v, true); // little-endian
   return Buffer.from(a);
 }
 
@@ -45,6 +45,13 @@ const FEE_TREASURY = new PublicKey(
     process.env.NEXT_PUBLIC_TREASURY || // fallback
     process.env.NEXT_PUBLIC_PLATFORM_WALLET!
 );
+
+/** Small helper: normalize SOL amount from UI into a safe number */
+function normalizeSol(amountSol: number): number {
+  const n = Number(amountSol);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n;
+}
 
 /* ======================= BUY ======================= */
 /**
@@ -68,12 +75,8 @@ export async function buildBuyTx(
 ) {
   const state = curveStatePda(mint);
 
-  // 🔒 sanitize amountSol so we never leak NaN into fee/buy logic
-  const safeAmountSol =
-    typeof amountSol === "number" && Number.isFinite(amountSol) && amountSol > 0
-      ? amountSol
-      : 0;
-
+  // Normalize the SOL input first
+  const safeAmountSol = normalizeSol(amountSol);
   const tradeLamports = Math.floor(safeAmountSol * 1e9);
 
   // 1) fee transfers (pre / buy side)
@@ -121,14 +124,13 @@ export async function buildBuyTx(
  * - amountSol = gross amount you want from the curve PDA (from UI).
  * - We convert that to lamports (tradeLamports) and use it consistently:
  *     - program moves `tradeLamports` from curve PDA -> payer
- *     - then we send fee % from payer -> platform/creator
+ *     - then we send fee % from payer -> platform/creator.
  *
  * Tx flow:
  *   1) program ix: trade_sell(lamports)
  *   2) fee transfers payer -> platform + optional creator
  *
- * NOTE: We are not touching the on-chain program for fees.
- *       Fees are done with extra SystemProgram.transfer instructions.
+ * NOTE: Fees are done with extra SystemProgram.transfer instructions.
  */
 export async function buildSellTx(
   conn: Connection,
@@ -139,15 +141,10 @@ export async function buildSellTx(
 ) {
   const state = curveStatePda(mint);
 
-  // 🔒 sanitize amountSol first
-  const safeAmountSol =
-    typeof amountSol === "number" && Number.isFinite(amountSol) && amountSol > 0
-      ? amountSol
-      : 0;
-
-  // Derive lamports and tradeSol from the same clean source
+  // Normalize once, derive both lamports + tradeSol from it
+  const safeAmountSol = normalizeSol(amountSol);
   const tradeLamports = Math.floor(safeAmountSol * 1e9);
-  const tradeSol = tradeLamports / 1e9; // what we use for fee calc
+  const tradeSol = tradeLamports / 1e9; // consistent with what actually hits chain
 
   // 1) program ix: trade_sell(payer, mint, state, system_program)
   const data = Buffer.concat([discSell(), u64(tradeLamports)]);
@@ -166,7 +163,7 @@ export async function buildSellTx(
   // 2) fee transfers (post / sell side) – from payer AFTER they receive from curve
   const { ixs: feeIxs } = buildFeeTransfers({
     feePayer: payer,
-    tradeSol, // ← derived from tradeLamports, so never NaN
+    tradeSol,
     phase: "post",
     protocolTreasury: FEE_TREASURY,
     creatorAddress: creatorAddress ?? null,
