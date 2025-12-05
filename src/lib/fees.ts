@@ -1,16 +1,7 @@
 // src/lib/fees.ts
 //
-// Centralized fee logic for Winky Launchpad.
-//
-// - Uses env vars for fee splits and caps:
-//     F_PROTOCOL_BP_PRE   (buy: platform bps)
-//     F_CREATOR_BP_PRE    (buy: creator  bps)
-//     F_PROTOCOL_BP_POST  (sell: platform bps)
-//     F_CREATOR_BP_POST   (sell: creator  bps)
-//     F_CAP_LAMPORTS_PRE  (max fee per BUY  in lamports)
-//     F_CAP_LAMPORTS_POST (max fee per SELL in lamports)
-//
-// - Guards hard against NaN so we never send NaN lamports into web3.js.
+// Single source of truth for platform/creator fees.
+// All math is done in lamports to avoid NaN / float issues.
 
 import {
   LAMPORTS_PER_SOL,
@@ -19,91 +10,125 @@ import {
   TransactionInstruction,
 } from "@solana/web3.js";
 
-export type Phase = "pre" | "post";
+export type Phase = "pre" | "post"; // pre = buy, post = sell
 
-/** Safe env number helper – never returns NaN */
-function envNum(name: string, def: number): number {
+// ---------- BPS CONFIG (with sane defaults) ----------
+// You said:
+//   BUY:  0.5% platform, 0% creator
+//   SELL: 0.3% platform, 0.7% creator  (1.0% total)
+//
+// We expose NEXT_PUBLIC_* overrides if you ever want to tweak from env.
+
+function numEnv(name: string, fallback: number): number {
   const raw = process.env[name];
-  if (!raw) return def;
+  if (!raw) return fallback;
   const n = Number(raw);
-  return Number.isFinite(n) ? n : def;
+  return Number.isFinite(n) ? n : fallback;
 }
 
-/** Basis-points config coming from env (with sane defaults) */
-function getBps(phase: Phase) {
-  if (phase === "pre") {
-    const protocolBps = envNum("F_PROTOCOL_BP_PRE", 50); // 0.50% default
-    const creatorBps = envNum("F_CREATOR_BP_PRE", 0);    // 0%   default
-    return {
-      totalBps: protocolBps + creatorBps,
-      protocolBps,
-      creatorBps,
-    };
-  } else {
-    const protocolBps = envNum("F_PROTOCOL_BP_POST", 30); // 0.30% default
-    const creatorBps = envNum("F_CREATOR_BP_POST", 70);   // 0.70% default
-    return {
-      totalBps: protocolBps + creatorBps,
-      protocolBps,
-      creatorBps,
-    };
-  }
+// Defaults, can be overridden at build time with NEXT_PUBLIC_* vars.
+const BUY_PLATFORM_BPS_DEFAULT = 50; // 0.50%
+const BUY_CREATOR_BPS_DEFAULT = 0;   // 0%
+
+const SELL_PLATFORM_BPS_DEFAULT = 30; // 0.30%
+const SELL_CREATOR_BPS_DEFAULT = 70;  // 0.70%
+
+export const BUY_PLATFORM_BPS = numEnv(
+  "NEXT_PUBLIC_BUY_PLATFORM_BPS",
+  BUY_PLATFORM_BPS_DEFAULT
+);
+export const BUY_CREATOR_BPS = numEnv(
+  "NEXT_PUBLIC_BUY_CREATOR_BPS",
+  BUY_CREATOR_BPS_DEFAULT
+);
+
+export const SELL_PLATFORM_BPS = numEnv(
+  "NEXT_PUBLIC_SELL_PLATFORM_BPS",
+  SELL_PLATFORM_BPS_DEFAULT
+);
+export const SELL_CREATOR_BPS = numEnv(
+  "NEXT_PUBLIC_SELL_CREATOR_BPS",
+  SELL_CREATOR_BPS_DEFAULT
+);
+
+export const TOTAL_BUY_BPS = BUY_PLATFORM_BPS + BUY_CREATOR_BPS;
+export const TOTAL_SELL_BPS = SELL_PLATFORM_BPS + SELL_CREATOR_BPS;
+
+// Absolute caps (lamports) to protect whales.
+const DEFAULT_CAP_PRE = 500_000_000;  // 0.5 SOL
+const DEFAULT_CAP_POST = 250_000_000; // 0.25 SOL
+
+function lamportsCapFor(phase: Phase): number {
+  const fallback = phase === "pre" ? DEFAULT_CAP_PRE : DEFAULT_CAP_POST;
+  const envName =
+    phase === "pre" ? "F_CAP_LAMPORTS_PRE" : "F_CAP_LAMPORTS_POST";
+  const raw = process.env[envName];
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-/** Absolute caps (lamports) – also read from env, NaN-safe */
-function lamportsCapFor(phase: Phase) {
-  const defPre = 500_000_000;  // 0.5 SOL
-  const defPost = 250_000_000; // 0.25 SOL
-  const pre = envNum("F_CAP_LAMPORTS_PRE", defPre);
-  const post = envNum("F_CAP_LAMPORTS_POST", defPost);
-  return phase === "pre" ? pre : post;
-}
+// ---------- Core lamports fee calc ----------
 
 export function computeFeeLamports(
   tradeLamports: number,
-  tradeSol: number,
-  phase: Phase,
-  overrides?: {
-    totalBps?: number;
-    creatorBps?: number;
-    protocolBps?: number;
-  } | null
-) {
-  // Hard clamp: never allow NaN/negative
-  const lamports =
-    Number.isFinite(tradeLamports) && tradeLamports > 0
-      ? Math.floor(tradeLamports)
-      : 0;
+  phase: Phase
+): {
+  feeTotal: number;
+  protocol: number;
+  creator: number;
+  cap: number;
+  totalBps: number;
+  creatorBps: number;
+  protocolBps: number;
+} {
+  // Safety: if nothing is traded, no fees.
+  if (!Number.isFinite(tradeLamports) || tradeLamports <= 0) {
+    return {
+      feeTotal: 0,
+      protocol: 0,
+      creator: 0,
+      cap: lamportsCapFor(phase),
+      totalBps: 0,
+      creatorBps: 0,
+      protocolBps: 0,
+    };
+  }
 
   const cap = lamportsCapFor(phase);
 
-  const envBps = getBps(phase);
-  const totalBps =
-    overrides?.totalBps ?? envBps.totalBps;
-  const creatorBps =
-    overrides?.creatorBps ?? envBps.creatorBps;
-  const protocolBps =
-    overrides?.protocolBps ?? envBps.protocolBps;
+  let platformBps: number;
+  let creatorBps: number;
 
-  // If no trade or no fee configured → zero fee (but NO NaN)
-  if (lamports === 0 || totalBps <= 0) {
+  if (phase === "pre") {
+    platformBps = BUY_PLATFORM_BPS;
+    creatorBps = BUY_CREATOR_BPS;
+  } else {
+    platformBps = SELL_PLATFORM_BPS;
+    creatorBps = SELL_CREATOR_BPS;
+  }
+
+  const totalBps = platformBps + creatorBps;
+
+  // If misconfigured to 0, just bail with no fees.
+  if (totalBps <= 0) {
     return {
       feeTotal: 0,
       protocol: 0,
       creator: 0,
       cap,
-      totalBps,
-      creatorBps,
-      protocolBps,
+      totalBps: 0,
+      creatorBps: 0,
+      protocolBps: 0,
     };
   }
 
-  const raw = Math.floor((lamports * totalBps) / 10_000);
+  // feeTotal = trade * totalBps / 10_000, capped
+  const raw = Math.floor((tradeLamports * totalBps) / 10_000);
   const feeTotal = Math.min(raw, cap);
 
-  const creator = Math.floor(
-    (feeTotal * creatorBps) / Math.max(totalBps, 1)
-  );
+  // Split between creator and protocol (platform).
+  const creator = Math.floor((feeTotal * creatorBps) / totalBps);
   const protocol = feeTotal - creator;
 
   return {
@@ -113,37 +138,43 @@ export function computeFeeLamports(
     cap,
     totalBps,
     creatorBps,
-    protocolBps,
+    protocolBps: platformBps,
   };
 }
 
+// ---------- Build fee transfer instructions ----------
+
 export function buildFeeTransfers(opts: {
   feePayer: PublicKey;
-  tradeSol: number;
   phase: Phase;
   protocolTreasury: PublicKey;
   creatorAddress?: PublicKey | null;
-  overrides?: {
-    totalBps?: number;
-    creatorBps?: number;
-    protocolBps?: number;
-  } | null;
+
+  // Prefer lamports; if only tradeSol is passed, we convert.
+  tradeLamports?: number;
+  tradeSol?: number;
 }): {
   ixs: TransactionInstruction[];
   detail: ReturnType<typeof computeFeeLamports>;
 } {
-  // Derive lamports from tradeSol in a single, NaN-safe place
-  const tradeSol = Number.isFinite(opts.tradeSol) && opts.tradeSol > 0
-    ? opts.tradeSol
-    : 0;
-  const tradeLamports = Math.floor(tradeSol * LAMPORTS_PER_SOL);
+  // Derive lamports from either explicit tradeLamports or tradeSol.
+  let tradeLamports = 0;
 
-  const detail = computeFeeLamports(
-    tradeLamports,
-    tradeSol,
-    opts.phase,
-    opts.overrides ?? null
-  );
+  if (
+    typeof opts.tradeLamports === "number" &&
+    Number.isFinite(opts.tradeLamports) &&
+    opts.tradeLamports > 0
+  ) {
+    tradeLamports = Math.floor(opts.tradeLamports);
+  } else if (
+    typeof opts.tradeSol === "number" &&
+    Number.isFinite(opts.tradeSol) &&
+    opts.tradeSol > 0
+  ) {
+    tradeLamports = Math.floor(opts.tradeSol * LAMPORTS_PER_SOL);
+  }
+
+  const detail = computeFeeLamports(tradeLamports, opts.phase);
 
   const ixs: TransactionInstruction[] = [];
 
@@ -170,23 +201,11 @@ export function buildFeeTransfers(opts: {
   return { ixs, detail };
 }
 
-// -------- UI helpers (for showing % etc.) --------
+// ---------- Simple float helper for UI display ----------
 
-// These are derived from env, so your .env + Vercel values are the single source of truth.
-
-export const BUY_PLATFORM_BPS = envNum("F_PROTOCOL_BP_PRE", 50);
-export const BUY_CREATOR_BPS = envNum("F_CREATOR_BP_PRE", 0);
-
-export const SELL_PLATFORM_BPS = envNum("F_PROTOCOL_BP_POST", 30);
-export const SELL_CREATOR_BPS = envNum("F_CREATOR_BP_POST", 70);
-
-export const TOTAL_BUY_BPS = BUY_PLATFORM_BPS + BUY_CREATOR_BPS;
-export const TOTAL_SELL_BPS = SELL_PLATFORM_BPS + SELL_CREATOR_BPS;
-
-/** Simple helper for float amounts (UI side) */
 export function applyFee(amount: number, feeBps: number) {
   if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(feeBps)) {
-    return { net: amount || 0, fee: 0 };
+    return { net: 0, fee: 0 };
   }
   const fee = (amount * feeBps) / 10_000;
   const net = amount - fee;
