@@ -10,6 +10,15 @@ import { PROGRAM_ID } from "@/lib/config";
 import { curvePda as curveStatePda } from "@/lib/config";
 import { buildFeeTransfers } from "@/lib/fees";
 
+/* ---------- small helpers ---------- */
+
+// convert SOL → lamports, NaN-safe, non-negative
+function toLamports(amountSol: number): number {
+  const n = Number(amountSol);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.floor(n * 1e9);
+}
+
 /* ---------- browser-safe u64 encoder (NaN-safe) ---------- */
 function u64(n: number | bigint) {
   let v: bigint;
@@ -18,7 +27,7 @@ function u64(n: number | bigint) {
     v = n;
   } else {
     const num = Number(n);
-    if (!Number.isFinite(num) || num < 0) {
+    if (!Number.isFinite(num)) {
       v = 0n;
     } else {
       v = BigInt(Math.floor(num));
@@ -26,8 +35,7 @@ function u64(n: number | bigint) {
   }
 
   const a = new Uint8Array(8);
-  const view = new DataView(a.buffer);
-  view.setBigUint64(0, v, true); // little-endian
+  new DataView(a.buffer).setBigUint64(0, v, true); // little-endian
   return Buffer.from(a);
 }
 
@@ -45,13 +53,6 @@ const FEE_TREASURY = new PublicKey(
     process.env.NEXT_PUBLIC_TREASURY || // fallback
     process.env.NEXT_PUBLIC_PLATFORM_WALLET!
 );
-
-/** Small helper: normalize SOL amount from UI into a safe number */
-function normalizeSol(amountSol: number): number {
-  const n = Number(amountSol);
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  return n;
-}
 
 /* ======================= BUY ======================= */
 /**
@@ -75,14 +76,18 @@ export async function buildBuyTx(
 ) {
   const state = curveStatePda(mint);
 
-  // Normalize the SOL input first
-  const safeAmountSol = normalizeSol(amountSol);
-  const tradeLamports = Math.floor(safeAmountSol * 1e9);
+  // derive lamports in a NaN-safe way
+  const tradeLamports = toLamports(amountSol);
+  const tradeSol = tradeLamports / 1e9;
 
-  // 1) fee transfers (pre / buy side)
+  if (tradeLamports <= 0) {
+    throw new Error("Trade amount must be greater than 0 SOL");
+  }
+
+  // 1) fee transfers (pre / buy side) – from payer wallet
   const { ixs: feeIxs } = buildFeeTransfers({
     feePayer: payer,
-    tradeSol: safeAmountSol,
+    tradeSol,
     phase: "pre",
     protocolTreasury: FEE_TREASURY,
     creatorAddress: creatorAddress ?? null,
@@ -95,7 +100,7 @@ export async function buildBuyTx(
     lamports: tradeLamports,
   });
 
-  // 3) program ix: trade_buy(payer, mint, state, system_program)
+  // 3) program ix: trade_buy(payer, mint, state, system_program, lamports)
   const data = Buffer.concat([discBuy(), u64(tradeLamports)]);
   const keys = [
     { pubkey: payer, isSigner: true, isWritable: true },
@@ -124,13 +129,14 @@ export async function buildBuyTx(
  * - amountSol = gross amount you want from the curve PDA (from UI).
  * - We convert that to lamports (tradeLamports) and use it consistently:
  *     - program moves `tradeLamports` from curve PDA -> payer
- *     - then we send fee % from payer -> platform/creator.
+ *     - then we send fee % from payer -> platform/creator
  *
  * Tx flow:
  *   1) program ix: trade_sell(lamports)
  *   2) fee transfers payer -> platform + optional creator
  *
- * NOTE: Fees are done with extra SystemProgram.transfer instructions.
+ * NOTE: We are not touching the on-chain program for fees.
+ *       Fees are done with extra SystemProgram.transfer instructions.
  */
 export async function buildSellTx(
   conn: Connection,
@@ -141,12 +147,15 @@ export async function buildSellTx(
 ) {
   const state = curveStatePda(mint);
 
-  // Normalize once, derive both lamports + tradeSol from it
-  const safeAmountSol = normalizeSol(amountSol);
-  const tradeLamports = Math.floor(safeAmountSol * 1e9);
-  const tradeSol = tradeLamports / 1e9; // consistent with what actually hits chain
+  // derive lamports in a NaN-safe way
+  const tradeLamports = toLamports(amountSol);
+  const tradeSol = tradeLamports / 1e9;
 
-  // 1) program ix: trade_sell(payer, mint, state, system_program)
+  if (tradeLamports <= 0) {
+    throw new Error("Trade amount must be greater than 0 SOL");
+  }
+
+  // 1) program ix: trade_sell(payer, mint, state, system_program, lamports)
   const data = Buffer.concat([discSell(), u64(tradeLamports)]);
   const keys = [
     { pubkey: payer, isSigner: true, isWritable: true },
