@@ -10,16 +10,7 @@ import { PROGRAM_ID } from "@/lib/config";
 import { curvePda as curveStatePda } from "@/lib/config";
 import { buildFeeTransfers } from "@/lib/fees";
 
-/* ---------- small helpers ---------- */
-
-// convert SOL → lamports, NaN-safe, non-negative
-function toLamports(amountSol: number): number {
-  const n = Number(amountSol);
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  return Math.floor(n * 1e9);
-}
-
-/* ---------- browser-safe u64 encoder (NaN-safe) ---------- */
+/* ---------- browser-safe u64 encoder (NaN safe) ---------- */
 function u64(n: number | bigint) {
   let v: bigint;
 
@@ -27,7 +18,7 @@ function u64(n: number | bigint) {
     v = n;
   } else {
     const num = Number(n);
-    if (!Number.isFinite(num)) {
+    if (!Number.isFinite(num) || num < 0) {
       v = 0n;
     } else {
       v = BigInt(Math.floor(num));
@@ -54,6 +45,13 @@ const FEE_TREASURY = new PublicKey(
     process.env.NEXT_PUBLIC_PLATFORM_WALLET!
 );
 
+/* small helper to make sure we never get NaN lamports */
+function safeLamportsFromSol(amountSol: number): number {
+  const n = Number(amountSol);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.floor(n * 1e9); // LAMPORTS_PER_SOL
+}
+
 /* ======================= BUY ======================= */
 /**
  * trade_buy with platform/creator fee.
@@ -63,7 +61,7 @@ const FEE_TREASURY = new PublicKey(
  *     payer -> platform + optional creator
  *
  * Tx flow:
- *   1) fee transfers
+ *   1) fee transfers (payer -> platform/creator)
  *   2) system transfer payer -> curve state PDA (trade lamports)
  *   3) program ix: trade_buy(lamports)
  */
@@ -75,19 +73,16 @@ export async function buildBuyTx(
   creatorAddress?: PublicKey | null // optional; if not provided, all fee -> platform
 ) {
   const state = curveStatePda(mint);
-
-  // derive lamports in a NaN-safe way
-  const tradeLamports = toLamports(amountSol);
-  const tradeSol = tradeLamports / 1e9;
+  const tradeLamports = safeLamportsFromSol(amountSol);
 
   if (tradeLamports <= 0) {
-    throw new Error("Trade amount must be greater than 0 SOL");
+    throw new Error("Invalid buy amount (must be > 0)");
   }
 
-  // 1) fee transfers (pre / buy side) – from payer wallet
+  // 1) fee transfers (pre / buy side)
   const { ixs: feeIxs } = buildFeeTransfers({
     feePayer: payer,
-    tradeSol,
+    tradeLamports,
     phase: "pre",
     protocolTreasury: FEE_TREASURY,
     creatorAddress: creatorAddress ?? null,
@@ -100,7 +95,7 @@ export async function buildBuyTx(
     lamports: tradeLamports,
   });
 
-  // 3) program ix: trade_buy(payer, mint, state, system_program, lamports)
+  // 3) program ix: trade_buy(payer, mint, state, system_program)
   const data = Buffer.concat([discBuy(), u64(tradeLamports)]);
   const keys = [
     { pubkey: payer, isSigner: true, isWritable: true },
@@ -135,8 +130,7 @@ export async function buildBuyTx(
  *   1) program ix: trade_sell(lamports)
  *   2) fee transfers payer -> platform + optional creator
  *
- * NOTE: We are not touching the on-chain program for fees.
- *       Fees are done with extra SystemProgram.transfer instructions.
+ * NOTE: Fees are *off-chain* (extra SystemProgram.transfer).
  */
 export async function buildSellTx(
   conn: Connection,
@@ -146,16 +140,13 @@ export async function buildSellTx(
   creatorAddress?: PublicKey | null
 ) {
   const state = curveStatePda(mint);
-
-  // derive lamports in a NaN-safe way
-  const tradeLamports = toLamports(amountSol);
-  const tradeSol = tradeLamports / 1e9;
+  const tradeLamports = safeLamportsFromSol(amountSol);
 
   if (tradeLamports <= 0) {
-    throw new Error("Trade amount must be greater than 0 SOL");
+    throw new Error("Invalid sell amount (must be > 0)");
   }
 
-  // 1) program ix: trade_sell(payer, mint, state, system_program, lamports)
+  // 1) program ix: trade_sell(payer, mint, state, system_program)
   const data = Buffer.concat([discSell(), u64(tradeLamports)]);
   const keys = [
     { pubkey: payer, isSigner: true, isWritable: true },
@@ -172,7 +163,7 @@ export async function buildSellTx(
   // 2) fee transfers (post / sell side) – from payer AFTER they receive from curve
   const { ixs: feeIxs } = buildFeeTransfers({
     feePayer: payer,
-    tradeSol,
+    tradeLamports,
     phase: "post",
     protocolTreasury: FEE_TREASURY,
     creatorAddress: creatorAddress ?? null,
