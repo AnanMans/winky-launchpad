@@ -14,9 +14,9 @@ import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { Buffer } from "buffer";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-// ✅ same config as BUY route
+// ✅ use the SAME config as BUY route
 import { PROGRAM_ID, RPC_URL, TOKEN_PROGRAM_ID } from "@/lib/config";
-import { buildFeeTransfers } from "@/lib/fees";
+import { buildFeeTransfers } from "@/lib/fees"; // ✅ NEW
 
 function bad(msg: string, code = 400, extra: any = {}) {
   return NextResponse.json({ error: msg, ...extra }, { status: code });
@@ -31,18 +31,18 @@ const TRADE_SELL_DISC = Buffer.from("3ba24d6d0952d8a0", "hex");
 // 1 SOL = 1e9 lamports
 const LAMPORTS_PER_SOL = 1_000_000_000n;
 
-// platform / protocol treasury
-const FEE_TREASURY = new PublicKey(
-  process.env.NEXT_PUBLIC_FEE_TREASURY ||
-    process.env.NEXT_PUBLIC_TREASURY ||
-    process.env.NEXT_PUBLIC_PLATFORM_WALLET!
-);
-
 function u64ToLeBuffer(v: bigint): Buffer {
   const b = Buffer.alloc(8);
   b.writeBigUInt64LE(v);
   return b;
 }
+
+// ✅ fee treasury same as in curveClient
+const FEE_TREASURY = new PublicKey(
+  process.env.NEXT_PUBLIC_FEE_TREASURY ||
+    process.env.NEXT_PUBLIC_TREASURY ||
+    process.env.NEXT_PUBLIC_PLATFORM_WALLET!
+);
 
 type RouteCtx = {
   params: Promise<{ id: string }>;
@@ -81,10 +81,10 @@ export async function POST(req: Request, ctx: RouteCtx) {
       return bad("Invalid tokens amount");
     }
 
-    // -------- fetch coin: need mint + creator (for creator fee) --------
+    // -------- fetch coin to get mint + creator --------
     const { data: coin, error } = await supabaseAdmin
       .from("coins")
-      .select("mint, creator")
+      .select("mint, creator") // ✅ include creator
       .eq("id", coinId)
       .maybeSingle();
 
@@ -97,10 +97,7 @@ export async function POST(req: Request, ctx: RouteCtx) {
     }
 
     const mintPk = new PublicKey(coin.mint);
-    const creatorAddress =
-      coin.creator && typeof coin.creator === "string"
-        ? new PublicKey(coin.creator)
-        : null;
+    const creatorPk = coin.creator ? new PublicKey(coin.creator) : null;
 
     console.log("[SELL] RPC_URL =", RPC_URL);
     const connection = new Connection(RPC_URL, "confirmed");
@@ -212,26 +209,17 @@ export async function POST(req: Request, ctx: RouteCtx) {
       data,
     });
 
-    // -------- FEE IXS (POST / SELL SIDE) --------
-    // Use the *actual* lamports we are pulling from the curve pool as basis.
+    // -------- build fee transfers (post / sell) --------
     const tradeSol = Number(lamports) / Number(LAMPORTS_PER_SOL);
 
-    const { ixs: feeIxs, detail } = buildFeeTransfers({
+    const { ixs: feeIxs } = buildFeeTransfers({
       feePayer: payer,
-      tradeSol,
+      tradeSol,              // SOL amount actually pulled from pool
       phase: "post",
       protocolTreasury: FEE_TREASURY,
-      creatorAddress,
+      creatorAddress: creatorPk,
     });
 
-    console.log("[SELL] fee detail:", {
-      tradeSol,
-      ...detail,
-      protocolTreasury: FEE_TREASURY.toBase58(),
-      creator: creatorAddress?.toBase58() ?? null,
-    });
-
-    // -------- build V0 tx:  [ sellIx, ...feeIxs ] --------
     let blockhash: string;
     let lastValidBlockHeight: number;
     try {
@@ -249,7 +237,7 @@ export async function POST(req: Request, ctx: RouteCtx) {
     const messageV0 = new TransactionMessage({
       payerKey: payer,
       recentBlockhash: blockhash,
-      instructions: [sellIx, ...feeIxs],
+      instructions: [sellIx, ...feeIxs], // ✅ include fees
     }).compileToV0Message();
 
     const vtx = new VersionedTransaction(messageV0);
@@ -268,7 +256,11 @@ export async function POST(req: Request, ctx: RouteCtx) {
       "lamports:",
       lamports.toString(),
       "tokensRaw:",
-      tokensRaw.toString()
+      tokensRaw.toString(),
+      "tradeSol:",
+      tradeSol,
+      "creator:",
+      creatorPk?.toBase58() ?? "none"
     );
 
     return ok(
