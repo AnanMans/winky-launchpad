@@ -14,9 +14,11 @@ import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { Buffer } from "buffer";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-// ✅ use the SAME config as BUY route
+// ✅ same config as BUY route
 import { PROGRAM_ID, RPC_URL, TOKEN_PROGRAM_ID } from "@/lib/config";
-import { buildFeeTransfers } from "@/lib/fees"; // ✅ NEW
+
+// ✅ use shared fee math (0.4% platform, 0.6% creator on SELL)
+import { computeFeeLamports } from "@/lib/fees";
 
 function bad(msg: string, code = 400, extra: any = {}) {
   return NextResponse.json({ error: msg, ...extra }, { status: code });
@@ -28,21 +30,26 @@ function ok(data: any, code = 200) {
 // Anchor discriminator for `trade_sell`
 const TRADE_SELL_DISC = Buffer.from("3ba24d6d0952d8a0", "hex");
 
-// 1 SOL = 1e9 lamports
+// 1 SOL = 1e9 lamports (bigint)
 const LAMPORTS_PER_SOL = 1_000_000_000n;
+
+// --- fee treasuries ---
+const PLATFORM_TREASURY = new PublicKey(
+  process.env.NEXT_PUBLIC_FEE_TREASURY ||
+    process.env.NEXT_PUBLIC_TREASURY ||
+    process.env.NEXT_PUBLIC_PLATFORM_WALLET!
+);
+
+// (optional) referral later – for now we don’t use it
+// const REFERRAL_TREASURY = process.env.NEXT_PUBLIC_REFERRAL_TREASURY
+//   ? new PublicKey(process.env.NEXT_PUBLIC_REFERRAL_TREASURY)
+//   : PLATFORM_TREASURY;
 
 function u64ToLeBuffer(v: bigint): Buffer {
   const b = Buffer.alloc(8);
   b.writeBigUInt64LE(v);
   return b;
 }
-
-// ✅ fee treasury same as in curveClient
-const FEE_TREASURY = new PublicKey(
-  process.env.NEXT_PUBLIC_FEE_TREASURY ||
-    process.env.NEXT_PUBLIC_TREASURY ||
-    process.env.NEXT_PUBLIC_PLATFORM_WALLET!
-);
 
 type RouteCtx = {
   params: Promise<{ id: string }>;
@@ -84,7 +91,7 @@ export async function POST(req: Request, ctx: RouteCtx) {
     // -------- fetch coin to get mint + creator --------
     const { data: coin, error } = await supabaseAdmin
       .from("coins")
-      .select("mint, creator") // ✅ include creator
+      .select("mint, creator")
       .eq("id", coinId)
       .maybeSingle();
 
@@ -97,7 +104,6 @@ export async function POST(req: Request, ctx: RouteCtx) {
     }
 
     const mintPk = new PublicKey(coin.mint);
-    const creatorPk = coin.creator ? new PublicKey(coin.creator) : null;
 
     console.log("[SELL] RPC_URL =", RPC_URL);
     const connection = new Connection(RPC_URL, "confirmed");
@@ -189,6 +195,51 @@ export async function POST(req: Request, ctx: RouteCtx) {
       lamports = maxPayout;
     }
 
+    // -------- compute SELL fees (off-chain, post phase) --------
+    const tradeLamportsNum = Number(lamports); // safe for normal SOL sizes
+    const tradeSol = tradeLamportsNum / Number(LAMPORTS_PER_SOL);
+
+    const feeDetail = computeFeeLamports(
+      tradeLamportsNum,
+      tradeSol,
+      "post"
+    );
+    // feeDetail = {
+    //   feeTotal,
+    //   protocol,  // -> platform
+    //   creator,   // -> coin.creator
+    //   cap, ...
+    // }
+
+    const feeIxs: TransactionInstruction[] = [];
+
+    // platform fee
+    if (feeDetail.protocol > 0) {
+      feeIxs.push(
+        SystemProgram.transfer({
+          fromPubkey: payer,
+          toPubkey: PLATFORM_TREASURY,
+          lamports: feeDetail.protocol,
+        })
+      );
+    }
+
+    // creator fee (if creator is valid pubkey)
+    if (feeDetail.creator > 0 && coin.creator) {
+      try {
+        const creatorPk = new PublicKey(coin.creator);
+        feeIxs.push(
+          SystemProgram.transfer({
+            fromPubkey: payer,
+            toPubkey: creatorPk,
+            lamports: feeDetail.creator,
+          })
+        );
+      } catch (e) {
+        console.warn("[SELL] invalid creator pubkey:", coin.creator, e);
+      }
+    }
+
     // -------- build program ix for Anchor `trade_sell` --------
     const data = Buffer.concat([
       TRADE_SELL_DISC,
@@ -209,17 +260,7 @@ export async function POST(req: Request, ctx: RouteCtx) {
       data,
     });
 
-    // -------- build fee transfers (post / sell) --------
-    const tradeSol = Number(lamports) / Number(LAMPORTS_PER_SOL);
-
-    const { ixs: feeIxs } = buildFeeTransfers({
-      feePayer: payer,
-      tradeSol,              // SOL amount actually pulled from pool
-      phase: "post",
-      protocolTreasury: FEE_TREASURY,
-      creatorAddress: creatorPk,
-    });
-
+    // -------- assemble v0 tx: sell + fees --------
     let blockhash: string;
     let lastValidBlockHeight: number;
     try {
@@ -237,7 +278,7 @@ export async function POST(req: Request, ctx: RouteCtx) {
     const messageV0 = new TransactionMessage({
       payerKey: payer,
       recentBlockhash: blockhash,
-      instructions: [sellIx, ...feeIxs], // ✅ include fees
+      instructions: [sellIx, ...feeIxs],
     }).compileToV0Message();
 
     const vtx = new VersionedTransaction(messageV0);
@@ -245,6 +286,13 @@ export async function POST(req: Request, ctx: RouteCtx) {
     const txB64 = Buffer.from(serialized).toString("base64");
 
     const estSolIn = Number(lamports) / Number(LAMPORTS_PER_SOL);
+
+    console.log("[SELL] fees:", {
+      tradeSol,
+      feeTotal: feeDetail.feeTotal,
+      protocol: feeDetail.protocol,
+      creator: feeDetail.creator,
+    });
 
     console.log(
       "[SELL] payer:",
@@ -256,11 +304,7 @@ export async function POST(req: Request, ctx: RouteCtx) {
       "lamports:",
       lamports.toString(),
       "tokensRaw:",
-      tokensRaw.toString(),
-      "tradeSol:",
-      tradeSol,
-      "creator:",
-      creatorPk?.toBase58() ?? "none"
+      tokensRaw.toString()
     );
 
     return ok(
