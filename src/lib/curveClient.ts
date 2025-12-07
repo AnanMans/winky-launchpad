@@ -38,30 +38,36 @@ function discSell() {
   return Buffer.from([59, 162, 77, 109, 9, 82, 216, 160]); // trade_sell
 }
 
-// protocol / fee treasury (platform wallet)
+// Platform / fee treasury (protocol wallet)
 const FEE_TREASURY = new PublicKey(
   process.env.NEXT_PUBLIC_FEE_TREASURY ||
     process.env.NEXT_PUBLIC_TREASURY || // fallback
     process.env.NEXT_PUBLIC_PLATFORM_WALLET!
 );
 
-/* small helper to make sure we never get NaN lamports */
+// Referral pool wallet (one global pool).
+// If not set, it will default to platform wallet so nothing breaks.
+const REFERRAL_TREASURY = process.env.NEXT_PUBLIC_REFERRAL_TREASURY
+  ? new PublicKey(process.env.NEXT_PUBLIC_REFERRAL_TREASURY)
+  : FEE_TREASURY;
+
+/* Small helper to make sure we never get NaN lamports */
 function safeLamportsFromSol(amountSol: number): number {
   const n = Number(amountSol);
   if (!Number.isFinite(n) || n <= 0) return 0;
-  return Math.floor(n * 1e9); // LAMPORTS_PER_SOL
+  return Math.floor(n * 1e9); // 1 SOL = 1e9 lamports
 }
 
 /* ======================= BUY ======================= */
 /**
- * trade_buy with platform/creator fee.
+ * trade_buy with platform/creator/referral fee.
  *
  * - amountSol = amount going into the curve (basis for price & tokens).
  * - Fees are charged ON TOP from the user's wallet:
- *     payer -> platform + optional creator
+ *     payer -> platform + creator + referral pool
  *
  * Tx flow:
- *   1) fee transfers (payer -> platform/creator)
+ *   1) fee transfers (payer -> platform / creator / referral pool)
  *   2) system transfer payer -> curve state PDA (trade lamports)
  *   3) program ix: trade_buy(lamports)
  */
@@ -70,7 +76,7 @@ export async function buildBuyTx(
   mint: PublicKey,
   payer: PublicKey,
   amountSol: number,
-  creatorAddress?: PublicKey | null // optional; if not provided, all fee -> platform
+  creatorAddress?: PublicKey | null // optional; if not provided, all creator share is 0
 ) {
   const state = curveStatePda(mint);
   const tradeLamports = safeLamportsFromSol(amountSol);
@@ -86,6 +92,7 @@ export async function buildBuyTx(
     phase: "pre",
     protocolTreasury: FEE_TREASURY,
     creatorAddress: creatorAddress ?? null,
+    referralTreasury: REFERRAL_TREASURY,
   });
 
   // 2) system transfer payer -> state (actual trade amount)
@@ -119,18 +126,18 @@ export async function buildBuyTx(
 
 /* ======================= SELL ======================= */
 /**
- * trade_sell with platform/creator fee.
+ * trade_sell with platform/creator/referral fee.
  *
- * - amountSol = gross amount you want from the curve PDA (from UI).
- * - We convert that to lamports (tradeLamports) and use it consistently:
+ * - amountSol = gross amount the user wants from the curve in SOL (UI).
+ * - We convert to lamports and:
  *     - program moves `tradeLamports` from curve PDA -> payer
- *     - then we send fee % from payer -> platform/creator
+ *     - then we send % fee from payer -> platform / creator / referral pool
  *
  * Tx flow:
  *   1) program ix: trade_sell(lamports)
- *   2) fee transfers payer -> platform + optional creator
+ *   2) fee transfers payer -> platform / creator / referral pool
  *
- * NOTE: Fees are *off-chain* (extra SystemProgram.transfer).
+ * NOTE: Fees are off-chain (extra SystemProgram.transfer).
  */
 export async function buildSellTx(
   conn: Connection,
@@ -160,13 +167,14 @@ export async function buildSellTx(
     data,
   });
 
-  // 2) fee transfers (post / sell side) – from payer AFTER they receive from curve
+  // 2) fee transfers (post / sell side)
   const { ixs: feeIxs } = buildFeeTransfers({
     feePayer: payer,
     tradeLamports,
     phase: "post",
     protocolTreasury: FEE_TREASURY,
     creatorAddress: creatorAddress ?? null,
+    referralTreasury: REFERRAL_TREASURY,
   });
 
   const { blockhash } = await conn.getLatestBlockhash("confirmed");
