@@ -2,8 +2,11 @@
 //
 // Centralized fee logic for Winky Launchpad.
 //
-// All percentages are in basis points (bps), where 1 bp = 0.01%.
-// We work ONLY in lamports here (no SOL) so it's easy and consistent.
+// Percentages are in basis points (bps), where 1 bp = 0.01%.
+//
+// FINAL SETUP (matches your .env idea):
+//   BUY (pre):  0.5% total  → 0.5% platform, 0% creator
+//   SELL (post): 1.0% total → 0.3% platform, 0.7% creator
 
 import {
   PublicKey,
@@ -11,40 +14,24 @@ import {
   TransactionInstruction,
 } from "@solana/web3.js";
 
-export type Phase = "pre" | "post"; // "pre" = buy, "post" = sell;
+export type Phase = "pre" | "post"; // "pre" = buy, "post" = sell
 
-// -------- fee config (bps) ----------
-// BUY: 0.6% total = 0.4% platform, 0.1% creator, 0.1% referral
-export const BUY_PLATFORM_BPS = 40; // 0.40%
-export const BUY_CREATOR_BPS = 10;  // 0.10%
-export const BUY_REFERRAL_BPS = 10; // 0.10%
-export const TOTAL_BUY_BPS =
-  BUY_PLATFORM_BPS + BUY_CREATOR_BPS + BUY_REFERRAL_BPS; // 60 bps = 0.6%
+// --- Flat BPS config (no tiers, no referral yet) ---
 
-// SELL: 0.9% total = 0.4% platform, 0.3% creator, 0.2% referral
-export const SELL_PLATFORM_BPS = 40; // 0.40%
-export const SELL_CREATOR_BPS = 30;  // 0.30%
-export const SELL_REFERRAL_BPS = 20; // 0.20%
-export const TOTAL_SELL_BPS =
-  SELL_PLATFORM_BPS + SELL_CREATOR_BPS + SELL_REFERRAL_BPS; // 90 bps = 0.9%
-
-/** Flat splits per phase */
-function splitsForPhase(phase: Phase) {
+function bpsFor(phase: Phase) {
   if (phase === "pre") {
-    // BUY
+    // BUY side → 0.50% platform
     return {
-      totalBps: TOTAL_BUY_BPS,
-      platformBps: BUY_PLATFORM_BPS,
-      creatorBps: BUY_CREATOR_BPS,
-      referralBps: BUY_REFERRAL_BPS,
+      totalBps: 50,      // 0.50% total
+      creatorBps: 0,     // 0%
+      protocolBps: 50,   // 0.50%
     };
   } else {
-    // SELL
+    // SELL side → 1.00% total → 0.30% platform, 0.70% creator
     return {
-      totalBps: TOTAL_SELL_BPS,
-      platformBps: SELL_PLATFORM_BPS,
-      creatorBps: SELL_CREATOR_BPS,
-      referralBps: SELL_REFERRAL_BPS,
+      totalBps: 100,     // 1.00% total
+      creatorBps: 70,    // 0.70%
+      protocolBps: 30,   // 0.30%
     };
   }
 }
@@ -53,77 +40,57 @@ function splitsForPhase(phase: Phase) {
 function lamportsCapFor(phase: Phase) {
   const defPre = 500_000_000; // 0.5 SOL
   const defPost = 250_000_000; // 0.25 SOL
+
   const pre = Number(process.env.F_CAP_LAMPORTS_PRE ?? defPre);
   const post = Number(process.env.F_CAP_LAMPORTS_POST ?? defPost);
+
   return phase === "pre" ? pre : post;
 }
 
 export function computeFeeLamports(
   tradeLamports: number,
   phase: Phase,
-  overrides?: {
-    totalBps?: number;
-    platformBps?: number;
-    creatorBps?: number;
-    referralBps?: number;
-  } | null
+  overrides?:
+    | { totalBps?: number; creatorBps?: number; protocolBps?: number }
+    | null
 ) {
   const cap = lamportsCapFor(phase);
-  const base = splitsForPhase(phase);
 
+  const base = bpsFor(phase);
   const totalBps = overrides?.totalBps ?? base.totalBps;
-  const platformBps = overrides?.platformBps ?? base.platformBps;
   const creatorBps = overrides?.creatorBps ?? base.creatorBps;
-  const referralBps = overrides?.referralBps ?? base.referralBps;
+  const protocolBps =
+    overrides?.protocolBps ?? Math.max(totalBps - creatorBps, 0);
 
-  if (totalBps <= 0 || tradeLamports <= 0) {
-    return {
-      feeTotal: 0,
-      platform: 0,
-      creator: 0,
-      referral: 0,
-      cap,
-      totalBps,
-      platformBps,
-      creatorBps,
-      referralBps,
-    };
-  }
-
+  // total fee in lamports
   const raw = Math.floor((tradeLamports * totalBps) / 10_000);
   const feeTotal = Math.min(raw, cap);
 
-  const platform = Math.floor((feeTotal * platformBps) / totalBps);
-  const creator = Math.floor((feeTotal * creatorBps) / totalBps);
-  // whatever is left → referral (avoids rounding dust)
-  const referral = feeTotal - platform - creator;
+  const creator = Math.floor(
+    (feeTotal * creatorBps) / Math.max(totalBps, 1)
+  );
+  const protocol = feeTotal - creator;
 
   return {
     feeTotal,
-    platform,
+    protocol,
     creator,
-    referral,
     cap,
     totalBps,
-    platformBps,
     creatorBps,
-    referralBps,
+    protocolBps,
   };
 }
 
 export function buildFeeTransfers(opts: {
   feePayer: PublicKey;
-  tradeLamports: number; // lamports size of the trade
+  tradeLamports: number; // already in lamports
   phase: Phase;
-  platformTreasury: PublicKey;
+  protocolTreasury: PublicKey;
   creatorAddress?: PublicKey | null;
-  referralTreasury?: PublicKey | null;
-  overrides?: {
-    totalBps?: number;
-    platformBps?: number;
-    creatorBps?: number;
-    referralBps?: number;
-  } | null;
+  overrides?:
+    | { totalBps?: number; creatorBps?: number; protocolBps?: number }
+    | null;
 }): {
   ixs: TransactionInstruction[];
   detail: ReturnType<typeof computeFeeLamports>;
@@ -136,18 +103,18 @@ export function buildFeeTransfers(opts: {
 
   const ixs: TransactionInstruction[] = [];
 
-  // Platform always goes to platformTreasury
-  if (detail.platform > 0) {
+  // Platform / protocol share
+  if (detail.protocol > 0) {
     ixs.push(
       SystemProgram.transfer({
         fromPubkey: opts.feePayer,
-        toPubkey: opts.platformTreasury,
-        lamports: detail.platform,
+        toPubkey: opts.protocolTreasury,
+        lamports: detail.protocol,
       })
     );
   }
 
-  // Creator (if any)
+  // Creator share
   if (detail.creator > 0 && opts.creatorAddress) {
     ixs.push(
       SystemProgram.transfer({
@@ -158,18 +125,26 @@ export function buildFeeTransfers(opts: {
     );
   }
 
-  // Referral: if referralTreasury is missing, send to platform (so nothing breaks)
-  if (detail.referral > 0) {
-    const referralTo = opts.referralTreasury ?? opts.platformTreasury;
-    ixs.push(
-      SystemProgram.transfer({
-        fromPubkey: opts.feePayer,
-        toPubkey: referralTo,
-        lamports: detail.referral,
-      })
-    );
-  }
-
   return { ixs, detail };
+}
+
+// --- For UI display / previews only (no referral yet) ---
+
+// BUY: 0.50% platform, 0% creator
+export const BUY_PLATFORM_BPS = 50;
+export const BUY_CREATOR_BPS = 0;
+
+// SELL: 1.00% total → 0.30% platform, 0.70% creator
+export const SELL_PLATFORM_BPS = 30;
+export const SELL_CREATOR_BPS = 70;
+
+export const TOTAL_BUY_BPS = BUY_PLATFORM_BPS + BUY_CREATOR_BPS;
+export const TOTAL_SELL_BPS = SELL_PLATFORM_BPS + SELL_CREATOR_BPS;
+
+// Simple helper for float amounts (UI-side preview)
+export function applyFee(amount: number, feeBps: number) {
+  const fee = (amount * feeBps) / 10_000;
+  const net = amount - fee;
+  return { net, fee };
 }
 
