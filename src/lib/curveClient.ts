@@ -54,7 +54,7 @@ function safeLamportsFromSol(amountSol: number): number {
 
 /* ======================= BUY ======================= */
 /**
- * trade_buy with platform/creator fee (off-chain transfers).
+ * trade_buy with platform/creator fee.
  *
  * - amountSol = amount going into the curve (basis for price & tokens).
  * - Fees are charged ON TOP from the user's wallet:
@@ -82,7 +82,7 @@ export async function buildBuyTx(
   // 1) fee transfers (pre / buy side)
   const { ixs: feeIxs } = buildFeeTransfers({
     feePayer: payer,
-    tradeSol: amountSol, // <<== IMPORTANT: we pass SOL, not lamports
+    tradeLamports,          // << lamports passed in
     phase: "pre",
     protocolTreasury: FEE_TREASURY,
     creatorAddress: creatorAddress ?? null,
@@ -119,7 +119,7 @@ export async function buildBuyTx(
 
 /* ======================= SELL ======================= */
 /**
- * trade_sell with platform/creator fee (off-chain transfers).
+ * trade_sell with platform/creator fee.
  *
  * - amountSol = gross amount you want from the curve PDA (from UI).
  * - We convert that to lamports (tradeLamports) and use it consistently:
@@ -129,6 +129,8 @@ export async function buildBuyTx(
  * Tx flow:
  *   1) program ix: trade_sell(lamports)
  *   2) fee transfers payer -> platform + optional creator
+ *
+ * NOTE: Fees are *off-chain* (extra SystemProgram.transfer).
  */
 export async function buildSellTx(
   conn: Connection,
@@ -158,10 +160,10 @@ export async function buildSellTx(
     data,
   });
 
-  // 2) fee transfers (post / sell side)
+  // 2) fee transfers (post / sell side) – from payer AFTER they receive from curve
   const { ixs: feeIxs } = buildFeeTransfers({
     feePayer: payer,
-    tradeSol: amountSol, // <<== same: SOL amount
+    tradeLamports, // << lamports passed in
     phase: "post",
     protocolTreasury: FEE_TREASURY,
     creatorAddress: creatorAddress ?? null,
