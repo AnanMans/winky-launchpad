@@ -1,7 +1,4 @@
 // src/lib/curveClient.ts
-// Temp
-// Client-side builder for trade_buy / trade_sell + off-chain fees.
-
 import {
   Connection,
   PublicKey,
@@ -76,7 +73,9 @@ export async function buildBuyTx(
   creatorAddress?: PublicKey | null // optional; if not provided, all fee -> platform
 ) {
   const state = curveStatePda(mint);
-  const tradeLamports = safeLamportsFromSol(amountSol);
+
+  const tradeSol = Number(amountSol) || 0;
+  const tradeLamports = safeLamportsFromSol(tradeSol);
 
   if (tradeLamports <= 0) {
     throw new Error("Invalid buy amount (must be > 0)");
@@ -85,7 +84,7 @@ export async function buildBuyTx(
   // 1) fee transfers (pre / buy side)
   const { ixs: feeIxs } = buildFeeTransfers({
     feePayer: payer,
-    tradeLamports,
+    tradeSol, // <<< SOL, not lamports
     phase: "pre",
     protocolTreasury: FEE_TREASURY,
     creatorAddress: creatorAddress ?? null,
@@ -143,7 +142,9 @@ export async function buildSellTx(
   creatorAddress?: PublicKey | null
 ) {
   const state = curveStatePda(mint);
-  const tradeLamports = safeLamportsFromSol(amountSol);
+
+  const tradeSol = Number(amountSol) || 0;
+  const tradeLamports = safeLamportsFromSol(tradeSol);
 
   if (tradeLamports <= 0) {
     throw new Error("Invalid sell amount (must be > 0)");
@@ -166,7 +167,7 @@ export async function buildSellTx(
   // 2) fee transfers (post / sell side) – from payer AFTER they receive from curve
   const { ixs: feeIxs } = buildFeeTransfers({
     feePayer: payer,
-    tradeLamports,
+    tradeSol, // <<< SOL, not lamports
     phase: "post",
     protocolTreasury: FEE_TREASURY,
     creatorAddress: creatorAddress ?? null,
