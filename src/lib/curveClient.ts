@@ -1,4 +1,8 @@
 // src/lib/curveClient.ts
+//
+// Builds client-side transactions for trade_buy / trade_sell
+// and attaches off-chain fee transfers using src/lib/fees.ts.
+
 import {
   Connection,
   PublicKey,
@@ -30,7 +34,7 @@ function u64(n: number | bigint) {
   return Buffer.from(a);
 }
 
-/* ---------- discriminators ---------- */
+/* ---------- discriminators (sha256("global:<name>").slice(0,8)) ---------- */
 function discBuy() {
   return Buffer.from([173, 172, 52, 244, 61, 65, 216, 118]); // trade_buy
 }
@@ -41,29 +45,45 @@ function discSell() {
 // protocol / fee treasury (platform wallet)
 const FEE_TREASURY = new PublicKey(
   process.env.NEXT_PUBLIC_FEE_TREASURY ||
-    process.env.NEXT_PUBLIC_TREASURY ||
+    process.env.NEXT_PUBLIC_TREASURY || // fallback
     process.env.NEXT_PUBLIC_PLATFORM_WALLET!
 );
 
+/* small helper to make sure we never get NaN lamports */
 function safeLamportsFromSol(amountSol: number): number {
   const n = Number(amountSol);
   if (!Number.isFinite(n) || n <= 0) return 0;
-  return Math.floor(n * 1e9);
+  return Math.floor(n * 1e9); // 1 SOL = 1e9 lamports
 }
 
 /* ======================= BUY ======================= */
+/**
+ * trade_buy with platform/creator fee.
+ *
+ * - amountSol = amount going into the curve (basis for price & tokens).
+ * - Fees are charged ON TOP from the user's wallet:
+ *     payer -> platform + optional creator
+ *
+ * Tx flow:
+ *   1) fee transfers (payer -> platform/creator)
+ *   2) system transfer payer -> curve state PDA (trade lamports)
+ *   3) program ix: trade_buy(lamports)
+ */
 export async function buildBuyTx(
   conn: Connection,
   mint: PublicKey,
   payer: PublicKey,
   amountSol: number,
-  creatorAddress?: PublicKey | null
+  creatorAddress?: PublicKey | null // optional; if not provided, all fee -> platform
 ) {
   const state = curveStatePda(mint);
   const tradeLamports = safeLamportsFromSol(amountSol);
-  if (tradeLamports <= 0) throw new Error("Invalid buy amount (must be > 0)");
 
-  // fees (pre / BUY)
+  if (tradeLamports <= 0) {
+    throw new Error("Invalid buy amount (must be > 0)");
+  }
+
+  // 1) fee transfers (pre / buy side)
   const { ixs: feeIxs } = buildFeeTransfers({
     feePayer: payer,
     tradeLamports,
@@ -72,13 +92,14 @@ export async function buildBuyTx(
     creatorAddress: creatorAddress ?? null,
   });
 
-  // transfer into curve
+  // 2) system transfer payer -> state (actual trade amount)
   const transferIx = SystemProgram.transfer({
     fromPubkey: payer,
     toPubkey: state,
     lamports: tradeLamports,
   });
 
+  // 3) program ix: trade_buy(payer, mint, state, system_program)
   const data = Buffer.concat([discBuy(), u64(tradeLamports)]);
   const keys = [
     { pubkey: payer, isSigner: true, isWritable: true },
@@ -86,7 +107,11 @@ export async function buildBuyTx(
     { pubkey: state, isSigner: false, isWritable: true },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
   ];
-  const buyIx = new TransactionInstruction({ programId: PROGRAM_ID, keys, data });
+  const buyIx = new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys,
+    data,
+  });
 
   const { blockhash } = await conn.getLatestBlockhash("confirmed");
   const tx = new Transaction();
@@ -97,6 +122,20 @@ export async function buildBuyTx(
 }
 
 /* ======================= SELL ======================= */
+/**
+ * trade_sell with platform/creator fee.
+ *
+ * - amountSol = gross amount you want from the curve PDA (from UI).
+ * - We convert that to lamports (tradeLamports) and use it consistently:
+ *     - program moves `tradeLamports` from curve PDA -> payer
+ *     - then we send fee % from payer -> platform/creator
+ *
+ * Tx flow:
+ *   1) program ix: trade_sell(lamports)
+ *   2) fee transfers payer -> platform + optional creator
+ *
+ * NOTE: Fees are *off-chain* (extra SystemProgram.transfer).
+ */
 export async function buildSellTx(
   conn: Connection,
   mint: PublicKey,
@@ -106,8 +145,12 @@ export async function buildSellTx(
 ) {
   const state = curveStatePda(mint);
   const tradeLamports = safeLamportsFromSol(amountSol);
-  if (tradeLamports <= 0) throw new Error("Invalid sell amount (must be > 0)");
 
+  if (tradeLamports <= 0) {
+    throw new Error("Invalid sell amount (must be > 0)");
+  }
+
+  // 1) program ix: trade_sell(payer, mint, state, system_program)
   const data = Buffer.concat([discSell(), u64(tradeLamports)]);
   const keys = [
     { pubkey: payer, isSigner: true, isWritable: true },
@@ -115,9 +158,13 @@ export async function buildSellTx(
     { pubkey: state, isSigner: false, isWritable: true },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
   ];
-  const sellIx = new TransactionInstruction({ programId: PROGRAM_ID, keys, data });
+  const sellIx = new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys,
+    data,
+  });
 
-  // fees (post / SELL)
+  // 2) fee transfers (post / sell side) – from payer AFTER they receive from curve
   const { ixs: feeIxs } = buildFeeTransfers({
     feePayer: payer,
     tradeLamports,
