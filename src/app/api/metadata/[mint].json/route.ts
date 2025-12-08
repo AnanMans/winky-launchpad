@@ -1,65 +1,87 @@
 // src/app/api/metadata/[mint].json/route.ts
-export const runtime = "nodejs";
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-function bad(msg: string, code = 400, extra: any = {}) {
-  return NextResponse.json({ error: msg, ...extra }, { status: code });
-}
+export const runtime = "nodejs";
 
-function getBaseUrl() {
-  return (
-    process.env.SITE_BASE ||
-    process.env.NEXT_PUBLIC_SITE_URL ||
-    "http://localhost:3000"
-  );
-}
+type RouteCtx = {
+  params: Promise<{ mint: string }>;
+};
 
-export async function GET(
-  _req: NextRequest,
-  context: { params: { mint: string } }
-) {
-  try {
-    const mint = (context.params.mint || "").trim();
-    if (!mint) return bad("Missing mint");
+export async function GET(_req: Request, ctx: RouteCtx) {
+  const { mint } = await ctx.params;
+  const mintStr = (mint || "").trim();
 
-    const { data: coin, error } = await supabaseAdmin
-      .from("coins")
-      .select("name, symbol, logo_url, description")
-      .eq("mint", mint)
-      .maybeSingle();
-
-    if (error) {
-      console.error("[metadata.json] supabase error:", error);
-      return bad(error.message, 500);
-    }
-
-    const rawName =
-      (coin?.name as string | null | undefined) ?? "Winky Launchpad Coin";
-    const rawSymbol =
-      (coin?.symbol as string | null | undefined) ?? "WINKY";
-    const description =
-      (coin?.description as string | null | undefined) ??
-      "Token launched on Winky Launchpad.";
-
-    const name = rawName.slice(0, 32);
-    const symbol = rawSymbol.toUpperCase().slice(0, 10);
-
-    // This must be the full URL to the uploaded image
-    const image =
-      (coin?.logo_url as string | null | undefined) ??
-      `${getBaseUrl()}/default-token.png`;
-
-    return NextResponse.json({
-      name,
-      symbol,
-      description,
-      image,
-    });
-  } catch (e: any) {
-    console.error("[metadata.json] error:", e);
-    return bad(e?.message || String(e), 500);
+  if (!mintStr) {
+    return NextResponse.json(
+      { error: "Missing mint address" },
+      { status: 400 }
+    );
   }
+
+  // Pull the coin by mint from Supabase
+  const { data: coin, error } = await supabaseAdmin
+    .from("coins")
+    .select("id, name, symbol, description, logo_url, socials")
+    .eq("mint", mintStr)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[metadata.json] Supabase error:", error);
+    return NextResponse.json(
+      { error: "Supabase error: " + error.message },
+      { status: 500 }
+    );
+  }
+
+  if (!coin) {
+    return NextResponse.json(
+      { error: "Coin not found for this mint" },
+      { status: 404 }
+    );
+  }
+
+  const siteBase =
+    process.env.NEXT_PUBLIC_SITE_URL ||
+    process.env.SITE_BASE ||
+    "https://winky-launchpad.vercel.app";
+
+  // Make sure we always return valid strings
+  const name = coin.name || coin.symbol || "Winky Coin";
+  const symbol = coin.symbol || "";
+  const description =
+    coin.description || `${symbol || name} created on Winky Launchpad`;
+  const image = coin.logo_url || "";
+
+  const socials = (coin.socials || {}) as any;
+
+  const metadata = {
+    name,
+    symbol,
+    description,
+    image,
+    external_url: `${siteBase}/coin/${coin.id}`,
+    // Extras that some explorers read
+    extensions: {
+      website: socials.website || null,
+      twitter: socials.x || socials.twitter || null,
+      telegram: socials.telegram || null,
+    },
+    // Optional Metaplex-style properties
+    properties: {
+      category: "image",
+      files: image
+        ? [
+            {
+              uri: image,
+              type: "image/png",
+            },
+          ]
+        : [],
+    },
+  };
+
+  return NextResponse.json(metadata, { status: 200 });
 }
 
