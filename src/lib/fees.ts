@@ -14,17 +14,33 @@ import {
 
 export type Phase = "pre" | "post"; // "pre" = buy, "post" = sell
 
-/** Flat % by trade size (SOL).
- *  - BUY  : 0.70% total → 0.50% platform, 0.20% creator
- *  - SELL : 1.00% total → 0.60% platform, 0.40% creator
+/** Flat % by trade side (no tiers for now).
+ *
+ *  BUY (pre):
+ *    - 0.5% platform
+ *    - 0.2% creator
+ *    → 0.7% total  (70 bps)
+ *
+ *  SELL (post):
+ *    - 0.6% platform
+ *    - 0.4% creator
+ *    → 1.0% total  (100 bps)
  */
 function tierBpsFor(tradeSol: number, phase: Phase) {
   if (phase === "pre") {
-    // BUY side → 0.7% total = 0.5% platform + 0.2% creator
-    return { totalBps: 70, creatorBps: 20, protocolBps: 50 };
+    // BUY side: 0.5% platform, 0.2% creator
+    return {
+      totalBps: 70,  // 0.70% total
+      creatorBps: 20, // 0.20% creator
+      protocolBps: 50, // 0.50% platform
+    };
   } else {
-    // SELL side → 1.0% total = 0.6% platform + 0.4% creator
-    return { totalBps: 100, creatorBps: 40, protocolBps: 60 };
+    // SELL side: 0.6% platform, 0.4% creator
+    return {
+      totalBps: 100, // 1.00% total
+      creatorBps: 40, // 0.40% creator
+      protocolBps: 60, // 0.60% platform
+    };
   }
 }
 
@@ -81,10 +97,7 @@ export function buildFeeTransfers(opts: {
   overrides?:
     | { totalBps?: number; creatorBps?: number; protocolBps?: number }
     | null;
-}): {
-  ixs: TransactionInstruction[];
-  detail: ReturnType<typeof computeFeeLamports>;
-} {
+}): { ixs: TransactionInstruction[]; detail: ReturnType<typeof computeFeeLamports> } {
   const tradeLamports = Math.floor(opts.tradeSol * 1_000_000_000); // 1 SOL = 1e9 lamports
   const detail = computeFeeLamports(
     tradeLamports,
@@ -119,13 +132,14 @@ export function buildFeeTransfers(opts: {
 }
 
 // --- Winky Launchpad fee config (for UI display, etc) ---
-// BUY: 0.7% total → 0.5% platform, 0.2% creator
-export const BUY_PLATFORM_BPS = 50; // 0.50%
-export const BUY_CREATOR_BPS = 20;  // 0.20%
 
-// SELL: 1.0% total → 0.6% platform, 0.4% creator
+// BUY: 0.5% platform, 0.2% creator → 0.7% total
+export const BUY_PLATFORM_BPS = 50; // 0.50%
+export const BUY_CREATOR_BPS = 20; // 0.20%
+
+// SELL: 0.6% platform, 0.4% creator → 1.0% total
 export const SELL_PLATFORM_BPS = 60; // 0.60%
-export const SELL_CREATOR_BPS = 40;  // 0.40%
+export const SELL_CREATOR_BPS = 40; // 0.40%
 
 export const TOTAL_BUY_BPS = BUY_PLATFORM_BPS + BUY_CREATOR_BPS;
 export const TOTAL_SELL_BPS = SELL_PLATFORM_BPS + SELL_CREATOR_BPS;
