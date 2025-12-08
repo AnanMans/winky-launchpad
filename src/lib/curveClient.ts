@@ -1,10 +1,4 @@
 // src/lib/curveClient.ts
-//
-// Builds client-side BUY / SELL transactions including off-chain fees:
-// - Fees are pure SystemProgram.transfer ixs to platform + creator.
-// - Fee math is centralized in src/lib/fees.ts.
-//
-
 import {
   Connection,
   PublicKey,
@@ -64,7 +58,7 @@ function safeLamportsFromSol(amountSol: number): number {
  *
  * - amountSol = amount going into the curve (basis for price & tokens).
  * - Fees are charged ON TOP from the user's wallet:
- *     payer -> platform + creator
+ *     payer -> platform (+ creator, but creatorBps=0 on BUY so 0 now).
  *
  * Tx flow:
  *   1) fee transfers (payer -> platform/creator)
@@ -85,13 +79,13 @@ export async function buildBuyTx(
     throw new Error("Invalid buy amount (must be > 0)");
   }
 
-  // 1) fee transfers (pre / buy side)
+  // 1) fee transfers (pre / buy side) – uses tradeSol, NOT lamports
   const { ixs: feeIxs } = buildFeeTransfers({
     feePayer: payer,
-    tradeSol: amountSol, // in SOL
+    tradeSol: amountSol,
     phase: "pre",
     protocolTreasury: FEE_TREASURY,
-    creatorAddress: creatorAddress ?? null,
+    creatorAddress: creatorAddress ?? null, // creatorBps=0 on BUY → 0 anyway
   });
 
   // 2) system transfer payer -> state (actual trade amount)
@@ -130,7 +124,7 @@ export async function buildBuyTx(
  * - amountSol = gross amount you want from the curve PDA (from UI).
  * - We convert that to lamports (tradeLamports) and use it consistently:
  *     - program moves `tradeLamports` from curve PDA -> payer
- *     - then we send fee % from payer -> platform/creator
+ *     - then we send fee % from payer -> platform/creator.
  *
  * Tx flow:
  *   1) program ix: trade_sell(lamports)
@@ -169,10 +163,10 @@ export async function buildSellTx(
   // 2) fee transfers (post / sell side) – from payer AFTER they receive from curve
   const { ixs: feeIxs } = buildFeeTransfers({
     feePayer: payer,
-    tradeSol: amountSol, // in SOL
+    tradeSol: amountSol,
     phase: "post",
     protocolTreasury: FEE_TREASURY,
-    creatorAddress: creatorAddress ?? null,
+    creatorAddress: creatorAddress ?? null, // ← this is what pays creator on SELL
   });
 
   const { blockhash } = await conn.getLatestBlockhash("confirmed");
