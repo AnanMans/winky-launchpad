@@ -1,7 +1,9 @@
 // src/lib/curveClient.ts
 //
-// Builds client-side transactions for trade_buy / trade_sell
-// and attaches off-chain fee transfers using src/lib/fees.ts.
+// Builds client-side BUY / SELL transactions including off-chain fees:
+// - Fees are pure SystemProgram.transfer ixs to platform + creator.
+// - Fee math is centralized in src/lib/fees.ts.
+//
 
 import {
   Connection,
@@ -62,7 +64,7 @@ function safeLamportsFromSol(amountSol: number): number {
  *
  * - amountSol = amount going into the curve (basis for price & tokens).
  * - Fees are charged ON TOP from the user's wallet:
- *     payer -> platform + optional creator
+ *     payer -> platform + creator
  *
  * Tx flow:
  *   1) fee transfers (payer -> platform/creator)
@@ -132,7 +134,7 @@ export async function buildBuyTx(
  *
  * Tx flow:
  *   1) program ix: trade_sell(lamports)
- *   2) fee transfers payer -> platform + optional creator
+ *   2) fee transfers payer -> platform + creator
  *
  * NOTE: Fees are *off-chain* (extra SystemProgram.transfer).
  */
