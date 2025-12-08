@@ -1,4 +1,7 @@
 // src/lib/curveClient.ts
+//
+// Client-side builder for trade_buy / trade_sell + off-chain fees.
+
 import {
   Connection,
   PublicKey,
@@ -129,6 +132,8 @@ export async function buildBuyTx(
  * Tx flow:
  *   1) program ix: trade_sell(lamports)
  *   2) fee transfers payer -> platform + optional creator
+ *
+ * NOTE: Fees are *off-chain* (extra SystemProgram.transfer).
  */
 export async function buildSellTx(
   conn: Connection,
