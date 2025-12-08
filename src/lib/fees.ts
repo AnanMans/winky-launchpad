@@ -2,9 +2,7 @@
 //
 // Centralized fee logic for Winky Launchpad.
 //
-// - All percentages are in basis points (bps), where 1 bp = 0.01%.
-// - We do ALL platform/creator fees here (off-chain).
-// - Anchor program should have its own F_* BPs set to 0 so we don't double-charge.
+// All percentages are in basis points (bps), where 1 bp = 0.01%.
 
 import {
   PublicKey,
@@ -15,37 +13,31 @@ import {
 export type Phase = "pre" | "post"; // "pre" = buy, "post" = sell
 
 /**
- * Fee schedule (in bps) – YOUR FINAL CHOICE:
+ * Flat fee tiers:
  *
- * BUY  (pre) : 0.7% total
- *   - 0.5% platform
- *   - 0.2% creator
+ * BUY  (pre):
+ *   - 0.50% platform
+ *   - 0.20% creator
+ *   = 0.70% total
  *
- * SELL (post): 1.0% total
- *   - 0.6% platform
- *   - 0.4% creator
+ * SELL (post):
+ *   - 0.60% platform
+ *   - 0.40% creator
+ *   = 1.00% total
  */
 function tierBpsFor(_tradeSol: number, phase: Phase) {
   if (phase === "pre") {
-    // BUY
-    return {
-      totalBps: 70,   // 0.70% total
-      creatorBps: 20, // 0.20% to creator
-      protocolBps: 50 // 0.50% to platform
-    };
+    // BUY side: 0.5% platform, 0.2% creator
+    return { totalBps: 70, creatorBps: 20, protocolBps: 50 };
   } else {
-    // SELL
-    return {
-      totalBps: 100,  // 1.00% total
-      creatorBps: 40, // 0.40% to creator
-      protocolBps: 60 // 0.60% to platform
-    };
+    // SELL side: 0.6% platform, 0.4% creator
+    return { totalBps: 100, creatorBps: 40, protocolBps: 60 };
   }
 }
 
 /** Absolute caps (lamports) to protect whales; configurable via env */
 function lamportsCapFor(phase: Phase) {
-  const defPre = 500_000_000;  // 0.5 SOL
+  const defPre = 500_000_000; // 0.5 SOL
   const defPost = 250_000_000; // 0.25 SOL
   const pre = Number(process.env.F_CAP_LAMPORTS_PRE ?? defPre);
   const post = Number(process.env.F_CAP_LAMPORTS_POST ?? defPost);
@@ -89,7 +81,7 @@ export function computeFeeLamports(
 
 export function buildFeeTransfers(opts: {
   feePayer: PublicKey;
-  tradeLamports: number;   // in lamports
+  tradeLamports: number;      // <<< IMPORTANT: lamports, not SOL
   phase: Phase;
   protocolTreasury: PublicKey;
   creatorAddress?: PublicKey | null;
@@ -100,9 +92,11 @@ export function buildFeeTransfers(opts: {
   ixs: TransactionInstruction[];
   detail: ReturnType<typeof computeFeeLamports>;
 } {
-  const tradeSol = opts.tradeLamports / 1_000_000_000; // lamports → SOL
+  const tradeLamports = opts.tradeLamports;
+  const tradeSol = tradeLamports / 1_000_000_000; // 1 SOL = 1e9 lamports
+
   const detail = computeFeeLamports(
-    opts.tradeLamports,
+    tradeLamports,
     tradeSol,
     opts.phase,
     opts.overrides
@@ -110,7 +104,6 @@ export function buildFeeTransfers(opts: {
 
   const ixs: TransactionInstruction[] = [];
 
-  // platform / protocol
   if (detail.protocol > 0) {
     ixs.push(
       SystemProgram.transfer({
@@ -121,7 +114,6 @@ export function buildFeeTransfers(opts: {
     );
   }
 
-  // creator
   if (detail.creator > 0 && opts.creatorAddress) {
     ixs.push(
       SystemProgram.transfer({
@@ -135,15 +127,18 @@ export function buildFeeTransfers(opts: {
   return { ixs, detail };
 }
 
-// --- For UI display / previews ---
-export const BUY_PLATFORM_BPS = 50; // 0.50%
-export const BUY_CREATOR_BPS = 20;  // 0.20%
+// --- Winky Launchpad fee config (for UI display / math previews) ---
 
-export const SELL_PLATFORM_BPS = 60; // 0.60%
-export const SELL_CREATOR_BPS = 40;  // 0.40%
+// BUY: 0.5% platform, 0.2% creator
+export const BUY_PLATFORM_BPS = 50;
+export const BUY_CREATOR_BPS = 20;
 
-export const TOTAL_BUY_BPS = BUY_PLATFORM_BPS + BUY_CREATOR_BPS;   // 70
-export const TOTAL_SELL_BPS = SELL_PLATFORM_BPS + SELL_CREATOR_BPS; // 100
+// SELL: 0.6% platform, 0.4% creator
+export const SELL_PLATFORM_BPS = 60;
+export const SELL_CREATOR_BPS = 40;
+
+export const TOTAL_BUY_BPS = BUY_PLATFORM_BPS + BUY_CREATOR_BPS;   // 70 bps
+export const TOTAL_SELL_BPS = SELL_PLATFORM_BPS + SELL_CREATOR_BPS; // 100 bps
 
 // Simple helper for float amounts (UI-side previews)
 export function applyFee(amount: number, feeBps: number) {
