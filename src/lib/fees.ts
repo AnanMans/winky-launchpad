@@ -3,8 +3,8 @@
 // Centralized fee logic for Winky Launchpad.
 //
 // - All percentages are in basis points (bps), where 1 bp = 0.01%.
-// - This file is ONLY for UI / previews. Real fees are enforced by
-//   the on-chain Anchor program using F_* env vars at compile time.
+// - We do ALL platform/creator fees here (off-chain).
+// - Anchor program should have its own F_* BPs set to 0 so we don't double-charge.
 
 import {
   PublicKey,
@@ -12,26 +12,40 @@ import {
   TransactionInstruction,
 } from "@solana/web3.js";
 
-export type Phase = "pre" | "post"; // "pre" = buy/create, "post" = sell
+export type Phase = "pre" | "post"; // "pre" = buy, "post" = sell
 
 /**
- * Flat % by trade side:
- *  - BUY  (pre) : 0.7% total → 0.5% platform, 0.2% creator
- *  - SELL (post): 1.0% total → 0.6% platform, 0.4% creator
+ * Fee schedule (in bps) – YOUR FINAL CHOICE:
+ *
+ * BUY  (pre) : 0.7% total
+ *   - 0.5% platform
+ *   - 0.2% creator
+ *
+ * SELL (post): 1.0% total
+ *   - 0.6% platform
+ *   - 0.4% creator
  */
-function tierBpsFor(tradeSol: number, phase: Phase) {
+function tierBpsFor(_tradeSol: number, phase: Phase) {
   if (phase === "pre") {
-    // BUY side (and create)
-    return { totalBps: 70, creatorBps: 20, protocolBps: 50 };
+    // BUY
+    return {
+      totalBps: 70,   // 0.70% total
+      creatorBps: 20, // 0.20% to creator
+      protocolBps: 50 // 0.50% to platform
+    };
   } else {
-    // SELL side
-    return { totalBps: 100, creatorBps: 40, protocolBps: 60 };
+    // SELL
+    return {
+      totalBps: 100,  // 1.00% total
+      creatorBps: 40, // 0.40% to creator
+      protocolBps: 60 // 0.60% to platform
+    };
   }
 }
 
 /** Absolute caps (lamports) to protect whales; configurable via env */
 function lamportsCapFor(phase: Phase) {
-  const defPre = 500_000_000; // 0.5 SOL
+  const defPre = 500_000_000;  // 0.5 SOL
   const defPost = 250_000_000; // 0.25 SOL
   const pre = Number(process.env.F_CAP_LAMPORTS_PRE ?? defPre);
   const post = Number(process.env.F_CAP_LAMPORTS_POST ?? defPost);
@@ -75,7 +89,7 @@ export function computeFeeLamports(
 
 export function buildFeeTransfers(opts: {
   feePayer: PublicKey;
-  tradeSol: number;
+  tradeLamports: number;   // in lamports
   phase: Phase;
   protocolTreasury: PublicKey;
   creatorAddress?: PublicKey | null;
@@ -86,16 +100,17 @@ export function buildFeeTransfers(opts: {
   ixs: TransactionInstruction[];
   detail: ReturnType<typeof computeFeeLamports>;
 } {
-  const tradeLamports = Math.floor(opts.tradeSol * 1_000_000_000); // 1 SOL = 1e9 lamports
+  const tradeSol = opts.tradeLamports / 1_000_000_000; // lamports → SOL
   const detail = computeFeeLamports(
-    tradeLamports,
-    opts.tradeSol,
+    opts.tradeLamports,
+    tradeSol,
     opts.phase,
     opts.overrides
   );
 
   const ixs: TransactionInstruction[] = [];
 
+  // platform / protocol
   if (detail.protocol > 0) {
     ixs.push(
       SystemProgram.transfer({
@@ -106,6 +121,7 @@ export function buildFeeTransfers(opts: {
     );
   }
 
+  // creator
   if (detail.creator > 0 && opts.creatorAddress) {
     ixs.push(
       SystemProgram.transfer({
@@ -119,18 +135,15 @@ export function buildFeeTransfers(opts: {
   return { ixs, detail };
 }
 
-// --- Winky Launchpad fee config (for UI display, etc) ---
-
-// BUY: 0.5% platform, 0.2% creator (0.7% total)
+// --- For UI display / previews ---
 export const BUY_PLATFORM_BPS = 50; // 0.50%
 export const BUY_CREATOR_BPS = 20;  // 0.20%
 
-// SELL: 0.6% platform, 0.4% creator (1.0% total)
 export const SELL_PLATFORM_BPS = 60; // 0.60%
 export const SELL_CREATOR_BPS = 40;  // 0.40%
 
-export const TOTAL_BUY_BPS = BUY_PLATFORM_BPS + BUY_CREATOR_BPS;   // 70 bps
-export const TOTAL_SELL_BPS = SELL_PLATFORM_BPS + SELL_CREATOR_BPS; // 100 bps
+export const TOTAL_BUY_BPS = BUY_PLATFORM_BPS + BUY_CREATOR_BPS;   // 70
+export const TOTAL_SELL_BPS = SELL_PLATFORM_BPS + SELL_CREATOR_BPS; // 100
 
 // Simple helper for float amounts (UI-side previews)
 export function applyFee(amount: number, feeBps: number) {
