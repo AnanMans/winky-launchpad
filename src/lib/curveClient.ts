@@ -88,7 +88,7 @@ export async function buildBuyTx(
   // 1) fee transfers (pre / buy side)
   const { ixs: feeIxs } = buildFeeTransfers({
     feePayer: payer,
-    tradeLamports,
+    tradeSol: amountSol, // in SOL
     phase: "pre",
     protocolTreasury: FEE_TREASURY,
     creatorAddress: creatorAddress ?? null,
@@ -169,7 +169,7 @@ export async function buildSellTx(
   // 2) fee transfers (post / sell side) – from payer AFTER they receive from curve
   const { ixs: feeIxs } = buildFeeTransfers({
     feePayer: payer,
-    tradeLamports,
+    tradeSol: amountSol, // in SOL
     phase: "post",
     protocolTreasury: FEE_TREASURY,
     creatorAddress: creatorAddress ?? null,

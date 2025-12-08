@@ -2,20 +2,8 @@
 //
 // Centralized fee logic for Winky Launchpad.
 //
-// All % are in basis points (bps):
-// 1 bp = 0.01%
-//
-// CURRENT TARGET:
-//
-// BUY (pre):
-//   - 0.5%  platform
-//   - 0.2%  creator
-//   → 0.7% total
-//
-// SELL (post):
-//   - 0.6%  platform
-//   - 0.4%  creator
-//   → 1.0% total
+// All percentages are in basis points (bps), where 1 bp = 0.01%.
+// We keep this simple so you can tweak splits without touching other files.
 
 import {
   PublicKey,
@@ -23,18 +11,25 @@ import {
   TransactionInstruction,
 } from "@solana/web3.js";
 
-export type Phase = "pre" | "post"; // "pre" = buy, "post" = sell
+export type Phase = "pre" | "post"; // "pre" = BUY, "post" = SELL
 
-// 1 SOL = 1e9 lamports
-const LAMPORTS_PER_SOL = 1_000_000_000;
-
-/** Flat bps by phase (no tiers for now) */
-function tierBpsFor(phase: Phase) {
+/**
+ * Flat fee setup:
+ *
+ * BUY  (pre)  : 0.7% total
+ *   - 0.5% platform
+ *   - 0.2% creator
+ *
+ * SELL (post) : 1.0% total
+ *   - 0.6% platform
+ *   - 0.4% creator
+ */
+function tierBpsFor(tradeSol: number, phase: Phase) {
   if (phase === "pre") {
-    // BUY side: 0.5% platform, 0.2% creator → 0.7% total
+    // BUY: 0.5% platform + 0.2% creator = 0.7% total
     return { totalBps: 70, creatorBps: 20, protocolBps: 50 };
   } else {
-    // SELL side: 0.6% platform, 0.4% creator → 1.0% total
+    // SELL: 0.6% platform + 0.4% creator = 1.0% total
     return { totalBps: 100, creatorBps: 40, protocolBps: 60 };
   }
 }
@@ -50,6 +45,7 @@ function lamportsCapFor(phase: Phase) {
 
 export function computeFeeLamports(
   tradeLamports: number,
+  tradeSol: number,
   phase: Phase,
   overrides?:
     | { totalBps?: number; creatorBps?: number; protocolBps?: number }
@@ -57,13 +53,13 @@ export function computeFeeLamports(
 ) {
   const cap = lamportsCapFor(phase);
 
-  const tier = tierBpsFor(phase);
+  const tier = tierBpsFor(tradeSol, phase);
   const totalBps = overrides?.totalBps ?? tier.totalBps;
   const creatorBps = overrides?.creatorBps ?? tier.creatorBps;
   const protocolBps =
     overrides?.protocolBps ?? Math.max(totalBps - creatorBps, 0);
 
-  // feeTotal = trade * totalBps / 10,000 (capped)
+  // raw total fee in lamports (before cap)
   const raw = Math.floor((tradeLamports * totalBps) / 10_000);
   const feeTotal = Math.min(raw, cap);
 
@@ -85,7 +81,7 @@ export function computeFeeLamports(
 
 export function buildFeeTransfers(opts: {
   feePayer: PublicKey;
-  tradeLamports: number; // already in lamports
+  tradeSol: number; // in SOL
   phase: Phase;
   protocolTreasury: PublicKey;
   creatorAddress?: PublicKey | null;
@@ -96,16 +92,17 @@ export function buildFeeTransfers(opts: {
   ixs: TransactionInstruction[];
   detail: ReturnType<typeof computeFeeLamports>;
 } {
-  const tradeLamports = Math.floor(opts.tradeLamports || 0);
-  if (!Number.isFinite(tradeLamports) || tradeLamports <= 0) {
-    throw new Error("Invalid tradeLamports for fee transfer");
-  }
-
-  const detail = computeFeeLamports(tradeLamports, opts.phase, opts.overrides);
+  const tradeLamports = Math.floor(opts.tradeSol * 1_000_000_000); // 1 SOL = 1e9 lamports
+  const detail = computeFeeLamports(
+    tradeLamports,
+    opts.tradeSol,
+    opts.phase,
+    opts.overrides
+  );
 
   const ixs: TransactionInstruction[] = [];
 
-  // Platform part
+  // platform / protocol fee
   if (detail.protocol > 0) {
     ixs.push(
       SystemProgram.transfer({
@@ -116,7 +113,7 @@ export function buildFeeTransfers(opts: {
     );
   }
 
-  // Creator part
+  // creator fee (if creator wallet exists)
   if (detail.creator > 0 && opts.creatorAddress) {
     ixs.push(
       SystemProgram.transfer({
@@ -132,16 +129,16 @@ export function buildFeeTransfers(opts: {
 
 // --- Winky Launchpad fee config (for UI display, etc) ---
 
-// BUY: 0.5% platform, 0.2% creator → 0.7%
+// BUY: 0.5% platform, 0.2% creator
 export const BUY_PLATFORM_BPS = 50; // 0.50%
 export const BUY_CREATOR_BPS = 20; // 0.20%
 
-// SELL: 0.6% platform, 0.4% creator → 1.0%
+// SELL: 0.6% platform, 0.4% creator
 export const SELL_PLATFORM_BPS = 60; // 0.60%
 export const SELL_CREATOR_BPS = 40; // 0.40%
 
-export const TOTAL_BUY_BPS = BUY_PLATFORM_BPS + BUY_CREATOR_BPS; // 70
-export const TOTAL_SELL_BPS = SELL_PLATFORM_BPS + SELL_CREATOR_BPS; // 100
+export const TOTAL_BUY_BPS = BUY_PLATFORM_BPS + BUY_CREATOR_BPS;   // 70 = 0.7%
+export const TOTAL_SELL_BPS = SELL_PLATFORM_BPS + SELL_CREATOR_BPS; // 100 = 1.0%
 
 // Simple helper for float amounts (UI-side previews)
 export function applyFee(amount: number, feeBps: number) {
