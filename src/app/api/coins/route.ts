@@ -230,6 +230,8 @@ async function initMetadataForMintOnChain(opts: {
       state: statePda,
       mintAuthPda,
       metadata: metadataPda,
+      // 🔥 THIS WAS MISSING BEFORE – must match Rust InitMetadataAcct
+      tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
       tokenProgram: TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
     })
