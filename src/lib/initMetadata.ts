@@ -2,8 +2,6 @@
 // Automatic on-chain metadata init for a mint using PDA mint authority (Pump-style).
 
 import crypto from "crypto";
-import fs from "fs";
-import path from "path";
 import {
   Connection,
   Keypair,
@@ -17,6 +15,7 @@ import {
 
 const PROGRAM_ID = new PublicKey(
   process.env.NEXT_PUBLIC_PROGRAM_ID ||
+    process.env.PROGRAM_ID ||
     "JCFJPbZCjEMDVqU3MbM9Cst8ZEdScskr4Vb3TDT79jQ4"
 );
 
@@ -24,21 +23,18 @@ const TOKEN_METADATA_PROGRAM_ID = new PublicKey(
   "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
 );
 
-// --- helpers ---
+// ---- helpers ----
 
+// Payer must come from env (works both locally & on Vercel)
 function getPayerKeypair(): Keypair {
-  // 1) Vercel / env: MINT_AUTHORITY_KEYPAIR is a JSON array (you already have it set)
-  if (process.env.MINT_AUTHORITY_KEYPAIR) {
-    const raw = process.env.MINT_AUTHORITY_KEYPAIR;
-    const arr = JSON.parse(raw) as number[];
-    return Keypair.fromSecretKey(Uint8Array.from(arr));
+  const raw = process.env.MINT_AUTHORITY_KEYPAIR;
+  if (!raw) {
+    throw new Error(
+      "MINT_AUTHORITY_KEYPAIR env is missing (needed for initMetadataOnChain)"
+    );
   }
-
-  // 2) Local dev fallback: secrets/mint-authority.json (like your scripts)
-  const KEYPAIR_PATH = path.join(process.cwd(), "secrets", "mint-authority.json");
-  const fileRaw = fs.readFileSync(KEYPAIR_PATH, "utf8");
-  const fileArr = JSON.parse(fileRaw) as number[];
-  return Keypair.fromSecretKey(Uint8Array.from(fileArr));
+  const arr = JSON.parse(raw) as number[];
+  return Keypair.fromSecretKey(Uint8Array.from(arr));
 }
 
 // anchor-style discriminator: first 8 bytes of sha256("global:init_metadata")
@@ -70,6 +66,7 @@ export async function initMetadataOnChain(
   const rpc =
     process.env.NEXT_PUBLIC_SOLANA_RPC ||
     process.env.NEXT_PUBLIC_RPC_URL ||
+    process.env.RPC ||
     clusterApiUrl("devnet");
 
   const base =
@@ -103,6 +100,12 @@ export async function initMetadataOnChain(
     ],
     TOKEN_METADATA_PROGRAM_ID
   );
+
+  console.log("[initMetadataOnChain] mint:", mint.toBase58());
+  console.log("[initMetadataOnChain] uri:", uri);
+  console.log("[initMetadataOnChain] statePda:", statePda.toBase58());
+  console.log("[initMetadataOnChain] mintAuthPda:", mintAuthPda.toBase58());
+  console.log("[initMetadataOnChain] metadataPda:", metadataPda.toBase58());
 
   // --- build instruction data ---
   const disc = getInitMetadataDiscriminator();
