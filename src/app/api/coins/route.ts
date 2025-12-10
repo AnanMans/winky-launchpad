@@ -196,21 +196,23 @@ async function initMetadataForMintOnChain(opts: {
   const idl = idlJson as Idl;
   const coder = new BorshCoder(idl);
 
-  // Encode Anchor instruction data for `init_metadata(name, symbol, uri)`
+  // Anchor IDL name is camelCase: "initMetadata"
   const data = coder.instruction.encode("initMetadata", {
     name: opts.name,
     symbol: opts.symbol,
     uri,
   });
 
+  // 🔥 Correct account order must match InitMetadataAcct:
+  // payer, mint, state, metadata, mint_auth_pda, token_metadata_program, token_program, system_program
   const ix = new TransactionInstruction({
     programId: CURVE_PROGRAM_ID,
     keys: [
-      { pubkey: payer.publicKey, isSigner: true, isWritable: true }, // payer
-      { pubkey: mintPk, isSigner: false, isWritable: true },         // mint
-      { pubkey: statePda, isSigner: false, isWritable: true },       // state
-      { pubkey: mintAuthPda, isSigner: false, isWritable: false },   // mint_auth_pda
-      { pubkey: metadataPda, isSigner: false, isWritable: true },    // metadata PDA
+      { pubkey: payer.publicKey, isSigner: true, isWritable: true },     // payer
+      { pubkey: mintPk, isSigner: false, isWritable: true },             // mint
+      { pubkey: statePda, isSigner: false, isWritable: true },           // state
+      { pubkey: metadataPda, isSigner: false, isWritable: true },        // metadata
+      { pubkey: mintAuthPda, isSigner: false, isWritable: false },       // mint_auth_pda
       { pubkey: TOKEN_METADATA_PROGRAM_ID, isSigner: false, isWritable: false }, // token_metadata_program
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },          // token_program
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },   // system_program
