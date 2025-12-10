@@ -3,7 +3,6 @@ export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { initMetadataOnChain } from "@/lib/initMetadata"; // ⬅️ NEW
 
 // --- solana / curve imports ---
 import {
@@ -22,6 +21,15 @@ import {
 } from "@solana/spl-token";
 import bs58 from "bs58";
 
+// --- Anchor imports (for calling init_metadata on-chain) ---
+import {
+  AnchorProvider,
+  Program,
+  Idl,
+  Wallet,
+} from "@coral-xyz/anchor";
+import idlJson from "@/idl/curve_launchpad.json";
+
 // ----------------- helpers (http) -----------------
 function bad(msg: string, code = 400, extra: any = {}) {
   return NextResponse.json({ error: msg, ...extra }, { status: code });
@@ -34,7 +42,8 @@ function ok(data: any, code = 200) {
 const RPC_URL =
   process.env.RPC ||
   process.env.RPC_URL ||
-  process.env.NEXT_PUBLIC_RPC ||
+  process.env.NEXT_PUBLIC_RPC_URL ||
+  process.env.NEXT_PUBLIC_SOLANA_RPC ||
   "https://api.devnet.solana.com";
 
 const PROGRAM_ID_STR =
@@ -46,10 +55,31 @@ if (!PROGRAM_ID_STR) {
 }
 const CURVE_PROGRAM_ID = new PublicKey(PROGRAM_ID_STR);
 
+// Metaplex token-metadata program
+const TOKEN_METADATA_PROGRAM_ID = new PublicKey(
+  "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
+);
+
 // discriminator for `create_curve`
 const DISC_CREATE_CURVE = Buffer.from([
   169, 235, 221, 223, 65, 109, 120, 183,
 ]);
+
+// Simple wallet wrapper for AnchorProvider (server keypair)
+class NodeWallet implements Wallet {
+  constructor(readonly payer: Keypair) {}
+  get publicKey() {
+    return this.payer.publicKey;
+  }
+  async signTransaction(tx: Transaction): Promise<Transaction> {
+    tx.sign(this.payer);
+    return tx;
+  }
+  async signAllTransactions(txs: Transaction[]): Promise<Transaction[]> {
+    txs.forEach((tx) => tx.sign(this.payer));
+    return txs;
+  }
+}
 
 function loadServerKeypair(): Keypair {
   const raw = process.env.KEYPAIR;
@@ -141,6 +171,69 @@ async function initOnChainForCoin(_opts: {
   );
 
   return { mint: mintPk.toBase58(), signature: sig };
+}
+
+/**
+ * Call on-chain init_metadata for the given mint
+ * so Phantom can see name + symbol + image automatically.
+ */
+async function initMetadataForMintOnChain(opts: {
+  mint: string;
+  name: string;
+  symbol: string;
+}) {
+  const connection = new Connection(RPC_URL, "confirmed");
+  const payer = loadServerKeypair();
+  const wallet = new NodeWallet(payer);
+
+  const provider = new AnchorProvider(connection, wallet, {
+    commitment: "confirmed",
+  });
+
+  const idl = idlJson as Idl;
+  const program = new Program(idl, CURVE_PROGRAM_ID, provider);
+
+  const mintPk = new PublicKey(opts.mint);
+
+  const [statePda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("curve"), mintPk.toBuffer()],
+    CURVE_PROGRAM_ID
+  );
+  const [mintAuthPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("mint_auth"), mintPk.toBuffer()],
+    CURVE_PROGRAM_ID
+  );
+  const [metadataPda] = PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("metadata"),
+      TOKEN_METADATA_PROGRAM_ID.toBuffer(),
+      mintPk.toBuffer(),
+    ],
+    TOKEN_METADATA_PROGRAM_ID
+  );
+
+  const base =
+    process.env.NEXT_PUBLIC_METADATA_BASE_URL ||
+    process.env.NEXT_PUBLIC_SITE_URL ||
+    process.env.SITE_BASE ||
+    "";
+
+  const uri = `${base}/api/metadata/${opts.mint}.json`;
+
+  console.log("[initMetadataForMintOnChain] uri =", uri);
+
+  await program.methods
+    .initMetadata(opts.name, opts.symbol, uri)
+    .accounts({
+      payer: payer.publicKey,
+      mint: mintPk,
+      state: statePda,
+      mintAuthPda,
+      metadata: metadataPda,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    })
+    .rpc();
 }
 
 // ----------------- GET = list coins -----------------
@@ -275,13 +368,17 @@ export async function POST(req: Request) {
       // 3) init on-chain Metaplex metadata (automatic image + ticker)
       if (mint) {
         try {
-          await initMetadataOnChain(mint, name, symbol);
+          await initMetadataForMintOnChain({
+            mint,
+            name,
+            symbol,
+          });
         } catch (metaErr) {
           console.error(
-            "[/api/coins] initMetadataOnChain failed:",
+            "[/api/coins] initMetadataForMintOnChain failed:",
             metaErr
           );
-          // do NOT throw; coin + curve still valid even if metadata fails
+          // don't throw – coin + curve still usable even if metadata fails
         }
       }
     } catch (chainErr: any) {
