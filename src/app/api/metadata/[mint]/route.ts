@@ -53,8 +53,12 @@ export async function GET(
 
   const rawImg = (coin as any).logo_url ?? FALLBACK_IMG;
 
-  const base = process.env.NEXT_PUBLIC_SITE_URL ?? "";
-  const image = rawImg.startsWith("http") ? rawImg : `${base}${rawImg}`;
+const base =
+  process.env.NEXT_PUBLIC_SITE_URL || "https://winky-launchpad.vercel.app";
+
+const image = rawImg.startsWith("http")
+  ? rawImg
+  : `${base}${rawImg.startsWith("/") ? rawImg : `/${rawImg}`}`;
 
   const json = {
     name,
