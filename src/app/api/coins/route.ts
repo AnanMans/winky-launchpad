@@ -21,13 +21,8 @@ import {
 } from "@solana/spl-token";
 import bs58 from "bs58";
 
-// --- Anchor imports (for calling init_metadata on-chain) ---
-import {
-  AnchorProvider,
-  Program,
-  Idl,
-  Wallet,
-} from "@coral-xyz/anchor";
+// --- Anchor bits just for encoding the init_metadata ix ---
+import { BorshCoder, Idl } from "@coral-xyz/anchor";
 import idlJson from "@/idl/curve_launchpad.json";
 
 // ----------------- helpers (http) -----------------
@@ -60,26 +55,10 @@ const TOKEN_METADATA_PROGRAM_ID = new PublicKey(
   "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
 );
 
-// discriminator for `create_curve`
+// discriminator for `create_curve` (Anchor ix)
 const DISC_CREATE_CURVE = Buffer.from([
   169, 235, 221, 223, 65, 109, 120, 183,
 ]);
-
-// Simple wallet wrapper for AnchorProvider (server keypair)
-class NodeWallet implements Wallet {
-  constructor(readonly payer: Keypair) {}
-  get publicKey() {
-    return this.payer.publicKey;
-  }
-  async signTransaction(tx: Transaction): Promise<Transaction> {
-    tx.sign(this.payer);
-    return tx;
-  }
-  async signAllTransactions(txs: Transaction[]): Promise<Transaction[]> {
-    txs.forEach((tx) => tx.sign(this.payer));
-    return txs;
-  }
-}
 
 function loadServerKeypair(): Keypair {
   const raw = process.env.KEYPAIR;
@@ -175,7 +154,8 @@ async function initOnChainForCoin(_opts: {
 
 /**
  * Call on-chain init_metadata for the given mint
- * so Phantom can see name + symbol + image automatically.
+ * using raw Borsh encoding (no Program.methods).
+ * This is the AUTO part – runs inside /api/coins POST.
  */
 async function initMetadataForMintOnChain(opts: {
   mint: string;
@@ -184,15 +164,6 @@ async function initMetadataForMintOnChain(opts: {
 }) {
   const connection = new Connection(RPC_URL, "confirmed");
   const payer = loadServerKeypair();
-  const wallet = new NodeWallet(payer);
-
-  const provider = new AnchorProvider(connection, wallet, {
-    commitment: "confirmed",
-  });
-
-  const idl = idlJson as Idl;
-  const program = new Program(idl, CURVE_PROGRAM_ID, provider);
-
   const mintPk = new PublicKey(opts.mint);
 
   const [statePda] = PublicKey.findProgramAddressSync(
@@ -222,20 +193,45 @@ async function initMetadataForMintOnChain(opts: {
 
   console.log("[initMetadataForMintOnChain] uri =", uri);
 
-  await program.methods
-    .initMetadata(opts.name, opts.symbol, uri)
-    .accounts({
-      payer: payer.publicKey,
-      mint: mintPk,
-      state: statePda,
-      mintAuthPda,
-      metadata: metadataPda,
-      // 🔥 THIS WAS MISSING BEFORE – must match Rust InitMetadataAcct
-      tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
-      tokenProgram: TOKEN_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
-    })
-    .rpc();
+  const idl = idlJson as Idl;
+  const coder = new BorshCoder(idl);
+
+  // Encode Anchor instruction data for `init_metadata(name, symbol, uri)`
+  const data = coder.instruction.encode("initMetadata", {
+    name: opts.name,
+    symbol: opts.symbol,
+    uri,
+  });
+
+  const ix = new TransactionInstruction({
+    programId: CURVE_PROGRAM_ID,
+    keys: [
+      { pubkey: payer.publicKey, isSigner: true, isWritable: true }, // payer
+      { pubkey: mintPk, isSigner: false, isWritable: true },         // mint
+      { pubkey: statePda, isSigner: false, isWritable: true },       // state
+      { pubkey: mintAuthPda, isSigner: false, isWritable: false },   // mint_auth_pda
+      { pubkey: metadataPda, isSigner: false, isWritable: true },    // metadata PDA
+      { pubkey: TOKEN_METADATA_PROGRAM_ID, isSigner: false, isWritable: false }, // token_metadata_program
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },          // token_program
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },   // system_program
+    ],
+    data,
+  });
+
+  const tx = new Transaction().add(ix);
+  const { blockhash, lastValidBlockHeight } =
+    await connection.getLatestBlockhash("confirmed");
+
+  tx.recentBlockhash = blockhash;
+  tx.feePayer = payer.publicKey;
+
+  const sig = await connection.sendTransaction(tx, [payer]);
+  await connection.confirmTransaction(
+    { signature: sig, blockhash, lastValidBlockHeight },
+    "confirmed"
+  );
+
+  console.log("[initMetadataForMintOnChain] tx sig:", sig);
 }
 
 // ----------------- GET = list coins -----------------
