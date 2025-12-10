@@ -16,9 +16,12 @@ export default function CreateCoinPage() {
   const [name, setName] = useState('');
   const [symbol, setSymbol] = useState('');
   const [description, setDescription] = useState('');
-  const [website, setWebsite] = useState('https://www.google.com/');
-  const [xLink, setXLink] = useState('https://www.google.com/');
-  const [telegram, setTelegram] = useState('https://www.google.com/');
+
+  // socials start EMPTY, we only save what user type
+  const [website, setWebsite] = useState('');
+  const [xLink, setXLink] = useState('');
+  const [telegram, setTelegram] = useState('');
+
   const [curve, setCurve] = useState<CurveType>('linear');
   const [strength, setStrength] = useState(2);
   const [firstBuySol, setFirstBuySol] = useState(0.05);
@@ -83,9 +86,9 @@ export default function CreateCoinPage() {
           // firstBuySol is kept client-side; we’ll use it below for auto-buy
           logo_url,
           socials: {
-            website,
-            x: xLink,
-            telegram,
+            website: website || null,
+            x: xLink || null,
+            telegram: telegram || null,
           },
         }),
       });
@@ -214,7 +217,7 @@ export default function CreateCoinPage() {
                 </label>
                 <input
                   className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-purple-500"
-                  placeholder="Spam 4"
+                  placeholder="Your coin name (e.g. Dog With Hat)"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   required
@@ -227,7 +230,7 @@ export default function CreateCoinPage() {
                 </label>
                 <input
                   className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none uppercase focus:border-purple-500"
-                  placeholder="SPAM4"
+                  placeholder="TICKER (e.g. DOGHAT)"
                   value={symbol}
                   onChange={(e) => setSymbol(e.target.value.toUpperCase())}
                   required
@@ -243,7 +246,7 @@ export default function CreateCoinPage() {
               <textarea
                 className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-purple-500"
                 rows={3}
-                placeholder="Your degenerate story…"
+                placeholder="Write a short, fun story for your coin…"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
               />
@@ -255,24 +258,34 @@ export default function CreateCoinPage() {
                 Logo / Media
               </label>
               <div className="mt-1 flex flex-col items-start gap-2 rounded-xl border border-dashed border-white/20 bg-black/40 px-4 py-4 text-xs text-gray-400">
-                <div className="flex w-full items-center justify-between gap-4">
-                  <input
-                    type="file"
-                    accept="image/*,video/mp4,video/quicktime"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0] || null;
-                      setMediaFile(f);
-                    }}
-                    className="text-xs"
-                  />
+                <div className="flex w-full items-center gap-3">
+                  <label
+                    htmlFor="logoFile"
+                    className="inline-flex items-center rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium text-gray-100 cursor-pointer hover:bg-white/10 active:scale-[0.98] transition"
+                  >
+                    Upload image
+                  </label>
+
                   {mediaFile && (
-                    <span className="truncate text-[11px] text-gray-300">
+                    <span className="truncate text-[11px] text-gray-300 max-w-xs">
                       Selected: {mediaFile.name}
                     </span>
                   )}
                 </div>
+
+                <input
+                  id="logoFile"
+                  type="file"
+                  accept="image/*,video/mp4,video/quicktime"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0] || null;
+                    setMediaFile(f);
+                  }}
+                />
+
                 <div className="text-[11px] text-gray-500">
-                  Image – max 15MB (jpg, png, gif). Min 1000x1000px. 1:1 square
+                  Image – max 15MB (jpg, png, gif). 1:1 square (500×500–1000×1000)
                   recommended.
                   <br />
                   Video – max 30MB (mp4). 16:9 or 9:16, 1080p+ recommended.
@@ -288,6 +301,7 @@ export default function CreateCoinPage() {
                 </label>
                 <input
                   className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-xs outline-none focus:border-purple-500"
+                  placeholder="https://your-website.com"
                   value={website}
                   onChange={(e) => setWebsite(e.target.value)}
                 />
@@ -298,6 +312,7 @@ export default function CreateCoinPage() {
                 </label>
                 <input
                   className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-xs outline-none focus:border-purple-500"
+                  placeholder="https://x.com/yourhandle"
                   value={xLink}
                   onChange={(e) => setXLink(e.target.value)}
                 />
@@ -308,6 +323,7 @@ export default function CreateCoinPage() {
                 </label>
                 <input
                   className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-xs outline-none focus:border-purple-500"
+                  placeholder="https://t.me/yourchannel"
                   value={telegram}
                   onChange={(e) => setTelegram(e.target.value)}
                 />
@@ -345,12 +361,12 @@ export default function CreateCoinPage() {
                 <input
                   type="number"
                   min={1}
-                  max={3}
+                  max={5}
                   className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-purple-500"
                   value={strength}
                   onChange={(e) =>
                     setStrength(
-                      Math.max(1, Math.min(3, Number(e.target.value) || 1)),
+                      Math.max(1, Math.min(5, Number(e.target.value) || 1)),
                     )
                   }
                 />
