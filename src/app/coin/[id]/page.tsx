@@ -674,10 +674,10 @@ setSellTokensInput("");
       <header className="flex items-center justify-between">
         <Link href="/" className="flex items-center gap-2 font-semibold">
           <Image src="/logo.svg" alt="logo" width={28} height={28} />
-          <span>Winky Launchpad</span>
+          <span>SolCurve.fun</span>
         </Link>
         <nav className="flex items-center gap-3">
-          <Link className="underline" href="/coins">
+          <Link className="underline" href="/">
             Coins
           </Link>
         </nav>

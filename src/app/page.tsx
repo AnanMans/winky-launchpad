@@ -72,7 +72,7 @@ export default function HomePage() {
         <div className="flex-1">
           <div className="inline-flex items-center gap-2 rounded-full border border-purple-500/40 bg-purple-500/10 px-3 py-1 text-[11px] text-purple-200">
             <span className="h-2 w-2 rounded-full bg-green-400" />
-            Live on Solana Devnet · Winky Launchpad
+            Live on Solana Devnet · solcurve.fun – degen curves only
           </div>
 
           <h1 className="mt-4 text-4xl font-semibold tracking-tight md:text-5xl">
@@ -85,9 +85,7 @@ export default function HomePage() {
           </h1>
 
           <p className="mt-4 max-w-xl text-sm text-gray-400">
-            Upload a meme, pick your bonding curve, set your first buy in SOL
-            and let Winky handle the rest – mint, curve, metadata and first
-            trade are all automatic.
+Upload a meme, pick your bonding curve, set your first buy in SOL and let solcurve.fun do the degen magic – mint, curve, metadata and first trade are all automatic.
           </p>
 
           {/* CTA buttons */}
@@ -154,7 +152,8 @@ export default function HomePage() {
 
             {!loading && topCoins.length === 0 && (
               <div className="rounded-xl border border-dashed border-white/10 bg-black/40 px-3 py-3 text-xs text-gray-400">
-                No coins yet. Be the first one to launch on Winky 👀
+
+No coins yet. Be the first degen to launch on solcurve.fun 👀
               </div>
             )}
 

@@ -47,8 +47,8 @@ export async function GET(
     );
   }
 
-  const name = (coin.name ?? "Winky Coin").slice(0, 32);
-  const symbol = ((coin.symbol ?? "WINKY").toUpperCase()).slice(0, 10);
+  const name = (coin.name ?? "solcurve.fun degen").slice(0, 32);
+  const symbol = ((coin.symbol ?? "SOLCURVE").toUpperCase()).slice(0, 10);
   const description = coin.description ?? "";
 
   const rawImg = (coin as any).logo_url ?? FALLBACK_IMG;

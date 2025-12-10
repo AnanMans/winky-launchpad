@@ -181,13 +181,14 @@ export default function CreateCoinPage() {
         {/* Header */}
         <div className="mb-8 flex items-center justify-between">
           <div>
-            <button
-              type="button"
-              onClick={() => router.push('/')}
-              className="text-sm text-gray-400 hover:text-white"
-            >
-              ← Winky Launchpad
-            </button>
+
+<button
+  type="button"
+  onClick={() => router.push('/')}
+  className="text-sm text-gray-400 hover:text-white"
+>
+  ← solcurve.fun
+</button>
             <h1 className="mt-2 text-3xl font-semibold">
               Create a Curve Coin
             </h1>

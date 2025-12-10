@@ -9,7 +9,7 @@ const dmSans = DM_Sans({
 });
 
 export const metadata: Metadata = {
-  title: "Winky Launchpad",
+  title: "solcurve.fun",
   description: "Create a Solana memecoin with Linear / Degen / Random curves",
 };
 

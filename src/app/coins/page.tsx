@@ -63,11 +63,11 @@ export default function CoinsPage() {
             >
               ← Back
             </button>
-            <h1 className="mt-2 text-2xl font-semibold">All Winky coins</h1>
-            <p className="mt-1 text-xs text-gray-400">
-              Every coin launched through Winky on Solana devnet. Click a coin
-              to open its curve page.
-            </p>
+<h1 className="text-2xl font-semibold">All solcurve.fun coins</h1>
+<p className="mt-1 text-sm text-gray-400">
+  Fresh degen launches on solcurve.fun · Solana devnet. Click a coin to open its curve page.
+</p>
+
           </div>
 
           <Link
@@ -87,7 +87,8 @@ export default function CoinsPage() {
 
         {!loading && coins.length === 0 && (
           <div className="rounded-2xl border border-dashed border-white/10 bg-black/40 px-4 py-6 text-sm text-gray-400">
-            No coins yet. Launch the first meme on Winky 👀
+No coins yet. Drop the first degen on solcurve.fun 👀
+
           </div>
         )}
 

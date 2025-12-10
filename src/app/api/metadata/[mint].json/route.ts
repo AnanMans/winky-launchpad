@@ -48,10 +48,10 @@ export async function GET(_req: Request, ctx: RouteCtx) {
     "https://winky-launchpad.vercel.app";
 
   // Make sure we always return valid strings
-  const name = coin.name || coin.symbol || "Winky Coin";
+  const name = coin.name || coin.symbol || "solcurve.fun Coin";
   const symbol = coin.symbol || "";
   const description =
-    coin.description || `${symbol || name} created on Winky Launchpad`;
+    coin.description || `${symbol || name} created on SolCurve.fun`;
   const image = coin.logo_url || "";
 
   const socials = (coin.socials || {}) as any;

@@ -29,7 +29,7 @@ export default function ClientProviders({ children }: { children: ReactNode }) {
         <WalletModalProvider>
           <div className="mx-auto max-w-6xl p-4">
             <header className="flex items-center justify-between pb-4">
-              <a href="/coins" className="text-lg font-semibold">Winky Launchpad</a>
+              <a href="/" className="text-lg font-semibold">SolCurve.fun</a>
               <WalletButton />
             </header>
             {children}
