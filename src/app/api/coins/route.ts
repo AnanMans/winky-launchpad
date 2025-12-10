@@ -3,6 +3,7 @@ export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { initMetadataOnChain } from "@/lib/initMetadata"; // ⬅️ NEW
 
 // --- solana / curve imports ---
 import {
@@ -174,7 +175,7 @@ export async function GET() {
   }
 }
 
-// ----------------- POST = create coin + init on-chain -----------------
+// ----------------- POST = create coin + init on-chain + metadata -----------------
 export async function POST(req: Request) {
   try {
     let body: any = {};
@@ -269,6 +270,19 @@ export async function POST(req: Request) {
         console.error("[/api/coins] update mint error:", updErr);
       } else {
         (data as any).mint = mint;
+      }
+
+      // 3) init on-chain Metaplex metadata (automatic image + ticker)
+      if (mint) {
+        try {
+          await initMetadataOnChain(mint, name, symbol);
+        } catch (metaErr) {
+          console.error(
+            "[/api/coins] initMetadataOnChain failed:",
+            metaErr
+          );
+          // do NOT throw; coin + curve still valid even if metadata fails
+        }
       }
     } catch (chainErr: any) {
       console.error("[/api/coins] on-chain init failed:", chainErr);

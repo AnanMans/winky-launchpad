@@ -14,6 +14,7 @@
   },
   "packageManager": "npm@10.7.0",
   "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
     "@metaplex-foundation/js": "0.19.5",
     "@metaplex-foundation/mpl-token-metadata": "^2.13.0",
     "@metaplex-foundation/umi": "^1.4.1",
