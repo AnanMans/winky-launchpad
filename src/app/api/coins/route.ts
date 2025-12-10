@@ -3,6 +3,7 @@ export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { initMetadataOnChain } from "@/lib/initMetadata";
 
 // --- solana / curve imports ---
 import {
@@ -21,10 +22,6 @@ import {
 } from "@solana/spl-token";
 import bs58 from "bs58";
 
-// --- Anchor bits just for encoding the init_metadata ix ---
-import { BorshCoder, Idl } from "@coral-xyz/anchor";
-import idlJson from "@/idl/curve_launchpad.json";
-
 // ----------------- helpers (http) -----------------
 function bad(msg: string, code = 400, extra: any = {}) {
   return NextResponse.json({ error: msg, ...extra }, { status: code });
@@ -37,8 +34,7 @@ function ok(data: any, code = 200) {
 const RPC_URL =
   process.env.RPC ||
   process.env.RPC_URL ||
-  process.env.NEXT_PUBLIC_RPC_URL ||
-  process.env.NEXT_PUBLIC_SOLANA_RPC ||
+  process.env.NEXT_PUBLIC_RPC ||
   "https://api.devnet.solana.com";
 
 const PROGRAM_ID_STR =
@@ -50,12 +46,7 @@ if (!PROGRAM_ID_STR) {
 }
 const CURVE_PROGRAM_ID = new PublicKey(PROGRAM_ID_STR);
 
-// Metaplex token-metadata program
-const TOKEN_METADATA_PROGRAM_ID = new PublicKey(
-  "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
-);
-
-// discriminator for `create_curve` (Anchor ix)
+// discriminator for `create_curve`
 const DISC_CREATE_CURVE = Buffer.from([
   169, 235, 221, 223, 65, 109, 120, 183,
 ]);
@@ -150,90 +141,6 @@ async function initOnChainForCoin(_opts: {
   );
 
   return { mint: mintPk.toBase58(), signature: sig };
-}
-
-/**
- * Call on-chain init_metadata for the given mint
- * using raw Borsh encoding (no Program.methods).
- * This is the AUTO part – runs inside /api/coins POST.
- */
-async function initMetadataForMintOnChain(opts: {
-  mint: string;
-  name: string;
-  symbol: string;
-}) {
-  const connection = new Connection(RPC_URL, "confirmed");
-  const payer = loadServerKeypair();
-  const mintPk = new PublicKey(opts.mint);
-
-  const [statePda] = PublicKey.findProgramAddressSync(
-    [Buffer.from("curve"), mintPk.toBuffer()],
-    CURVE_PROGRAM_ID
-  );
-  const [mintAuthPda] = PublicKey.findProgramAddressSync(
-    [Buffer.from("mint_auth"), mintPk.toBuffer()],
-    CURVE_PROGRAM_ID
-  );
-  const [metadataPda] = PublicKey.findProgramAddressSync(
-    [
-      Buffer.from("metadata"),
-      TOKEN_METADATA_PROGRAM_ID.toBuffer(),
-      mintPk.toBuffer(),
-    ],
-    TOKEN_METADATA_PROGRAM_ID
-  );
-
-  const base =
-    process.env.NEXT_PUBLIC_METADATA_BASE_URL ||
-    process.env.NEXT_PUBLIC_SITE_URL ||
-    process.env.SITE_BASE ||
-    "";
-
-  const uri = `${base}/api/metadata/${opts.mint}.json`;
-
-  console.log("[initMetadataForMintOnChain] uri =", uri);
-
-  const idl = idlJson as Idl;
-  const coder = new BorshCoder(idl);
-
-  // Anchor IDL name is camelCase: "initMetadata"
-  const data = coder.instruction.encode("initMetadata", {
-    name: opts.name,
-    symbol: opts.symbol,
-    uri,
-  });
-
-  // 🔥 Correct account order must match InitMetadataAcct:
-  // payer, mint, state, metadata, mint_auth_pda, token_metadata_program, token_program, system_program
-  const ix = new TransactionInstruction({
-    programId: CURVE_PROGRAM_ID,
-    keys: [
-      { pubkey: payer.publicKey, isSigner: true, isWritable: true },     // payer
-      { pubkey: mintPk, isSigner: false, isWritable: true },             // mint
-      { pubkey: statePda, isSigner: false, isWritable: true },           // state
-      { pubkey: metadataPda, isSigner: false, isWritable: true },        // metadata
-      { pubkey: mintAuthPda, isSigner: false, isWritable: false },       // mint_auth_pda
-      { pubkey: TOKEN_METADATA_PROGRAM_ID, isSigner: false, isWritable: false }, // token_metadata_program
-      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },          // token_program
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },   // system_program
-    ],
-    data,
-  });
-
-  const tx = new Transaction().add(ix);
-  const { blockhash, lastValidBlockHeight } =
-    await connection.getLatestBlockhash("confirmed");
-
-  tx.recentBlockhash = blockhash;
-  tx.feePayer = payer.publicKey;
-
-  const sig = await connection.sendTransaction(tx, [payer]);
-  await connection.confirmTransaction(
-    { signature: sig, blockhash, lastValidBlockHeight },
-    "confirmed"
-  );
-
-  console.log("[initMetadataForMintOnChain] tx sig:", sig);
 }
 
 // ----------------- GET = list coins -----------------
@@ -365,20 +272,16 @@ export async function POST(req: Request) {
         (data as any).mint = mint;
       }
 
-      // 3) init on-chain Metaplex metadata (automatic image + ticker)
+      // 3) init on-chain Metaplex metadata (automatic name + ticker + image)
       if (mint) {
         try {
-          await initMetadataForMintOnChain({
-            mint,
-            name,
-            symbol,
-          });
+          await initMetadataOnChain(mint, name, symbol);
         } catch (metaErr) {
           console.error(
-            "[/api/coins] initMetadataForMintOnChain failed:",
+            "[/api/coins] initMetadataOnChain failed:",
             metaErr
           );
-          // don't throw – coin + curve still usable even if metadata fails
+          // do NOT throw; coin + curve still valid even if metadata fails
         }
       }
     } catch (chainErr: any) {
