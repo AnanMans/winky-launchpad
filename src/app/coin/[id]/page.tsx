@@ -1,5 +1,3 @@
-// TEMP: test deploy
-// src/app/coin/[id]/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -23,6 +21,7 @@ import {
   MIGRATION_TOKENS,
 } from "@/lib/curve";
 import { TOTAL_BUY_BPS, TOTAL_SELL_BPS } from "@/lib/fees";
+import CurveChart from "@/components/CurveChart";
 
 type Coin = {
   id: string;
@@ -120,7 +119,6 @@ export default function CoinPage() {
   );
 
   // ----- TOKENS PER 1 SOL (SELL SIDE) -----
-  // Returns "tokens per 1 SOL" at current curve position
   const tokensPerSolSell = useMemo(() => {
     if (!coin || !stats) return 0;
     const sd =
@@ -130,7 +128,7 @@ export default function CoinPage() {
     return quoteSellTokensUi(coin.curve, coin.strength, coin.startPrice, 1, sd);
   }, [coin, stats]);
 
-  // Max tokens user can sell (wallet balance)
+  // Max tokens user can sell
   const maxSellTokens = useMemo(() => tokBal || 0, [tokBal]);
 
   // Parsed + clamped token amount we will actually try to sell
@@ -158,7 +156,7 @@ export default function CoinPage() {
     return solOut;
   }, [coin, stats, tokensPerSolSell, sellTokens]);
 
-  // Net SOL to user after sell fees (0.25% platform + 0.25% creator in UI)
+  // Net SOL to user after sell fees
   const sellSolNet = useMemo(() => {
     if (!sellSolGross || sellSolGross <= 0) return 0;
     const totalSellBps = TOTAL_SELL_BPS; // 50 bps = 0.5%
@@ -169,7 +167,7 @@ export default function CoinPage() {
   const marketCapSol = stats?.marketCapSol ?? 0;
   const fdvSol = stats?.fdvSol ?? 0;
 
-  // ----- SAFE DISPLAY HELPERS FOR STATS CARD -----
+  // ----- SAFE DISPLAY HELPERS -----
   const priceDisplay =
     stats && Number.isFinite(stats.priceTokensPerSol)
       ? stats.priceTokensPerSol.toLocaleString()
@@ -282,14 +280,12 @@ export default function CoinPage() {
         return;
       }
 
-      // --- raw values from API ---
       const poolSol = Number(j.poolSol ?? 0);
       const soldTokens = Number(j.soldTokens ?? 0);
       const totalSupplyTokens = Number(j.totalSupplyTokens ?? 0);
       const priceTokensPerSol = Number(j.priceTokensPerSol ?? 0);
       const soldDisplayVal = Number(j.soldDisplay ?? j.soldTokens ?? 0);
 
-      // --- DEX-like MC/FDV (computed on client) ---
       const dexMarketCapSol = poolSol > 0 ? poolSol * 2 : 0;
 
       const circulating = soldDisplayVal || soldTokens || 0;
@@ -410,21 +406,16 @@ export default function CoinPage() {
     const a = Number(buySol);
     if (!coin || !stats || !Number.isFinite(a) || a <= 0) return 0;
 
-    // Use soldDisplay if present, otherwise fall back to soldTokens
     const sd =
       stats && Number(stats.soldDisplay) > 0
         ? Number(stats.soldDisplay)
         : Number(stats.soldTokens ?? 0) || 0;
 
-    // Use shared fee config (0.5% platform, 0% creator)
     const totalPreFeeBps = TOTAL_BUY_BPS;
 
-    // Net SOL that actually goes into the curve after fees
     const netSol = a * (1 - totalPreFeeBps / 10_000);
-
     if (!Number.isFinite(netSol) || netSol <= 0) return 0;
 
-    // Quote tokens using the *net* SOL, so UI matches what actually hits the curve
     return quoteTokensUi(netSol, coin.curve, coin.strength, sd);
   }, [buySol, coin, stats]);
 
@@ -498,491 +489,586 @@ export default function CoinPage() {
     }
   }
 
-async function doSell() {
-  try {
-    setIsSelling(true);
-    setSellError(null);
-
-    if (!connected || !publicKey) {
-      alert("Connect your wallet first.");
-      return;
-    }
-
-    if (!coin) {
-      alert("Coin not loaded yet.");
-      return;
-    }
-
-    if (!coin.mint) {
-      alert("This coin is not tradable yet (no mint configured).");
-      return;
-    }
-
-    if (!tokensPerSolSell || tokensPerSolSell <= 0) {
-      alert("Price not available yet, try again in a few seconds.");
-      return;
-    }
-
-    const rawTokensUi = Number(String(sellTokensInput).trim());
-    if (!Number.isFinite(rawTokensUi) || rawTokensUi <= 0) {
-      alert("Enter a valid token amount to sell.");
-      return;
-    }
-
-    const maxTokens = maxSellTokens || 0;
-    if (maxTokens <= 0) {
-      alert("You don’t have any tokens to sell.");
-      return;
-    }
-
-    // Clamp to wallet balance (safety + 100% quick buttons)
-    const tokensUi = Math.min(rawTokensUi, maxTokens);
-    if (!Number.isFinite(tokensUi) || tokensUi <= 0) {
-      alert("You don’t have enough tokens to sell.");
-      return;
-    }
-
-    // Gross SOL out from curve, then clamp by pool
-    let solGross = tokensUi / tokensPerSolSell;
-
-    const poolSol = stats?.poolSol ?? 0;
-    if (poolSol > 0) {
-      const maxOut = poolSol * 0.995;
-      if (solGross > maxOut) solGross = maxOut;
-    }
-
-    if (!Number.isFinite(solGross) || solGross <= 0) {
-      alert("Quote is zero; nothing to sell.");
-      return;
-    }
-
-    // Net SOL to user after total sell fee (expressed in BPS)
-    const solAmount = solGross * (1 - TOTAL_SELL_BPS / 10_000);
-    if (!Number.isFinite(solAmount) || solAmount <= 0) {
-      alert("Quote is zero; nothing to sell.");
-      return;
-    }
-
-    const payer = publicKey.toBase58();
-
-    const res = await fetch(`/api/coins/${encodeURIComponent(coin.id)}/sell`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        payer,
-        solAmount, // SOL user should receive (net, after fee)
-        tokensUi,  // UI token amount to burn
-      }),
-    });
-
-    const text = await res.text();
-    let j: any = null;
+  async function doSell() {
     try {
-      j = JSON.parse(text);
-    } catch {
-      // ignore parse errors, we'll log text below if needed
+      setIsSelling(true);
+      setSellError(null);
+
+      if (!connected || !publicKey) {
+        alert("Connect your wallet first.");
+        return;
+      }
+
+      if (!coin) {
+        alert("Coin not loaded yet.");
+        return;
+      }
+
+      if (!coin.mint) {
+        alert("This coin is not tradable yet (no mint configured).");
+        return;
+      }
+
+      if (!tokensPerSolSell || tokensPerSolSell <= 0) {
+        alert("Price not available yet, try again in a few seconds.");
+        return;
+      }
+
+      const rawTokensUi = Number(String(sellTokensInput).trim());
+      if (!Number.isFinite(rawTokensUi) || rawTokensUi <= 0) {
+        alert("Enter a valid token amount to sell.");
+        return;
+      }
+
+      const maxTokens = maxSellTokens || 0;
+      if (maxTokens <= 0) {
+        alert("You don’t have any tokens to sell.");
+        return;
+      }
+
+      const tokensUi = Math.min(rawTokensUi, maxTokens);
+      if (!Number.isFinite(tokensUi) || tokensUi <= 0) {
+        alert("You don’t have enough tokens to sell.");
+        return;
+      }
+
+      let solGross = tokensUi / tokensPerSolSell;
+
+      const poolSol = stats?.poolSol ?? 0;
+      if (poolSol > 0) {
+        const maxOut = poolSol * 0.995;
+        if (solGross > maxOut) solGross = maxOut;
+      }
+
+      if (!Number.isFinite(solGross) || solGross <= 0) {
+        alert("Quote is zero; nothing to sell.");
+        return;
+      }
+
+      const solAmount = solGross * (1 - TOTAL_SELL_BPS / 10_000);
+      if (!Number.isFinite(solAmount) || solAmount <= 0) {
+        alert("Quote is zero; nothing to sell.");
+        return;
+      }
+
+      const payer = publicKey.toBase58();
+
+      const res = await fetch(`/api/coins/${encodeURIComponent(coin.id)}/sell`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          payer,
+          solAmount,
+          tokensUi,
+        }),
+      });
+
+      const text = await res.text();
+      let j: any = null;
+      try {
+        j = JSON.parse(text);
+      } catch {
+        // ignore parse errors
+      }
+
+      if (!res.ok) {
+        console.error("[SELL] server error payload:", j || text);
+        alert(j?.error || "Server sell failed (see console).");
+        return;
+      }
+
+      const { txB64 } = j || {};
+      if (!txB64) {
+        console.error("[SELL] missing txB64 in response:", j);
+        alert("Server did not return a transaction to sign.");
+        return;
+      }
+
+      const txBytes = Buffer.from(txB64, "base64");
+
+      let tx: VersionedTransaction | Transaction;
+      try {
+        tx = VersionedTransaction.deserialize(txBytes);
+      } catch (e) {
+        console.warn("[SELL] v0 deserialize failed, falling back to legacy:", e);
+        tx = Transaction.from(txBytes);
+      }
+
+      const sig = await sendTransaction(tx as any, connection, {
+        skipPreflight: true,
+        maxRetries: 5,
+      });
+
+      console.log("[SELL] sent tx:", sig);
+
+      try {
+        const confirmPromise = connection.confirmTransaction(sig, "confirmed");
+        const timeout = new Promise<void>((resolve) =>
+          setTimeout(resolve, 20_000)
+        );
+        await Promise.race([confirmPromise, timeout]);
+      } catch (e) {
+        console.warn("[SELL] confirm warning:", e);
+      }
+
+      await refreshBalances();
+      await refreshStats();
+      setSellTokensInput("");
+    } catch (err: any) {
+      console.error("[SELL] error:", err);
+      setSellError(err?.message || "Sell failed");
+    } finally {
+      setIsSelling(false);
     }
-
-    if (!res.ok) {
-      console.error("[SELL] server error payload:", j || text);
-      alert(j?.error || "Server sell failed (see console).");
-      return;
-    }
-
-    const { txB64 } = j || {};
-    if (!txB64) {
-      console.error("[SELL] missing txB64 in response:", j);
-      alert("Server did not return a transaction to sign.");
-      return;
-    }
-
-    const txBytes = Buffer.from(txB64, "base64");
-
-    // Support BOTH v0 and legacy transactions
-    let tx: VersionedTransaction | Transaction;
-    try {
-      tx = VersionedTransaction.deserialize(txBytes);
-    } catch (e) {
-      console.warn(
-        "[SELL] v0 deserialize failed, falling back to legacy tx:",
-        e
-      );
-      tx = Transaction.from(txBytes);
-    }
-
-const sig = await sendTransaction(tx as any, connection, {
-  skipPreflight: true,
-  maxRetries: 5,
-});
-
-console.log("[SELL] sent tx:", sig);
-
-// ---- NEW CONFIRM LOGIC ----
-// Just confirm by signature, and don't block UI longer than ~20s.
-try {
-  const confirmPromise = connection.confirmTransaction(sig, "confirmed");
-  const timeout = new Promise<void>((resolve) =>
-    setTimeout(resolve, 20_000) // you can lower to e.g. 10_000 if you want
-  );
-
-  await Promise.race([confirmPromise, timeout]);
-} catch (e) {
-  console.warn("[SELL] confirm warning:", e);
-}
-
-// Refresh balances & stats after sell
-await refreshBalances();
-await refreshStats();
-
-// Clear input so next sell starts “fresh”
-setSellTokensInput("");
-
-  } catch (err: any) {
-    console.error("[SELL] error:", err);
-    setSellError(err?.message || "Sell failed");
-  } finally {
-    // ALWAYS release the button, even if anything above throws
-    setIsSelling(false);
   }
-}
 
   // ---------- RENDER ----------
 
   if (loading) {
     return (
-      <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto">
-        <p>Loading…</p>
+      <main className="min-h-screen px-4 py-10">
+        <div className="mx-auto max-w-6xl text-white/70">Loading…</div>
       </main>
     );
   }
 
   if (err || !coin) {
     return (
-      <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto">
-        <p className="text-red-400">Error: {err || "Not found"}</p>
-        <Link className="underline" href="/coins">
-          Back to coins
-        </Link>
+      <main className="min-h-screen px-4 py-10">
+        <div className="mx-auto max-w-6xl text-white/90">
+          <p className="text-red-400 mb-2">Error: {err || "Not found"}</p>
+          <Link className="text-sm underline text-emerald-400" href="/coins">
+            ← Back to all coins
+          </Link>
+        </div>
       </main>
     );
   }
 
   const tradable = !!coin.mint;
 
+  const curveLabel =
+    coin.curve === "linear"
+      ? "Linear curve · smoother climbs"
+      : coin.curve === "degen"
+      ? "Degen curve · steeper, pumps faster"
+      : "Random curve · experimental / degen only";
+
   return (
-    <main className="min-h-screen p-6 md:p-10 max-w-4xl mx-auto grid gap-8">
-      <header className="flex items-center justify-between">
-        <Link href="/" className="flex items-center gap-2 font-semibold">
-          <Image src="/logo.svg" alt="logo" width={28} height={28} />
-          <span>SolCurve.fun</span>
-        </Link>
-        <nav className="flex items-center gap-3">
-          <Link className="underline" href="/">
-            Coins
-          </Link>
-        </nav>
-      </header>
+    <main className="min-h-screen px-4 py-8 md:py-10">
+      <div className="mx-auto flex max-w-6xl flex-col gap-8 text-white">
+        {/* Local header / breadcrumb */}
+        <header className="flex items-center justify-between text-sm text-zinc-400">
+          <div className="flex items-center gap-2">
+            <Link href="/" className="hover:text-white/90">
+              solcurve.fun
+            </Link>
+            <span className="text-zinc-600">/</span>
+            <Link href="/coins" className="hover:text-white/90">
+              Coins
+            </Link>
+            <span className="text-zinc-600">/</span>
+            <span className="text-white/80">{coin.symbol}</span>
+          </div>
 
-      {flash && (
-        <div className="mb-3 rounded-md border px-3 py-2 text-sm bg-black/40">
-          {flash}
-        </div>
-      )}
+          {flash && (
+            <div className="rounded-full border border-emerald-400/40 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-200">
+              {flash}
+            </div>
+          )}
+        </header>
 
-      {/* Top: info + stats card */}
-      <section className="grid gap-4 md:grid-cols-[minmax(0,2fr)_minmax(260px,1fr)] rounded-2xl border p-6 bg-black/20">
-        {/* Left: coin info */}
-        <div className="flex flex-col gap-4">
-          <div className="flex items-center gap-4">
-            {coin.logoUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={coin.logoUrl}
-                alt={coin.name}
-                className="rounded-xl w-16 h-16 object-cover"
-                loading="eager"
-                decoding="async"
-              />
-            ) : (
-              <div className="w-16 h-16 rounded-xl bg-white/10" />
+        {/* Top: coin hero + stats */}
+        <section className="grid gap-6 rounded-3xl border border-zinc-800 bg-gradient-to-br from-zinc-950 via-zinc-950/80 to-zinc-900/40 p-6 md:grid-cols-[minmax(0,2.2fr)_minmax(260px,1fr)] md:p-8">
+          {/* Left: hero */}
+          <div className="flex flex-col gap-4">
+            <div className="flex items-center gap-4">
+              {coin.logoUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={coin.logoUrl}
+                  alt={coin.name}
+                  className="h-16 w-16 rounded-2xl border border-white/10 object-cover shadow-lg shadow-black/60"
+                  loading="eager"
+                  decoding="async"
+                />
+              ) : (
+                <div className="h-16 w-16 rounded-2xl bg-zinc-800" />
+              )}
+
+              <div className="flex flex-col gap-1">
+                <p className="text-xs uppercase tracking-[0.18em] text-emerald-400/70">
+                  Curve coin · Devnet
+                </p>
+                <h1 className="text-2xl font-semibold md:text-3xl">
+                  <span className="bg-gradient-to-r from-emerald-300 via-sky-300 to-fuchsia-300 bg-clip-text text-transparent">
+                    {coin.name}
+                  </span>{" "}
+                  <span className="text-white/60">
+                    ({(coin.symbol || "").toUpperCase()})
+                  </span>
+                </h1>
+
+                <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-3 py-1 font-medium text-emerald-200">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-300" />
+                    {curveLabel}
+                  </span>
+                  <span className="inline-flex items-center gap-1 rounded-full bg-zinc-800 px-3 py-1 text-zinc-300">
+                    Strength{" "}
+                    <span className="font-mono">
+                      {coin.strength}
+                      /3
+                    </span>
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {coin.description && (
+              <p className="text-sm leading-relaxed text-zinc-200">
+                {coin.description}
+              </p>
             )}
 
-            <div>
-              <div className="text-xs text-white/60">Wallet</div>
-              <h1 className="text-2xl font-bold">
-                {coin.name}{" "}
-                <span className="text-white/60">
-                  ({(coin.symbol || "").toUpperCase()})
+            {coin.socials && (
+              <div className="mt-1 flex flex-wrap gap-3 text-sm text-emerald-300">
+                {coin.socials.website && (
+                  <a
+                    className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs hover:border-emerald-400 hover:bg-emerald-500/20"
+                    href={coin.socials.website}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Website
+                  </a>
+                )}
+                {coin.socials.x && (
+                  <a
+                    className="inline-flex items-center gap-1 rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs text-zinc-200 hover:border-zinc-500"
+                    href={coin.socials.x}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    X
+                  </a>
+                )}
+                {coin.socials.telegram && (
+                  <a
+                    className="inline-flex items-center gap-1 rounded-full border border-sky-500/40 bg-sky-500/10 px-3 py-1 text-xs text-sky-100 hover:border-sky-400 hover:bg-sky-500/20"
+                    href={coin.socials.telegram}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Telegram
+                  </a>
+                )}
+              </div>
+            )}
+
+            <div className="mt-2 flex flex-wrap gap-6 text-xs text-zinc-300">
+              <div>
+                <div className="text-zinc-500">Wallet SOL</div>
+                <div className="font-mono text-sm">
+                  {solBal.toFixed(4)} SOL
+                </div>
+              </div>
+              <div>
+                <div className="text-zinc-500">
+                  Wallet {(coin.symbol || "").toUpperCase()}
+                </div>
+                <div className="font-mono text-sm">
+                  {(tokBal ?? 0).toLocaleString()}
+                </div>
+              </div>
+              <div className="min-w-0">
+                <div className="text-zinc-500">Mint</div>
+                <div className="font-mono text-[11px] break-all text-zinc-300">
+                  {coin.mint ?? "— (not set)"}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Right: stats card */}
+          <aside className="grid gap-3 rounded-2xl border border-zinc-800 bg-zinc-950/80 p-4 text-sm shadow-xl shadow-black/50">
+            <div className="flex items-center justify-between">
+              <span className="text-xs uppercase tracking-[0.16em] text-zinc-500">
+                Curve stats
+              </span>
+              <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
+                Live · devnet
+              </span>
+            </div>
+
+            <div className="mt-1 space-y-1">
+              <div className="flex justify-between text-zinc-400">
+                <span>Price</span>
+                <span className="font-mono text-zinc-50">
+                  1 SOL ≈ {priceDisplay} {(coin.symbol || "").toUpperCase()}
                 </span>
-              </h1>
-              <p className="text-white/60 text-sm">
-                Curve: {coin.curve} · Strength: {coin.strength}
-              </p>
+              </div>
+              <div className="flex justify-between text-zinc-400">
+                <span>Market cap</span>
+                <span className="font-mono text-zinc-50">{mcDisplay} SOL</span>
+              </div>
+              <div className="flex justify-between text-zinc-400">
+                <span>FDV</span>
+                <span className="font-mono text-zinc-50">{fdvDisplay} SOL</span>
+              </div>
+              <div className="flex justify-between text-zinc-400">
+                <span>Pool</span>
+                <span className="font-mono text-zinc-50">
+                  {poolDisplay} SOL
+                </span>
+              </div>
+            </div>
+
+            <div className="mt-3">
+              <div className="mb-1 flex justify-between text-[11px] text-zinc-400">
+                <span>Curve progress</span>
+                <span>{migrateProgress}%</span>
+              </div>
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-900">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-emerald-400 via-sky-400 to-fuchsia-400"
+                  style={{ width: `${migrateProgress}%` }}
+                />
+              </div>
+              <div className="mt-1 text-[11px] text-zinc-500">
+                {(soldDisplay ?? 0).toLocaleString()} sold /{" "}
+                {(migrateThreshold ?? 0).toLocaleString()} target
+              </div>
+            </div>
+          </aside>
+        </section>
+
+        {/* Migration note */}
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4 text-sm shadow-inner shadow-black/40">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="text-xs uppercase tracking-[0.16em] text-zinc-500">
+                Bonding curve progress
+              </div>
+              <div className="mt-1 text-sm text-zinc-100">
+                Migration threshold:{" "}
+                <span className="font-mono">
+                  {(migrateThreshold ?? 0).toLocaleString()}
+                </span>{" "}
+                sold
+              </div>
+            </div>
+            <div className="text-right text-xs text-zinc-400">
+              <span className="font-mono text-lg text-emerald-300">
+                {migrateProgress}%
+              </span>
+              <div className="text-[11px] text-zinc-500">to Raydium ready</div>
             </div>
           </div>
 
-          {coin.description && (
-            <p className="text-white/80">{coin.description}</p>
-          )}
-
-          {coin.socials && (
-            <div className="flex flex-wrap gap-3 text-sm">
-              {coin.socials.website && (
-                <a
-                  className="underline"
-                  href={coin.socials.website}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Website
-                </a>
-              )}
-              {coin.socials.x && (
-                <a
-                  className="underline"
-                  href={coin.socials.x}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  X
-                </a>
-              )}
-              {coin.socials.telegram && (
-                <a
-                  className="underline"
-                  href={coin.socials.telegram}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Telegram
-                </a>
-              )}
-            </div>
-          )}
-
-          <div className="flex flex-wrap gap-6 text-sm text-white/70">
-            <div>
-              Wallet SOL:{" "}
-              <span className="font-mono">{solBal.toFixed(4)} SOL</span>
-            </div>
-            <div>
-              Wallet {coin.symbol}:{" "}
-              <span className="font-mono">
-                {(tokBal ?? 0).toLocaleString()}
-              </span>
-            </div>
-
-            <div className="break-all">
-              Mint:{" "}
-              <span className="font-mono">
-                {coin.mint ?? "— (not set)"}
-              </span>
-            </div>
+          <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-zinc-900">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-emerald-400 via-sky-400 to-fuchsia-500"
+              style={{ width: `${migrateProgress}%` }}
+            />
           </div>
-        </div>
 
-        {/* Right: stats card */}
-        <aside className="rounded-2xl bg-zinc-900/70 border border-zinc-700/60 p-4 grid gap-2 text-sm">
-          <div className="flex justify-between">
-            <span className="text-zinc-400">Price</span>
-            <span className="font-mono text-zinc-50">
-              1 SOL ≈ {priceDisplay} {coin.symbol}
+          {isMigrated ? (
+            <div className="mt-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-100">
+              <b>Curve graduated.</b> Trading is locked here – ready for
+              Raydium listing.
+            </div>
+          ) : (
+            <div className="mt-3 text-xs text-zinc-400">
+              {(soldDisplay ?? 0).toLocaleString()} sold /{" "}
+              {(migrateThreshold ?? 0).toLocaleString()} target · devnet only –
+              no real money.
+            </div>
+          )}
+        </section>
+
+        {/* Chart section */}
+        <section className="rounded-3xl border border-zinc-800 bg-zinc-950/80 p-4 md:p-5">
+          <div className="mb-3 flex items-center justify-between text-xs text-zinc-400">
+            <div className="flex flex-col">
+              <span className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">
+                Price / Curve activity
+              </span>
+              <span className="bg-gradient-to-r from-emerald-300 via-sky-300 to-fuchsia-300 bg-clip-text text-sm font-medium text-transparent">
+                Devnet preview (dummy chart for now)
+              </span>
+            </div>
+            <span className="rounded-full bg-zinc-900 px-3 py-1 text-[11px] text-zinc-400">
+              Powered by TradingView
             </span>
           </div>
-          <div className="flex justify-between">
-            <span className="text-zinc-400">MC</span>
-            <span className="font-mono">{mcDisplay} SOL</span>
+
+          <div className="h-[260px] w-full overflow-hidden rounded-2xl border border-zinc-800 bg-black">
+            <CurveChart />
           </div>
-          <div className="flex justify-between">
-            <span className="text-zinc-400">FDV</span>
-            <span className="font-mono">{fdvDisplay} SOL</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-zinc-400">Pool</span>
-            <span className="font-mono">{poolDisplay} SOL</span>
-          </div>
-          <div className="pt-2">
-            <div className="flex justify-between text-xs text-zinc-400 mb-1">
-              <span>Curve progress</span>
-              <span>{migrateProgress}%</span>
+        </section>
+
+        {/* Buy / Sell */}
+        <section className="grid gap-6 md:grid-cols-2">
+          {/* BUY */}
+          <div className="grid gap-4 rounded-3xl border border-zinc-800 bg-zinc-950/80 p-5 shadow-lg shadow-black/50">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-white">
+                Buy{" "}
+                <span className="text-emerald-300">
+                  {(coin.symbol || "").toUpperCase()}
+                </span>
+              </h3>
+              <span className="text-xs text-zinc-500">
+                Wallet:{" "}
+                <span className="font-mono">
+                  {solBal.toFixed(4)} SOL
+                </span>
+              </span>
             </div>
-            <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
-              <div
-                className="h-full rounded-full bg-emerald-400"
-                style={{ width: `${migrateProgress}%` }}
+
+            {!tradable && (
+              <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-100">
+                This coin has no mint configured yet. It&apos;s not tradable
+                until a mint is set.
+              </p>
+            )}
+
+            <div className="flex items-center gap-2">
+              <input
+                className="w-40 rounded-lg border border-zinc-700 bg-black/40 px-3 py-2 text-sm outline-none ring-emerald-500/60 focus:border-emerald-400 focus:ring-1 disabled:opacity-50"
+                value={buySol}
+                onChange={(e) => setBuySol(e.target.value)}
+                inputMode="decimal"
+                placeholder="0.05"
+                disabled={!tradable || isMigrated}
               />
+              <span className="text-sm text-zinc-400">SOL</span>
             </div>
-            <div className="mt-1 text-[11px] text-zinc-500">
-              {(soldDisplay ?? 0).toLocaleString()} sold /{" "}
-              {(migrateThreshold ?? 0).toLocaleString()} target
+
+            <p className="text-sm text-zinc-300">
+              You’ll get ~{" "}
+              <span className="font-mono text-emerald-300">
+                {(buyTokens ?? 0).toLocaleString()}
+              </span>{" "}
+              {(coin.symbol || "").toUpperCase()} (after fees).
+            </p>
+
+            <button
+              type="button"
+              className="mt-1 inline-flex items-center justify-center rounded-xl bg-emerald-500 px-4 py-2 text-sm font-semibold text-black shadow-lg shadow-emerald-500/40 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400 disabled:shadow-none"
+              onClick={doBuy}
+              disabled={!connected || !tradable || isMigrated || pending}
+              title={
+                isMigrated ? "Curve migrated (trading locked)" : undefined
+              }
+            >
+              {pending ? "Submitting…" : `Buy ${(coin.symbol || "").toUpperCase()}`}
+            </button>
+          </div>
+
+          {/* SELL */}
+          <div className="grid gap-4 rounded-3xl border border-zinc-800 bg-zinc-950/80 p-5 shadow-lg shadow-black/50">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-white">
+                Sell{" "}
+                <span className="text-red-300">
+                  {(coin.symbol || "").toUpperCase()}
+                </span>
+              </h3>
+              <span className="text-xs text-zinc-500">
+                Balance:{" "}
+                <span className="font-mono">
+                  {(tokBal ?? 0).toLocaleString()}
+                </span>
+              </span>
             </div>
-          </div>
-        </aside>
-      </section>
 
-      {/* Migration note */}
-      <section className="rounded-xl border bg-black/20 p-4 grid gap-2">
-        <div className="flex items-center justify-between text-sm">
-          <span className="text-white/70">
-            Migration threshold:{" "}
-            {(migrateThreshold ?? 0).toLocaleString()} sold
-          </span>
+            {!tradable && (
+              <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-100">
+                This coin has no mint configured yet, so it can’t be sold.
+              </p>
+            )}
 
-          <span className="font-mono">{migrateProgress}%</span>
-        </div>
-        <div className="h-2 w-full rounded bg-white/10 overflow-hidden">
-          <div
-            className="h-full bg-white/70"
-            style={{ width: `${migrateProgress}%` }}
-          />
-        </div>
+            <div className="flex items-center gap-2">
+              <input
+                className="w-40 rounded-lg border border-zinc-700 bg-black/40 px-3 py-2 text-sm outline-none ring-red-500/60 focus:border-red-400 focus:ring-1 disabled:opacity-50"
+                value={sellTokensInput}
+                onChange={(e) => setSellTokensInput(e.target.value)}
+                inputMode="decimal"
+                placeholder="1000"
+                disabled={!tradable || isMigrated}
+              />
+              <span className="text-sm text-zinc-400">
+                {(coin.symbol || "").toUpperCase()}
+              </span>
+            </div>
 
-        {isMigrated ? (
-          <div className="mt-2 rounded-md border border-green-500/40 bg-green-500/10 px-3 py-2 text-sm">
-            <b>Ready to migrate to Raydium.</b> Trading is now locked on the
-            curve.
-          </div>
-        ) : (
-          <div className="mt-2 text-xs text-white/60">
-            {(soldDisplay ?? 0).toLocaleString()} sold /{" "}
-            {(migrateThreshold ?? 0).toLocaleString()} target
-          </div>
-        )}
-      </section>
+            <div className="mt-1 flex items-center gap-2 text-[11px] text-zinc-400">
+              <span>Quick:</span>
+              {[0.25, 0.5, 0.75, 1].map((p) => {
+                const label = `${p * 100}%`;
+                return (
+                  <button
+                    key={label}
+                    type="button"
+                    disabled={!connected || isMigrated || maxSellTokens <= 0}
+                    onClick={() => {
+                      if (maxSellTokens <= 0) return;
+                      const effectivePct = p === 1 ? 0.99999 : p;
+                      const tokens = maxSellTokens * effectivePct;
+                      const v = tokens
+                        .toFixed(6)
+                        .replace(/0+$/, "")
+                        .replace(/\.$/, "");
+                      setSellTokensInput(v);
+                    }}
+                    className="rounded-md border border-zinc-700 px-2 py-1 text-[11px] hover:bg-zinc-800 disabled:opacity-40"
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
 
-      {/* Buy / Sell */}
-      <section className="grid md:grid-cols-2 gap-6">
-        {/* BUY */}
-        <div className="rounded-2xl border p-6 bg-black/20 grid gap-4">
-          <h3 className="font-semibold text-lg">Buy</h3>
-
-          {!tradable && (
-            <p className="text-yellow-400 text-sm">
-              This coin has no mint configured yet. It&apos;s not tradable until
-              a mint is set.
+            <p className="text-sm text-zinc-300">
+              You’ll receive ~{" "}
+              <span className="font-mono text-emerald-300">
+                {sellSolNet ? sellSolNet.toFixed(6) : "0"}
+              </span>{" "}
+              SOL for ~{" "}
+              <span className="font-mono text-zinc-100">
+                {sellTokens ? sellTokens.toLocaleString() : "0"}
+              </span>{" "}
+              {(coin.symbol || "").toUpperCase()}.
             </p>
-          )}
 
-          <div className="flex items-center gap-2">
-            <input
-              className="px-3 py-2 rounded-lg bg-black/30 border w-40 disabled:opacity-50"
-              value={buySol}
-              onChange={(e) => setBuySol(e.target.value)}
-              inputMode="decimal"
-              placeholder="0.05"
-              disabled={!tradable || isMigrated}
-            />
-            <span className="text-white/60">SOL</span>
+            {sellError && (
+              <p className="text-xs text-red-400">• {sellError}</p>
+            )}
+
+            <button
+              type="button"
+              className="mt-1 inline-flex items-center justify-center rounded-xl bg-red-500 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-red-500/40 transition hover:bg-red-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400 disabled:shadow-none"
+              onClick={doSell}
+              disabled={
+                !connected ||
+                !tradable ||
+                isMigrated ||
+                pending ||
+                isSelling ||
+                maxSellTokens <= 0 ||
+                sellSolNet <= 0
+              }
+              title={
+                isMigrated ? "Curve migrated (trading locked)" : undefined
+              }
+            >
+              {isSelling ? "Selling…" : `Sell ${(coin.symbol || "").toUpperCase()}`}
+            </button>
           </div>
-
-          <p className="text-white/70 text-sm">
-            You’ll get ~{" "}
-            <span className="font-mono">
-              {(buyTokens ?? 0).toLocaleString()}
-            </span>{" "}
-            {coin.symbol}
-          </p>
-
-          <button
-            type="button"
-            className="px-4 py-2 rounded-lg bg-green-500 text-black font-medium cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-green-500"
-            onClick={doBuy}
-            disabled={!connected || !tradable || isMigrated || pending}
-            title={
-              isMigrated ? "Curve migrated (trading locked)" : undefined
-            }
-          >
-            Buy {coin.symbol}
-          </button>
-        </div>
-
-        {/* SELL */}
-        <div className="rounded-2xl border p-6 bg-black/20 grid gap-4">
-          <h3 className="font-semibold text-lg">Sell</h3>
-
-          {!tradable && (
-            <p className="text-yellow-400 text-sm">
-              This coin has no mint configured yet, so it can’t be sold.
-            </p>
-          )}
-
-          <div className="flex items-center gap-2">
-            <input
-              className="px-3 py-2 rounded-lg bg-black/30 border w-40 disabled:opacity-50"
-              value={sellTokensInput}
-              onChange={(e) => setSellTokensInput(e.target.value)}
-              inputMode="decimal"
-              placeholder="1000"
-              disabled={!tradable || isMigrated}
-            />
-            <span className="text-white/60">{coin.symbol}</span>
-          </div>
-
-          <div className="mt-2 flex items-center gap-2 text-xs text-zinc-400">
-            <span>Quick:</span>
-            {[0.25, 0.5, 0.75, 1].map((p) => {
-              const label = `${p * 100}%`;
-              return (
-                <button
-                  key={label}
-                  type="button"
-                  disabled={!connected || isMigrated || maxSellTokens <= 0}
-                  onClick={() => {
-                    if (maxSellTokens <= 0) return;
-                    // For 100% we sell ~99.999% to avoid rounding dust
-                    const effectivePct = p === 1 ? 0.99999 : p;
-                    const tokens = maxSellTokens * effectivePct;
-                    const v = tokens
-                      .toFixed(6)
-                      .replace(/0+$/, "")
-                      .replace(/\.$/, "");
-                    setSellTokensInput(v);
-                  }}
-                  className="rounded-md border border-zinc-600 px-2 py-1 text-xs hover:bg-zinc-800 disabled:opacity-40"
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-
-          <p className="text-white/70 text-sm">
-            You’ll receive ~{" "}
-            <span className="font-mono">
-              {sellSolNet ? sellSolNet.toFixed(6) : "0"}
-            </span>{" "}
-            SOL for ~{" "}
-            <span className="font-mono">
-              {sellTokens ? sellTokens.toLocaleString() : "0"}
-            </span>{" "}
-            {coin.symbol}
-          </p>
-
-          {sellError && (
-            <p className="text-xs text-red-400">• {sellError}</p>
-          )}
-
-          <button
-            type="button"
-            className="px-4 py-2 rounded-lg bg-red-500 text-white font-medium cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-red-500"
-            onClick={doSell}
-            disabled={
-              !connected ||
-              !tradable ||
-              isMigrated ||
-              pending ||
-              isSelling ||
-              maxSellTokens <= 0 ||
-              sellSolNet <= 0
-            }
-            title={
-              isMigrated ? "Curve migrated (trading locked)" : undefined
-            }
-          >
-            {isSelling ? "Selling…" : `Sell ${coin.symbol}`}
-          </button>
-        </div>
-      </section>
+        </section>
+      </div>
     </main>
   );
 }

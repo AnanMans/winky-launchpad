@@ -1,165 +1,217 @@
-'use client';
-
-import { useEffect, useState } from 'react';
-import Link from 'next/link';
-
-type CurveType = 'linear' | 'degen' | 'random';
+// src/app/coins/page.tsx
+import Link from "next/link";
 
 type Coin = {
   id: string;
   name: string;
   symbol: string;
-  description?: string | null;
-  curve: CurveType;
+  description: string | null;
+  curve: string;
   strength: number;
-  created_at?: string;
-  mint?: string | null;
-  logo_url?: string | null;
+  created_at: string;
+  mint: string | null;
+  logo_url: string | null;
+  socials: any;
+  creator: string | null;
 };
 
-export default function CoinsPage() {
-  const [coins, setCoins] = useState<Coin[]>([]);
-  const [loading, setLoading] = useState(true);
+async function fetchCoins(): Promise<Coin[]> {
+  const baseUrl =
+    process.env.NEXT_PUBLIC_SITE_URL ||
+    (process.env.VERCEL_URL
+      ? `https://${process.env.VERCEL_URL}`
+      : "http://localhost:3000");
 
-  useEffect(() => {
-    let cancelled = false;
+  try {
+    const res = await fetch(`${baseUrl}/api/coins`, {
+      cache: "no-store",
+    });
 
-    async function load() {
-      try {
-        setLoading(true);
-        const res = await fetch('/api/coins');
-        const json = await res.json().catch(() => ({} as any));
-        if (!cancelled && res.ok && Array.isArray(json.coins)) {
-          const sorted = [...json.coins].sort((a: Coin, b: Coin) => {
-            const ca = a.created_at ? Date.parse(a.created_at) : 0;
-            const cb = b.created_at ? Date.parse(b.created_at) : 0;
-            return cb - ca;
-          });
-          setCoins(sorted);
-        }
-      } catch (e) {
-        console.error('load coins failed', e);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
+    if (!res.ok) return [];
+    const json = await res.json();
+    return (json.coins as Coin[]) ?? [];
+  } catch {
+    return [];
+  }
+}
 
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+function formatDate(iso: string | null | undefined) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export default async function CoinsPage() {
+  const coins = await fetchCoins();
 
   return (
     <div className="min-h-screen bg-[#050509] text-white">
-      <div className="mx-auto max-w-6xl px-4 py-10">
+      <div className="mx-auto max-w-6xl px-4 py-8">
         {/* Header */}
         <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <button
-              type="button"
-              onClick={() => history.back()}
-              className="text-xs text-gray-400 hover:text-white"
-            >
-              ← Back
-            </button>
-<h1 className="text-2xl font-semibold">All solcurve.fun coins</h1>
-<p className="mt-1 text-sm text-gray-400">
-  Fresh degen launches on solcurve.fun · Solana devnet. Click a coin to open its curve page.
-</p>
-
+            <div className="text-xs text-emerald-300">solcurve.fun · Coins</div>
+            <h1 className="mt-1 text-2xl font-semibold tracking-tight">
+              All curve coins on{" "}
+              <span className="bg-gradient-to-r from-emerald-400 via-cyan-300 to-purple-400 bg-clip-text text-transparent">
+                Solana devnet
+              </span>
+            </h1>
+            <p className="mt-1 text-sm text-gray-400">
+              Every coin launched through solcurve.fun. Click a card to open its
+              curve page, buy or sell on-chain.
+            </p>
           </div>
 
-          <Link
-            href="/create"
-            className="rounded-xl bg-green-500 px-4 py-2 text-sm font-semibold text-black shadow-lg shadow-green-500/30 hover:bg-green-400"
-          >
-            Create a new coin
-          </Link>
+          <div className="flex flex-col items-end gap-2 text-right text-xs">
+            <Link
+              href="/create"
+              className="rounded-xl bg-emerald-500 px-4 py-2 text-sm font-semibold text-black shadow-lg shadow-emerald-500/40 hover:bg-emerald-400"
+            >
+              + Launch a new coin
+            </Link>
+            <span className="text-[11px] text-gray-500">
+              Total coins:{" "}
+              <span className="font-semibold text-gray-200">
+                {coins.length}
+              </span>
+            </span>
+          </div>
         </div>
 
-        {/* Content */}
-        {loading && (
-          <div className="rounded-2xl border border-white/10 bg-black/40 px-4 py-4 text-sm text-gray-400">
-            Loading coins from devnet…
+        {/* Filters / legend (simple for now) */}
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 text-[11px] text-gray-400">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-white/5 px-3 py-1 text-gray-300">
+              Linear – smoother price climb
+            </span>
+            <span className="rounded-full bg-white/5 px-3 py-1 text-gray-300">
+              Degen – steeper, pumps faster
+            </span>
+            <span className="rounded-full bg-white/5 px-3 py-1 text-gray-300">
+              Random – experimental (for fun only)
+            </span>
+          </div>
+          <span className="text-[10px] text-gray-500">
+            Devnet only · not real money
+          </span>
+        </div>
+
+        {/* Empty state */}
+        {coins.length === 0 && (
+          <div className="mt-6 flex flex-col items-center justify-center rounded-3xl border border-dashed border-white/10 bg-black/40 px-6 py-16 text-center text-sm text-gray-400">
+            <div className="mb-2 text-lg font-semibold text-gray-100">
+              No coins yet on solcurve.fun
+            </div>
+            <p className="max-w-md text-xs text-gray-400">
+              Be the first to upload a meme, pick a curve and send some SOL into
+              the pool. This environment is 100% devnet – perfect for testing
+              crazy ideas safely.
+            </p>
+            <Link
+              href="/create"
+              className="mt-4 rounded-xl bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-black shadow-lg shadow-emerald-500/40 hover:bg-emerald-400"
+            >
+              Launch the first coin
+            </Link>
           </div>
         )}
 
-        {!loading && coins.length === 0 && (
-          <div className="rounded-2xl border border-dashed border-white/10 bg-black/40 px-4 py-6 text-sm text-gray-400">
-No coins yet. Drop the first degen on solcurve.fun 👀
-
-          </div>
-        )}
-
-        {!loading && coins.length > 0 && (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {/* Coins grid */}
+        {coins.length > 0 && (
+          <div className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {coins.map((coin) => (
               <Link
                 key={coin.id}
                 href={`/coin/${coin.id}`}
-                className="group flex h-full flex-col rounded-2xl border border-white/5 bg-[#0b0b11] p-4 text-xs shadow-lg shadow-black/40 hover:border-purple-400/60 hover:bg-[#11111a]"
+                className="group flex flex-col justify-between rounded-2xl border border-white/10 bg-gradient-to-br from-white/5 via-black/50 to-emerald-600/15 p-4 text-xs shadow-lg shadow-black/50 hover:border-emerald-400/70 hover:bg-emerald-500/10"
               >
-                <div className="flex items-center gap-3">
-                  <div className="relative h-10 w-10 overflow-hidden rounded-xl bg-gradient-to-br from-purple-500 to-pink-500">
-                    {coin.logo_url && (
+                {/* Top row: logo + name */}
+                <div className="flex items-start gap-3">
+                  <div className="relative h-12 w-12 overflow-hidden rounded-xl border border-white/10 bg-black/60">
+                    {coin.logo_url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
                       <img
                         src={coin.logo_url}
                         alt={coin.name}
                         className="h-full w-full object-cover"
                       />
-                    )}
-                    {!coin.logo_url && (
-                      <div className="flex h-full w-full items-center justify-center text-[11px] font-semibold">
-                        {coin.symbol?.slice(0, 3) || 'COIN'}
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-[10px] text-gray-500">
+                        NO LOGO
                       </div>
                     )}
                   </div>
 
-                  <div className="flex flex-1 flex-col">
-                    <div className="flex items-center gap-1">
-                      <span className="text-sm font-semibold text-white">
+                  <div className="flex-1 space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="truncate text-sm font-semibold text-white">
                         {coin.name}
-                      </span>
-                      <span className="text-[11px] text-gray-400">
-                        ({coin.symbol})
+                      </div>
+                      <span className="rounded-full bg-black/60 px-2 py-[2px] text-[10px] font-medium text-gray-100">
+                        {coin.symbol}
                       </span>
                     </div>
-                    {coin.mint && (
-                      <span className="mt-0.5 truncate text-[10px] text-gray-500">
-                        {coin.mint}
+
+                    <div className="flex flex-wrap items-center gap-2 text-[10px] text-gray-400">
+                      <span
+                        className={`rounded-full px-2 py-[1px] capitalize ${
+                          coin.curve === "degen"
+                            ? "bg-rose-500/20 text-rose-200"
+                            : coin.curve === "random"
+                            ? "bg-cyan-500/20 text-cyan-200"
+                            : "bg-emerald-500/20 text-emerald-200"
+                        }`}
+                      >
+                        {coin.curve} curve
                       </span>
-                    )}
+                      <span className="rounded-full bg-white/5 px-2 py-[1px] text-[10px] text-gray-300">
+                        Strength {coin.strength ?? 1}/3
+                      </span>
+                      {coin.mint && (
+                        <span className="truncate text-[10px] text-gray-500">
+                          Mint {coin.mint.slice(0, 4)}…{coin.mint.slice(-4)}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
 
-                <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-gray-500">
-                  <span className="rounded-full bg-white/5 px-2 py-0.5 capitalize">
-                    {coin.curve} curve
-                  </span>
-                  <span className="rounded-full bg-white/0 px-2 py-0.5">
-                    Strength {coin.strength}
-                  </span>
-                  {coin.created_at && (
-                    <span className="ml-auto text-[10px] text-gray-500">
-                      {new Date(coin.created_at).toLocaleDateString()}
-                    </span>
-                  )}
+                {/* Middle: short description */}
+                <div className="mt-3 line-clamp-2 text-[11px] text-gray-300">
+                  {coin.description
+                    ? coin.description
+                    : `A ${coin.curve} curve coin launched on solcurve.fun.`}
                 </div>
 
-                {coin.description && (
-                  <p className="mt-2 line-clamp-2 text-[11px] text-gray-400">
-                    {coin.description}
-                  </p>
-                )}
-
-                <div className="mt-3 flex items-center justify-between text-[11px] text-gray-400">
-                  <span className="rounded-full bg-green-500/10 px-2 py-0.5 text-[10px] text-green-300">
-                    View curve
-                  </span>
-                  <span className="text-[11px] text-purple-300 group-hover:underline">
-                    Open coin →
-                  </span>
+                {/* Bottom meta */}
+                <div className="mt-3 flex items-center justify-between text-[10px] text-gray-500">
+                  <div className="flex flex-col">
+                    <span className="text-[10px] uppercase text-gray-500">
+                      Creator
+                    </span>
+                    <span className="text-[10px] text-gray-300">
+                      {coin.creator
+                        ? `${coin.creator.slice(0, 4)}…${coin.creator.slice(
+                            -4,
+                          )}`
+                        : "Unknown"}
+                    </span>
+                  </div>
+                  <div className="flex flex-col text-right">
+                    <span className="text-[10px] uppercase text-gray-500">
+                      Launched
+                    </span>
+                    <span className="text-[10px] text-gray-300">
+                      {formatDate(coin.created_at)}
+                    </span>
+                  </div>
                 </div>
               </Link>
             ))}

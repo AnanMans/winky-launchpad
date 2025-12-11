@@ -13,7 +13,10 @@ import "@/styles/wallet-adapter.css";
 import WalletButton from "@/components/WalletButton";
 
 export default function ClientProviders({ children }: { children: ReactNode }) {
-  const endpoint = process.env.NEXT_PUBLIC_SOLANA_RPC!;
+  // Fallback to devnet if env is missing (just in case)
+  const endpoint =
+    process.env.NEXT_PUBLIC_SOLANA_RPC || "https://api.devnet.solana.com";
+
   const wallets = useMemo(
     () => [
       new PhantomWalletAdapter(),
@@ -25,11 +28,21 @@ export default function ClientProviders({ children }: { children: ReactNode }) {
 
   return (
     <ConnectionProvider endpoint={endpoint}>
-      <WalletProvider wallets={wallets} autoConnect>
+      <WalletProvider
+        wallets={wallets}
+        autoConnect={false}
+        onError={(err) => {
+          // Avoid Next.js dev overlay from noisy wallet connection errors
+          console.warn("Wallet adapter error:", err?.message || err);
+        }}
+      >
         <WalletModalProvider>
           <div className="mx-auto max-w-6xl p-4">
             <header className="flex items-center justify-between pb-4">
-              <a href="/" className="text-lg font-semibold">SolCurve.fun</a>
+              {/* Brand goes to homepage */}
+              <a href="/" className="text-lg font-semibold">
+                SolCurve.fun
+              </a>
               <WalletButton />
             </header>
             {children}
