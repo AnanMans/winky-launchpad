@@ -3,13 +3,13 @@
 // Centralized curve math for UI + API quoting.
 //
 // We model price as "tokens per 1 SOL" (higher = cheaper tokens).
-// - Linear  : smooth decrease as sold grows (now matches on-chain math)
-// - Degen   : exponential (cheap early, rips up later)
+// - Linear  : smooth decrease as sold grows (matches on-chain linear math idea)
+// - Degen   : cheaper early, then rips up much faster later
 // - Random  : casino mode, deterministic pseudo-random around a base curve
 
 export type CurveName = "linear" | "degen" | "random";
 
-// We treat the bonding-curve segment as 1M tokens (your migration threshold),
+// We treat the bonding-curve segment as 700M tokens (your migration threshold),
 // even though total supply is 1B. Above this we migrate to Raydium.
 const CURVE_RANGE_TOKENS = 700_000_000;
 
@@ -20,9 +20,10 @@ export const MIGRATION_TOKENS = CURVE_RANGE_TOKENS;
 // Starting quote: 1 SOL ≈ 1,000,000 tokens at sold = 0 (strength = 1, linear).
 const BASE_TOKENS_PER_SOL = 1_000_000;
 
-// Don’t let tokens per SOL fall below this (prevents insane prices / div by 0).
+// Don’t let tokens per SOL fall below this (prevents insane prices / div by 0),
+// or above this (prevents super crazy cheap).
 const MIN_TOKENS_PER_SOL = BASE_TOKENS_PER_SOL * 0.02; // 2% of base
-const MAX_TOKENS_PER_SOL = BASE_TOKENS_PER_SOL * 3; // 3x cheaper than base
+const MAX_TOKENS_PER_SOL = BASE_TOKENS_PER_SOL * 3;    // 3x cheaper than base
 
 function clamp(x: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, x));
@@ -49,19 +50,10 @@ function tokensPerSolForSold(
   soldTokens: number
 ): number {
   const strength = clamp(Math.floor(strengthRaw || 1), 1, 3);
-  const p = progress(soldTokens); // 0 → 1 across the 1M migration window
+  const p = progress(soldTokens); // 0 → 1 across the 700M migration window
 
   if (curve === "linear") {
-    // LINEAR (FIXED): match on-chain `tokens_per_sol_linear_raw`
-    //
-    // On-chain:
-    //   base = BASE_TOKENS_PER_SOL_RAW
-    //   min  = MIN_TOKENS_PER_SOL_RAW (= base * 0.02)
-    //   diff = base - min
-    //   p    = sold / CURVE_RANGE
-    //   tps  = base - diff * p
-    //
-    // Here we work in human units (not raw), but same formula.
+    // LINEAR: smooth straight line from BASE → MIN as sold goes from 0 → CURVE_RANGE.
     const base = BASE_TOKENS_PER_SOL;
     const min = MIN_TOKENS_PER_SOL;
     const diff = base - min;
@@ -71,12 +63,29 @@ function tokensPerSolForSold(
   }
 
   if (curve === "degen") {
-    // Degen: exponential – cheap early, rips up later.
-    const expo = 1.4 + 0.2 * (strength - 1); // ~1.4–1.8
-    // When p is small, p^expo is very small (cheap);
-    // near 1, p^expo -> 1 (expensive).
-    const factor = 1 - Math.pow(p, expo);
-    const tps = BASE_TOKENS_PER_SOL * factor;
+    // DEGEN: clearly cheaper at the start, then ramps up WAY faster.
+    //
+    // Idea:
+    // - At p = 0  → tokensPerSol ≈ BASE * cheapMul   (e.g. 1.3x–1.6x cheaper than linear)
+    // - At p = 1  → tokensPerSol ≈ MIN_TOKENS_PER_SOL
+    // - The drop from cheap → expensive is exponential in p.
+    //
+    // Strength makes it more degen:
+    //   strength 1 → small boost & softer ramp
+    //   strength 3 → big boost & very aggressive ramp
+    const expo = 1.4 + 0.25 * (strength - 1);      // ≈ 1.4, 1.65, 1.9
+    const cheapMul = 1.3 + 0.15 * (strength - 1);  // ≈ 1.3x, 1.45x, 1.6x cheaper start
+
+    const cheapBase = BASE_TOKENS_PER_SOL * cheapMul;
+
+    // norm goes 1 → 0 as p goes 0 → 1
+    const norm = 1 - Math.pow(p, expo);
+
+    // Interpolate between cheapBase (at start) and MIN (at end)
+    const tps =
+      MIN_TOKENS_PER_SOL +
+      (cheapBase - MIN_TOKENS_PER_SOL) * norm;
+
     return clamp(tps, MIN_TOKENS_PER_SOL, MAX_TOKENS_PER_SOL);
   }
 
@@ -118,7 +127,7 @@ export function quoteTokensUi(
 ): number {
   if (!Number.isFinite(amountSol) || amountSol <= 0) return 0;
   const tps = tokensPerSolForSold(curve, strength, soldTokens);
-  // Small buys compared to 1M range → using current marginal price is fine.
+  // Small buys compared to 700M range → using current marginal price is fine.
   const tokens = amountSol * tps;
   return Math.floor(tokens);
 }

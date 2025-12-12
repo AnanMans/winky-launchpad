@@ -36,23 +36,35 @@ export async function GET(_req: Request, ctx: RouteCtx) {
   }
 
   if (!coin) {
-    return NextResponse.json(
-      { error: "Coin not found for this mint" },
-      { status: 404 }
-    );
+    console.warn("[metadata.json] No coin found for mint:", mintStr);
+    // Fallback generic metadata so Phantom at least shows *something*
+    const fallback = {
+      name: "SolCurve.fun devnet coin",
+      symbol: "",
+      description: "Devnet testing coin on SolCurve.fun",
+      image: "",
+      external_url: "https://solcurve.fun",
+    };
+    return NextResponse.json(fallback, {
+      status: 200,
+      headers: {
+        "cache-control": "public, max-age=300",
+      },
+    });
   }
 
+  // This base is ONLY used for `external_url`, *not* for on-chain URI.
   const siteBase =
     process.env.NEXT_PUBLIC_SITE_URL ||
     process.env.SITE_BASE ||
-    "https://winky-launchpad.vercel.app";
+    "https://solcurve.fun";
 
-  // Make sure we always return valid strings
-  const name = coin.name || coin.symbol || "solcurve.fun Coin";
+  const name = coin.name || coin.symbol || "SolCurve.fun Coin";
   const symbol = coin.symbol || "";
   const description =
     coin.description || `${symbol || name} created on SolCurve.fun`;
-  const image = coin.logo_url || "";
+
+  const image = coin.logo_url || ""; // must be an https URL for wallets
 
   const socials = (coin.socials || {}) as any;
 
@@ -62,19 +74,18 @@ export async function GET(_req: Request, ctx: RouteCtx) {
     description,
     image,
     external_url: `${siteBase}/coin/${coin.id}`,
-    // Extras that some explorers read
     extensions: {
       website: socials.website || null,
       twitter: socials.x || socials.twitter || null,
       telegram: socials.telegram || null,
     },
-    // Optional Metaplex-style properties
     properties: {
       category: "image",
       files: image
         ? [
             {
               uri: image,
+              // wallets don’t really care about exact type; png is fine default
               type: "image/png",
             },
           ]
@@ -82,6 +93,11 @@ export async function GET(_req: Request, ctx: RouteCtx) {
     },
   };
 
-  return NextResponse.json(metadata, { status: 200 });
+  return NextResponse.json(metadata, {
+    status: 200,
+    headers: {
+      "cache-control": "public, max-age=300",
+    },
+  });
 }
 

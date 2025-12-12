@@ -13,7 +13,11 @@ export const metadata: Metadata = {
   description: "Create a Solana memecoin with Linear / Degen / Random curves",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
     <html lang="en">
       <body className={`${dmSans.className} min-h-dvh bg-black text-white`}>
