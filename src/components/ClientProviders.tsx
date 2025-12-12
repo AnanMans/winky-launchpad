@@ -30,7 +30,7 @@ export default function ClientProviders({
 
   return (
     <ConnectionProvider endpoint={endpoint}>
-      <WalletProvider wallets={wallets} autoConnect={false}>
+      <WalletProvider wallets={wallets} autoConnect={true}>
         <WalletModalProvider>
           <div className="mx-auto max-w-6xl p-4">
             <header className="flex items-center justify-between pb-4">
